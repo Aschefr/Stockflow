@@ -118,6 +118,19 @@ pub fn sync_events_network(network_path: &str) -> Result<usize, String> {
         .filter(|name| name.ends_ok())
         .collect::<Vec<String>>();
 
+    // Si le dossier réseau d'événements existe mais ne contient aucun fichier JSON,
+    // et que notre base locale contient des événements déjà appliqués, cela signifie
+    // que nous avons changé pour un dossier réseau vide. On vide le cache local.
+    let local_applied_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM applied_events",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if entries.is_empty() && local_applied_count > 0 {
+        let _ = super::db::clear_db(&conn);
+    }
+
     // Trier par nom de fichier chronologiquement
     entries.sort();
 
@@ -210,11 +223,12 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
     match event.event_type.as_str() {
         "PRODUCT_CREATE" | "PRODUCT_UPDATE" => {
             let p = event.payload.clone();
+            let initial_stock = p["initial_stock"].as_f64().unwrap_or(0.0);
             conn.execute(
                 "INSERT OR REPLACE INTO products (
                     sku, mpn, label, brand, category, sub_category, location, 
                     item_type, min_stock, price, current_stock, attributes, image_path, pdf_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), 0.0), ?, ?, ?)",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), ?), ?, ?, ?)",
                 (
                     p["sku"].as_str().unwrap_or(""),
                     p["mpn"].as_str().unwrap_or(""),
@@ -227,11 +241,17 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
                     p["minStock"].as_f64().unwrap_or(0.0),
                     p["price"].as_f64().unwrap_or(0.0),
                     p["sku"].as_str().unwrap_or(""), // pour COALESCE
+                    initial_stock, // fallback pour COALESCE
                     p["attributes"].to_string(),
                     p["image_path"].as_str().or(None),
                     p["pdf_path"].as_str().or(None),
                 )
             ).map_err(|e| e.to_string())?;
+        }
+        "PRODUCT_DELETE" => {
+            let sku = event.payload["sku"].as_str().unwrap_or("");
+            conn.execute("DELETE FROM products WHERE sku = ?", [sku]).map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM product_history WHERE sku = ?", [sku]).map_err(|e| e.to_string())?;
         }
         "STOCK_IN" => {
             let sku = event.payload["sku"].as_str().unwrap_or("");
@@ -273,11 +293,12 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
     match event.event_type.as_str() {
         "PRODUCT_CREATE" | "PRODUCT_UPDATE" => {
             let p = event.payload.clone();
+            let initial_stock = p["initial_stock"].as_f64().unwrap_or(0.0);
             tx.execute(
                 "INSERT OR REPLACE INTO products (
                     sku, mpn, label, brand, category, sub_category, location, 
                     item_type, min_stock, price, current_stock, attributes, image_path, pdf_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), 0.0), ?, ?, ?)",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), ?), ?, ?, ?)",
                 (
                     p["sku"].as_str().unwrap_or(""),
                     p["mpn"].as_str().unwrap_or(""),
@@ -290,11 +311,17 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
                     p["minStock"].as_f64().unwrap_or(0.0),
                     p["price"].as_f64().unwrap_or(0.0),
                     p["sku"].as_str().unwrap_or(""), // pour COALESCE
+                    initial_stock, // fallback pour COALESCE
                     p["attributes"].to_string(),
                     p["image_path"].as_str().or(None),
                     p["pdf_path"].as_str().or(None),
                 )
             ).map_err(|e| e.to_string())?;
+        }
+        "PRODUCT_DELETE" => {
+            let sku = event.payload["sku"].as_str().unwrap_or("");
+            tx.execute("DELETE FROM products WHERE sku = ?", [sku]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM product_history WHERE sku = ?", [sku]).map_err(|e| e.to_string())?;
         }
         "STOCK_IN" => {
             let sku = event.payload["sku"].as_str().unwrap_or("");

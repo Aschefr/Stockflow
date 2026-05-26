@@ -47,18 +47,18 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 - [x] **[DONE] Structure réseau automatique** : Création automatique des dossiers `Events`, `images` et `documents` sur le réseau.
 - [x] **[DONE] Fichier de configuration locale** : Sauvegarde des paramètres locaux dans `config.json`.
 
-#### [IN PROGRESS] P1.2 — Outil de Migration (Importation CSV & Médias)
+#### [DONE] P1.2 — Outil de Migration (Importation CSV & Médias)
 > Transition depuis l'ancien système Excel vers le nouveau moteur.
 - [x] **[DONE] Importation asynchrone du CSV** : Traitement non bloquant du fichier CSV (`DB Stock du 26_05_26 08_09.csv`).
 - [x] **[DONE] Transcodage & Nettoyage** : Encodage Windows-1252, saut intelligent des 8 lignes d'en-tête et traitement du délimiteur `;`.
 - [x] **[DONE] Génération d'événements initiaux** : Création automatique des événements JSON de stock initial pour chaque produit.
-- [ ] **[TODO] Saisie double des dossiers sources** : Ajout de deux champs de sélection distincts dans le wizard d'import :
+- [x] **[DONE] Saisie double des dossiers sources** : Ajout de deux champs de sélection distincts dans le wizard d'import :
   1. Dossier source des images produits (ex: `Images des références`)
   2. Dossier source des manuels PDF (ex: `Manuels PDF`)
-- [ ] **[TODO] Migration intelligente des fichiers** : Copie et renommage automatique des médias sur le réseau :
-  - Images renommées d'après le SKU (ex: `Z:\Stockflow_Data\images\[SKU]_1.jpg`, avec support de plusieurs images `[SKU]_1.jpg`, `[SKU]_2.jpg`, etc.).
+- [x] **[DONE] Migration intelligente des fichiers** : Copie et renommage automatique des médias sur le réseau :
+  - Images renommées d'après le SKU (ex: `Z:\Stockflow_Data\images\[SKU]_1.jpg`).
   - Documents stockés dans un sous-dossier par produit (ex: `Z:\Stockflow_Data\documents\[SKU]\[nom_original].pdf`).
-- [ ] **[TODO] Rapport de migration** : Bilan final affichant le nombre de fichiers copiés avec succès, les fichiers manquants et les erreurs.
+- [x] **[DONE] Rapport de migration** : Bilan final affichant le nombre de fichiers copiés avec succès, les fichiers manquants et les erreurs.
 
 #### [DONE] P1.3 — Gestion du Référentiel Produits
 - [x] **[DONE] Champs et attributs techniques** : Prise en charge des références MPN, SKU, Description, Marque, Catégories, dimensions, poids, prix et code RS.
@@ -73,12 +73,12 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 - [x] **[DONE] Résilience & Mode Hors-Ligne** : Bannière d'avertissement et file d'attente d'écriture locale en cas de perte de connexion réseau.
 - [x] **[DONE] Seuils d'alerte** : Notifications et indicateurs visuels (rupture de stock, seuil bas).
 
-#### [TODO] P1.5 — Stockage Document & Images sur Réseau
-- [ ] **[TODO] Chargement réseau** : Consultation directe des images et PDF depuis le lecteur réseau via Tauri.
-- [ ] **[TODO] Support multi-images** : Carrousel ou galerie pour visualiser les différentes vues d'un produit (`[SKU]_1.jpg`, `[SKU]_2.jpg`, etc.).
-- [ ] **[TODO] Ouverture PDF externe** : Lancement automatique du manuel PDF dans le lecteur de PDF par défaut du système (Edge, Adobe Reader, etc.) via la commande système native.
-- [ ] **[TODO] Miniatures au survol** : Affichage d'un popover d'aperçu de l'image de la référence au simple survol de la souris dans le tableau principal.
-- [ ] **[TODO] Téléversement drag & drop** : Ajout de fichiers images/PDF par glisser-déposer sur la fiche détaillée d'un produit existant.
+#### [DONE] P1.5 — Stockage Document & Images sur Réseau
+- [x] **[DONE] Chargement réseau** : Consultation directe des images et PDF depuis le lecteur réseau via Tauri.
+- [x] **[DONE] Support multi-images** : Carrousel ou galerie pour visualiser les différentes vues d'un produit (`[SKU]_1.jpg`, `[SKU]_2.jpg`, etc.).
+- [x] **[DONE] Ouverture PDF externe** : Lancement automatique du manuel PDF dans le lecteur de PDF par défaut du système (Edge, Adobe Reader, etc.) via la commande système native.
+- [x] **[DONE] Miniatures au survol** : Affichage d'un popover d'aperçu de l'image de la référence au simple survol de la souris dans le tableau principal.
+- [x] **[DONE] Téléversement drag & drop** : Ajout de fichiers images/PDF par glisser-déposer sur la fiche détaillée d'un produit existant.
 
 #### [DONE] P1.6 — Tableau de Bord (Dashboard)
 - Écran d'accueil synthétique affichant en un coup d'œil : nombre total de références, valeur estimée du stock, nombre d'articles sous le seuil d'alerte, derniers mouvements enregistrés.
@@ -90,22 +90,40 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 
 **Objectif :** Automatiser l'enrichissement des fiches produits via internet, directement depuis les postes clients.
 
-#### P2.1 — Recherche Intégrée (SearxNG)
+#### P2.1 — Recherche Intégrée (SearxNG) & Scraping PDF
 - Interrogation d'une instance SearxNG depuis le PC de l'utilisateur pour trouver les fiches techniques.
 - Extraction asynchrone des URLs de PDF, téléchargement automatique et dépôt sur le lecteur réseau partagé.
+- **Structure de stockage en cascade :** Les PDF sont stockés en respectant la structure de dossiers hiérarchique de la migration : `documents/MARQUE/Famille/Sous-Famille/Référence/(fichiers pdf)` (avec sanitization des caractères invalides pour Windows).
+- **Paramétrage SearxNG & Renommage :** Configuration de l'instance SearxNG et définition d'une convention de renommage des documents PDF téléchargés dans les paramètres (ex: `{SKU}_datasheet.pdf` ou `{SKU}_{Brand}_{MPN}.pdf`).
+- **Modal de validation PDF :** Lors d'un scraping au cas par cas, ouverture d'un modal de validation montrant les PDF trouvés pour permettre à l'utilisateur de choisir et de valider celui à enregistrer.
+- **Suppression de PDF :** Possibilité de supprimer une documentation PDF associée à une référence, entraînant sa suppression physique sur le lecteur réseau partagé.
 
 #### P2.2 — Scraping des Prix & Anti-Redondance
-- Veille tarifaire en tâche de fond (ex: RS Components).
+- Veille tarifaire sur demande utilisateur (ex: RS Components).
 - **Contrôle de concurrence :** Pour éviter que plusieurs postes ne lancent le scraping du même produit en même temps, vérification d'un fichier `last_scrape_lock.json`. L'information mise à jour est ensuite publiée comme un événement JSON.
 - **Résilience aux Crashs (Locks fantômes) :** Si un poste plante pendant un scraping, le fichier lock reste sur le réseau. L'application détectera un verrou anormalement long (> 5 minutes), affichera un avertissement visuel, et permettra à l'utilisateur de "Forcer le déverrouillage" d'un simple clic pour reprendre la main.
+- Mesures anti-spam : Limiter le nombre de requêtes par seconde et par utilisateur.
 
 #### P2.3 — Gestion Dépôts vs Fournisseurs
 - Distinction sémantique et logique entre les **Dépôts Physiques** internes (Usine, Atelier) et les **Fournisseurs / VPC** externes.
-- Liaison des codes catalogues (ex: Code RS) avec les fiches fournisseurs pour faciliter les achats.
+- **Gestion des codes fournisseurs (ex: Code RS, Code VPC) :** Identification d'un code article spécifique chez un fournisseur donné.
+- **Colonne "Code VPC" dans le tableau principal :** Ajout d'une colonne dédiée dans la grille principale pour visualiser rapidement ces codes.
+- **Détails SKU :** Affichage des informations de code fournisseur dans le panneau latéral de détails du SKU.
+- **Formulaire SKU (Modal) :** Ajout de nouveaux champs dans le modal de création/édition pour saisir et associer les codes fournisseurs.
+- **Page Paramètres (Gestion des sites de VPC) :** Interface permettant d'ajouter, modifier ou supprimer des sites de VPC (fournisseurs) dans le système.
 
 #### P2.4 — Scraping Images Automatique
-- Téléchargement et standardisation automatique des illustrations produits (`[SKU]_[Source]_[Date].jpg`).
+- Téléchargement et standardisation automatique des illustrations produits.
+- **Convention de renommage paramétrable :** Format de renommage des images personnalisable dans les paramètres (ex: `{SKU}_{Index}.jpg` ou `{SKU}_{Source}_{Date}.jpg`).
+- **Modal de validation d'images :** Lors d'un scraping au cas par cas, affichage d'un modal pour valider, réordonner ou sélectionner les images trouvées avant leur dépôt final.
+- **Suppression d'images :** Possibilité de supprimer individuellement une ou plusieurs images associées à une référence depuis le carrousel/galerie (avec renommage/réindexation automatique des fichiers restants si nécessaire).
 - Génération de miniatures gérée localement par le PC client avant l'écriture réseau pour des performances d'affichage optimales.
+
+#### P2.5 — Scraping par Lot (Images & PDF)
+- **Sélection par case à cocher :** Ajout de cases à cocher dans le tableau principal pour sélectionner une liste de références.
+- **Lancement groupé :** Possibilité de lancer le scraping (images et/ou PDF) sur l'ensemble de la sélection.
+- **Progression aléatoire :** La file d'attente traite la sélection dans un ordre aléatoire (randomisé) pour éviter les requêtes successives trop prévisibles sur les mêmes serveurs/marques.
+- **Indicateur de progression :** Barre de progression globale avec statistiques de réussite/échec de la tâche de lot.
 
 ---
 
@@ -149,3 +167,18 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 #### P4.4 — Mise à Jour
 - **Avec internet :** Au démarrage, l'application interroge l'API GitHub Releases pour vérifier si une version plus récente est disponible. Si oui, notification non-intrusive avec changelog et bouton "Télécharger la mise à jour".
 - **Sans internet :** Le remplacement manuel du `.exe` par la nouvelle version suffit. Puisque toutes les données vivent sur le lecteur réseau et que la configuration locale est dans un fichier `config.json` séparé, aucune migration n'est nécessaire.
+
+---
+
+## 5. Compilation & Automatisation
+
+Pour faciliter la génération et la distribution des binaires sur le lecteur réseau partagé sans manipulations manuelles propices aux erreurs, le projet intègre un script de build automatisé :
+- **Script :** [build.ps1](file:///d:/Code%20Projects/Stockflow/build.ps1)
+- **Fonctionnement :**
+  1. Lance la compilation de production (`npm run tauri build`) qui compile le frontend React puis le backend Rust.
+  2. Crée ou met à jour le dossier de distribution `release_bin/`.
+  3. Copie et renomme automatiquement les livrables générés :
+     - Binaire portable autonome -> `release_bin/StockFlow.exe`
+     - Installateur NSIS -> `release_bin/StockFlow_Setup_x64.exe`
+     - Installateur MSI -> `release_bin/StockFlow_x64.msi`
+

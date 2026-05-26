@@ -81,6 +81,29 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub fn sanitize_sku(sku: &str) -> String {
+    sku.trim()
+        .replace(" ", "")
+        .replace("/", "-")
+        .replace("\\", "-")
+        .replace(":", "-")
+        .replace("*", "-")
+        .replace("?", "-")
+        .replace("\"", "-")
+        .replace("<", "-")
+        .replace(">", "-")
+        .replace("|", "-")
+        .to_uppercase()
+}
+
+pub fn clear_db(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM products", [])?;
+    conn.execute("DELETE FROM applied_events", [])?;
+    conn.execute("DELETE FROM product_history", [])?;
+    Ok(())
+}
+
+
 pub fn get_all_products(conn: &Connection) -> Result<Vec<Product>> {
     let mut stmt = conn.prepare(
         "SELECT sku, mpn, label, brand, category, sub_category, location, 
@@ -93,15 +116,15 @@ pub fn get_all_products(conn: &Connection) -> Result<Vec<Product>> {
             sku: row.get(0)?,
             mpn: row.get(1)?,
             label: row.get(2)?,
-            brand: row.get(3)?,
-            category: row.get(4)?,
-            sub_category: row.get(5)?,
-            location: row.get(6)?,
+            brand: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            category: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            sub_category: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            location: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
             item_type: row.get(7)?,
             min_stock: row.get(8)?,
             price: row.get(9)?,
             current_stock: row.get(10)?,
-            attributes: row.get(11)?,
+            attributes: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
             image_path: row.get(12)?,
             pdf_path: row.get(13)?,
         })

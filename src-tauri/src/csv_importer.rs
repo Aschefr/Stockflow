@@ -1,6 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::fs;
 use serde_json::json;
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ImportReport {
+    pub success: usize,
+    pub missing_files: usize,
+    pub errors: Vec<String>,
+}
 
 pub fn decode_win1252(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| {
@@ -36,8 +44,9 @@ pub fn import_csv_file(
     csv_path: &str,
     network_path: &str,
     trigramme: &str,
-    media_dir: Option<&str>
-) -> Result<usize, String> {
+    images_dir: Option<&str>,
+    pdf_dir: Option<&str>
+) -> Result<ImportReport, String> {
     let bytes = fs::read(csv_path)
         .map_err(|e| format!("Impossible de lire le fichier CSV : {}", e))?;
 
@@ -49,7 +58,14 @@ pub fn import_csv_file(
         lines.next();
     }
 
-    let mut import_count = 0;
+    let mut report = ImportReport {
+        success: 0,
+        missing_files: 0,
+        errors: Vec::new(),
+    };
+
+    let db_path = super::events::get_db_path().ok_or("Base de données cache introuvable")?;
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
 
     for line in lines {
         if line.trim().is_empty() {
@@ -71,7 +87,29 @@ pub fn import_csv_file(
         }
 
         // Nettoyer la référence pour le SKU
-        let sku = ref_str.replace(" ", "").replace("/", "-").to_uppercase();
+        let sku = super::db::sanitize_sku(ref_str);
+
+        // Récupérer le produit s'il existe déjà
+        let existing: Option<super::db::Product> = conn.query_row(
+            "SELECT sku, mpn, label, brand, category, sub_category, location, item_type, min_stock, price, current_stock, attributes, image_path, pdf_path FROM products WHERE sku = ?",
+            [&sku],
+            |row| Ok(super::db::Product {
+                sku: row.get(0)?,
+                mpn: row.get(1)?,
+                label: row.get(2)?,
+                brand: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                category: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                sub_category: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                location: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                item_type: row.get(7)?,
+                min_stock: row.get(8)?,
+                price: row.get(9)?,
+                current_stock: row.get(10)?,
+                attributes: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                image_path: row.get(12)?,
+                pdf_path: row.get(13)?,
+            })
+        ).ok();
 
         let famille = parts.get(3).copied().unwrap_or("").trim().to_string();
         let sous_famille = parts.get(4).copied().unwrap_or("").trim().to_string();
@@ -86,87 +124,239 @@ pub fn import_csv_file(
         let poids = parts.get(13).copied().unwrap_or("").trim().to_string();
         let code_rs = parts.get(14).copied().unwrap_or("").trim().to_string();
         
-        let prix_str = parts.get(15).copied().unwrap_or("0").trim().replace(",", ".");
-        let prix: f64 = prix_str.parse().unwrap_or(0.0);
+        let raw_prix = parts.get(15).copied().unwrap_or("0").trim();
+        let prix_str = raw_prix.replace(",", ".");
+        let prix_clean: String = prix_str.chars()
+            .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+            .collect();
+        let prix: f64 = prix_clean.parse().unwrap_or(0.0);
         let qte: f64 = qte_str.replace(",", ".").parse().unwrap_or(0.0);
 
-        // Récupérer les chemins relatifs des images/PDF s'ils existent dans les colonnes (indices ~17 et ~18 ou plus)
-        // D'après le format : PDF et Image sont à la fin.
-        // On va les chercher intelligemment à la fin ou par index :
-        let raw_pdf = parts.get(17).copied().unwrap_or("").trim();
-        let raw_img = parts.get(18).copied().unwrap_or("").trim();
+        // Récupérer les chemins relatifs des images/PDF s'ils existent dans les colonnes 23 et 24 (index 23 et 24)
+        let raw_pdf = parts.get(23).copied().unwrap_or("").trim();
+        let raw_img = parts.get(24).copied().unwrap_or("").trim();
 
-        let mut image_path = None;
-        let mut pdf_path = None;
+        let mut image_path = existing.as_ref().and_then(|p| p.image_path.clone());
+        let mut pdf_path = existing.as_ref().and_then(|p| p.pdf_path.clone());
 
-        // Copie physique des fichiers médias si un dossier source a été fourni
-        if let Some(src_media) = media_dir {
-            let src_media_path = Path::new(src_media);
-            
-            if !raw_img.is_empty() {
-                let src_img_file = src_media_path.join(raw_img);
-                if src_img_file.exists() {
-                    let ext = src_img_file.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
-                    let net_img_name = format!("{}.{}", sku.to_lowercase(), ext);
-                    let dest_img_path = Path::new(network_path).join("images").join(&net_img_name);
-                    if fs::copy(&src_img_file, &dest_img_path).is_ok() {
+        // Copie physique des fichiers médias
+        if raw_img.is_empty() {
+            image_path = None;
+        } else if let Some(src_images) = images_dir {
+            let src_media_path = Path::new(src_images);
+            let src_img_file = resolve_source_path(src_media_path, raw_img);
+            if src_img_file.exists() {
+                let ext = src_img_file.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+                let net_img_name = format!("{}_1.{}", sku.to_uppercase(), ext);
+                let dest_img_path = Path::new(network_path).join("images").join(&net_img_name);
+                match fs::copy(&src_img_file, &dest_img_path) {
+                    Ok(_) => {
                         image_path = Some(format!("images/{}", net_img_name));
                     }
-                }
-            }
-
-            if !raw_pdf.is_empty() {
-                let src_pdf_file = src_media_path.join(raw_pdf);
-                if src_pdf_file.exists() {
-                    let ext = src_pdf_file.extension().and_then(|e| e.to_str()).unwrap_or("pdf");
-                    let net_pdf_name = format!("{}.{}", sku.to_lowercase(), ext);
-                    let dest_pdf_path = Path::new(network_path).join("documents").join(&net_pdf_name);
-                    if fs::copy(&src_pdf_file, &dest_pdf_path).is_ok() {
-                        pdf_path = Some(format!("documents/{}", net_pdf_name));
+                    Err(e) => {
+                        report.errors.push(format!("Échec copie image pour {} : {}", sku, e));
                     }
+                }
+            } else if image_path.is_none() {
+                report.missing_files += 1;
+            }
+        }
+
+        if raw_pdf.is_empty() {
+            pdf_path = None;
+        } else if let Some(src_pdfs) = pdf_dir {
+            let src_pdf_path = Path::new(src_pdfs);
+            let src_pdf_file = resolve_source_path(src_pdf_path, raw_pdf);
+            if src_pdf_file.exists() {
+                let clean_brand = sanitize_folder_name(&marque, "INCONNUE");
+                let clean_cat = sanitize_folder_name(&famille, "SANS_FAMILLE");
+                let clean_subcat = sanitize_folder_name(&sous_famille, "SANS_SOUS_FAMILLE");
+
+                let dest_pdf_dir = Path::new(network_path)
+                    .join("documents")
+                    .join(&clean_brand)
+                    .join(&clean_cat)
+                    .join(&clean_subcat)
+                    .join(&sku);
+
+                let _ = fs::create_dir_all(&dest_pdf_dir); // S'assurer que le sous-dossier existe
+                
+                if src_pdf_file.is_dir() {
+                    let mut success_copy = false;
+                    if let Ok(entries) = fs::read_dir(&src_pdf_file) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_file() {
+                                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                                    let dest_path = dest_pdf_dir.join(file_name);
+                                    if fs::copy(&path, &dest_path).is_ok() {
+                                        success_copy = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if success_copy {
+                        pdf_path = Some(format!("documents/{}/{}/{}/{}", clean_brand, clean_cat, clean_subcat, sku));
+                    } else {
+                        report.errors.push(format!("Aucun fichier PDF copié depuis le dossier pour {}", sku));
+                    }
+                } else {
+                    let file_name = src_pdf_file.file_name().and_then(|n| n.to_str()).unwrap_or("manuel.pdf");
+                    let dest_pdf_path = dest_pdf_dir.join(file_name);
+                    match fs::copy(&src_pdf_file, &dest_pdf_path) {
+                        Ok(_) => {
+                            pdf_path = Some(format!("documents/{}/{}/{}/{}/{}", clean_brand, clean_cat, clean_subcat, sku, file_name));
+                        }
+                        Err(e) => {
+                            report.errors.push(format!("Échec copie PDF pour {} : {}", sku, e));
+                        }
+                    }
+                }
+            } else if pdf_path.is_none() {
+                report.missing_files += 1;
+            }
+        }
+
+        // Déterminer s'il y a des modifications à apporter par rapport à la DB locale
+        let mut details_changed = true;
+        let mut stock_diff = qte;
+
+        if let Some(ref prod) = existing {
+            details_changed = prod.mpn != ref_str
+                || prod.label != desc_str
+                || prod.brand != marque
+                || prod.category != famille
+                || prod.sub_category != sous_famille
+                || prod.location != emplacement
+                || (prod.price - prix).abs() > 0.001
+                || prod.image_path != image_path
+                || prod.pdf_path != pdf_path;
+            
+            stock_diff = qte - prod.current_stock;
+        }
+
+        // Si rien n'a changé, on passe simplement à la suite
+        if existing.is_some() && !details_changed && stock_diff.abs() <= 0.001 {
+            report.success += 1;
+            continue;
+        }
+
+        let mut event_written = false;
+
+        // Créer l'événement de création/mise à jour de produit si les détails ont changé ou si le produit n'existe pas
+        if details_changed || existing.is_none() {
+            let create_payload = json!({
+                "sku": sku,
+                "mpn": ref_str.to_string(),
+                "label": desc_str.to_string(),
+                "brand": marque,
+                "category": famille,
+                "subCategory": sous_famille,
+                "location": emplacement,
+                "type": "QUANTITATIVE",
+                "minStock": 0.0,
+                "price": prix,
+                "image_path": image_path,
+                "pdf_path": pdf_path,
+                "initial_stock": qte,
+                "attributes": {
+                    "tension": tension,
+                    "largeur": largeur,
+                    "hauteur": hauteur,
+                    "profondeur": profondeur,
+                    "poids": poids,
+                    "codeRS": code_rs,
+                    "notes": notes
+                }
+            });
+
+            if super::events::write_event_file(network_path, "PRODUCT_CREATE", trigramme, create_payload).is_ok() {
+                event_written = true;
+            } else {
+                report.errors.push(format!("Impossible d'écrire l'événement de création pour {}", sku));
+            }
+        }
+
+        // Écrire un ajustement de stock uniquement pour les produits existants dont la quantité a changé
+        if existing.is_some() && stock_diff.abs() > 0.001 {
+            if stock_diff > 0.0 {
+                let stock_payload = json!({
+                    "sku": sku,
+                    "qty": stock_diff,
+                    "note": "Ajustement import (entrée)"
+                });
+                if super::events::write_event_file(network_path, "STOCK_IN", trigramme, stock_payload).is_ok() {
+                    event_written = true;
+                }
+            } else {
+                let stock_payload = json!({
+                    "sku": sku,
+                    "qty": -stock_diff,
+                    "note": "Ajustement import (sortie)"
+                });
+                if super::events::write_event_file(network_path, "STOCK_OUT", trigramme, stock_payload).is_ok() {
+                    event_written = true;
                 }
             }
         }
 
-        // Créer l'événement de création de produit
-        let create_payload = json!({
-            "sku": sku,
-            "mpn": ref_str.to_string(),
-            "label": desc_str.to_string(),
-            "brand": marque,
-            "category": famille,
-            "subCategory": sous_famille,
-            "location": emplacement,
-            "type": "QUANTITATIVE",
-            "minStock": 0.0,
-            "price": prix,
-            "image_path": image_path,
-            "pdf_path": pdf_path,
-            "attributes": {
-                "tension": tension,
-                "largeur": largeur,
-                "hauteur": hauteur,
-                "profondeur": profondeur,
-                "poids": poids,
-                "codeRS": code_rs,
-                "notes": notes
-            }
-        });
-
-        if super::events::write_event_file(network_path, "PRODUCT_CREATE", trigramme, create_payload).is_ok() {
-            import_count += 1;
-            
-            // Si la quantité de stock initial est supérieure à 0, on écrit aussi un STOCK_IN
-            if qte > 0.0 {
-                let stock_payload = json!({
-                    "sku": sku,
-                    "qty": qte,
-                    "note": "Import initial de stock"
-                });
-                let _ = super::events::write_event_file(network_path, "STOCK_IN", trigramme, stock_payload);
-            }
+        if event_written || existing.is_some() {
+            report.success += 1;
         }
     }
 
-    Ok(import_count)
+    Ok(report)
 }
+
+fn resolve_source_path(base_dir: &Path, relative_path: &str) -> std::path::PathBuf {
+    let clean_path = relative_path.replace("\\", "/");
+    let joined = base_dir.join(&clean_path);
+    if joined.exists() {
+        return joined;
+    }
+    
+    // Découper le chemin relatif
+    let parts: Vec<&str> = clean_path.split('/').collect();
+    if parts.len() > 1 {
+        // Tenter de retirer le premier dossier si son nom correspond au dossier de base sélectionné
+        if let Some(base_folder_name) = base_dir.file_name().and_then(|n| n.to_str()) {
+            if parts[0].to_lowercase() == base_folder_name.to_lowercase() {
+                let sub_path = parts[1..].join("/");
+                let try_path = base_dir.join(&sub_path);
+                if try_path.exists() {
+                    return try_path;
+                }
+            }
+        }
+        
+        // Tenter avec juste le nom du fichier (à plat dans le dossier de base)
+        if let Some(file_name) = parts.last() {
+            let try_path = base_dir.join(file_name);
+            if try_path.exists() {
+                return try_path;
+            }
+        }
+    }
+    
+    joined
+}
+
+fn sanitize_folder_name(name: &str, fallback: &str) -> String {
+    let clean = name.trim()
+        .replace("/", "-")
+        .replace("\\", "-")
+        .replace(":", "-")
+        .replace("*", "-")
+        .replace("?", "-")
+        .replace("\"", "-")
+        .replace("<", "-")
+        .replace(">", "-")
+        .replace("|", "-");
+    if clean.is_empty() {
+        fallback.to_string()
+    } else {
+        clean
+    }
+}
+

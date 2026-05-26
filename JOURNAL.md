@@ -50,3 +50,74 @@ Ce document répertorie l'historique des modifications apportées au codebase de
 - **Documentation & Planification :**
   - Rédaction et validation du plan d'implémentation de fin de Phase 1 (`implementation_plan.md`) traitant des modules de copie des fichiers médias et de leur affichage/survol dans l'UI.
   - Mise à jour détaillée de `PLAN_AMELIORE.md` avec des listes de tâches (`[x] [DONE]`, `[ ] [TODO]`) ultra-précises pour le suivi de la fin de Phase 1.
+- **Implémentation & Finalisation (Phase 1 Complète) :**
+  - **Mise à jour de l'assistant d'import :** Intégration de la double sélection des dossiers sources pour les images produits et les notices PDF. Restitution finale d'un bilan de migration détaillé (réussites, fichiers manquants, erreurs).
+  - **Gestion Réseau & Affichage :** Utilisation sécurisée de `convertFileSrc` (Tauri v2) pour servir les images du réseau. Popover d'aperçu d'image au survol de la grille d'inventaire.
+  - **Extension Fiche Produit (Médias) :**
+    - Carrousel interactif multi-images supportant les vues séquentielles `[SKU]_1.jpg`, `[SKU]_2.jpg`, etc. via une numérisation dynamique du dossier réseau en Rust.
+    - Liste des notices PDF disponibles associées à la référence avec ouverture externe instantanée (Edge/lecteur par défaut) par appel natif.
+    - Zone de Drag & Drop pour ajouter d'autres images ou documentations PDF directement depuis la fiche en copiant à chaud les fichiers sur le lecteur réseau.
+- **Outils & Automatisation :**
+  - Création du script de build et déploiement automatisé `build.ps1` à la racine pour compiler l'application Tauri v2 et distribuer les livrables renommés dans `release_bin/`.
+  - Intégration dans le script de build d'une étape d'arrêt forcé des instances de `StockFlow` en cours pour libérer les verrous d'écriture sur l'exécutable portable.
+- **Amélioration Ergonomie & Robustesse UI/UX :**
+  - Remplacement de la zone trigramme/chemin réseau de l'en-tête par un bloc cliquable (`header-clickable` avec transition de survol CSS) pour ré-ouvrir l'assistant et éditer la configuration (trigramme et chemin réseau) à chaud.
+  - Ajout d'un bouton d'annulation dans l'assistant de configuration si l'application possède déjà une configuration existante.
+  - Implémentation du nettoyage automatique du cache SQLite local (`db::clear_db` sur `products`, `product_history`, `applied_events`) en cas de changement de chemin du dossier réseau, permettant la reconstruction immédiate et saine des données ou la remise à zéro si le dossier cible est vide.
+  - Ajout d'une détection dans `sync_events_network` pour vider automatiquement le cache local si le dossier d'événements réseau en ligne est vide de tout fichier, assurant la cohérence avec le dossier réseau.
+  - Implémentation d'un algorithme robuste de résolution de chemin (`resolve_source_path`) dans `csv_importer.rs` capable de trouver les fichiers médias en résolvant les duplications de dossiers (ex: si l'utilisateur sélectionne le dossier `Images des références` et que le chemin CSV commence aussi par `Images des références\`), ou en cherchant à plat (basename) en cas d'organisation différente.
+  - Résolution de l'erreur `os error 5` (Accès refusé) lors de la copie des notices en détectant si le chemin source du PDF est un dossier, et en copiant récursivement l'ensemble des fichiers PDF qu'il contient (support des références possédant un dossier de notices au lieu d'un seul fichier).
+  - Ajout de la mémorisation des chemins de migration (fichier CSV, dossier images et dossier notices) via `localStorage` dans l'interface React, évitant à l'utilisateur de devoir re-sélectionner ses répertoires locaux à chaque ouverture de l'onglet d'importation.
+  - Implémentation d'une fonction de sanitization de SKU (`db::sanitize_sku`) pour remplacer les caractères interdits sous Windows dans les noms de fichiers (ex: `:`, `?`, `*`, `\`, `/`, etc.) par des tirets `-`, résolvant ainsi les échecs de copie d'images et d'écriture d'événements JSON sur le lecteur réseau (erreur système 123).
+  - Génération d'un logo moderne (StockFlow) au format PNG. Intégration de l'image de marque dans l'assistant de configuration, dans l'en-tête de l'interface React, et régénération complète de l'ensemble des icônes d'application Tauri pour le bureau Windows (fichiers `.ico`, `.png`, `.icns` etc.) intégrées à la compilation finale de l'exécutable.
+  - Intégration du plugin officiel de gestion de fenêtres Tauri `tauri-plugin-window-state` afin de mémoriser et restaurer automatiquement la taille, la position et l'état de maximisation de l'application entre ses ouvertures et fermetures.
+  - Correction de l'ouverture système des fichiers PDF en convertissant proprement les séparateurs de chemins (remplacement des slashes `/` par des backslashes Windows `\`), résolvant le blocage de l'ouverture externe par l'OS.
+  - Résolution des blocages de sécurité Tauri v2 (ACL) en autorisant explicitement l'accès réseau et disque local (`**`) pour le protocole d'assets locaux (`assetProtocol` dans `tauri.conf.json`) et pour la commande d'ouverture système (`opener:allow-open-path` dans `capabilities/default.json`), rétablissant ainsi l'affichage des images locales et le fonctionnement des boutons de notices PDF.
+- **Tests & Validation :**
+  - Mise en place d'un script de test E2E complet en JavaScript (`test_e2e.cjs`) utilisant Playwright pour piloter l'application compilée `StockFlow.exe` via le port CDP (Chrome DevTools Protocol) WebView2.
+  - Automatisation du scénario complet de test : configuration initiale, onglet migration, importation de 776 références à partir des vrais dossiers d'images et PDF, validation du bilan de migration, recherche d'un produit spécifique, contrôle de l'image et du carrousel de médias, et déclenchement de l'ouverture du PDF.
+  - Validation du test réussie à 100% avec 0 erreur d'import restante (les SKUs contenant des caractères spéciaux comme `:` ou `?` sont désormais correctement nettoyés).
+- **Améliorations & Corrections de Sécurité / ACL (Tauri v2) :**
+  - Correction des blocages d'accès aux fichiers locaux et réseau partagés en élargissant les scopes globaux pour tous les lecteurs réseau et disques physiques Windows (lettres de lecteur de `A:` à `Z:` et chemins UNC `\\\\*\\**`).
+  - Configuration de la portée (`scope`) de l'asset protocol en format d'objet d'autorisation explicite dans `tauri.conf.json`.
+  - Résolution des erreurs d'accès `Command plugin:opener|open_path not allowed by ACL` dans `capabilities/default.json` en listant toutes les lettres de lecteur dans le scope de `opener:allow-open-path`.
+  - Remplacement de la méthode de chargement par protocole direct `file:///` par la fonction utilitaire Tauri `convertFileSrc` dans le gestionnaire de survol des miniatures d'images (`handleImageHover`), corrigeant ainsi l'absence d'images dans les info-bulles de la spreadsheet.
+  - Re-compilation de l'exécutable et validation complète réussie à 100% via le test E2E Playwright automatisé.
+- **Filtres de la Liste d'Inventaire :**
+  - Ajout du filtre dynamique "Sous-Famille" dans la barre d'outils de l'onglet Inventaire.
+  - La liste des sous-familles s'actualise en temps réel en fonction de la "Famille" sélectionnée (affiche uniquement les sous-familles existantes pour la famille en cours, ou toutes si "Toutes" est choisi).
+  - Réinitialisation automatique du filtre "Sous-Famille" sur "Toutes" lors du changement de "Famille".
+- **Gestion Avancée des Colonnes de la Spreadsheet :**
+  - Implémentation d'un système de redimensionnement de colonnes par glisser-déposer de poignées de redimensionnement CSS (`.column-resize-handle`) avec un calcul dynamique de la largeur du tableau (`tableLayout: "fixed"`).
+  - Sauvegarde et persistance automatique des largeurs de colonnes choisies par l'utilisateur dans le stockage local du navigateur (`localStorage`), préservant la disposition entre les lancements de l'application.
+  - Ajout d'un menu déroulant de configuration "⚙️ Colonnes" dans la barre d'outils de l'inventaire permettant d'afficher ou masquer à la demande n'importe laquelle des 10 colonnes de données du tableau.
+- **Fusion Intelligent d'Import & Maintenance Réseau :**
+  - Modification de l'outil de migration CSV pour vérifier si le produit existe déjà localement (SQLite cache) et comparer ses métadonnées et sa quantité de stock :
+    - Si les métadonnées et le niveau de stock sont identiques, la ligne est passée sans générer de fichier événement JSON inutile, évitant la multiplication par milliers des fichiers sur le réseau.
+    - Si les métadonnées diffèrent, un événement de création/mise à jour est généré.
+    - Si le stock diffère, un événement d'ajustement (`STOCK_IN` ou `STOCK_OUT` avec la différence relative) est émis pour faire correspondre le stock cible, préservant ainsi la cohérence sans recréer le stock initial à chaque fois.
+  - Implémentation d'une fonction de compaction de l'Event Store (`compact_network_events`) qui supprime tous les anciens fichiers JSON et en génère un ensemble minimal consolidé (1 ou 2 fichiers par référence active : `PRODUCT_CREATE` et `STOCK_IN` si stock > 0), puis recalibre le cache local en ré-indexant proprement les événements consolidés.
+  - Implémentation d'un outil de nettoyage réseau des médias (`clean_network_media`) qui supprime automatiquement toutes les images du dossier `images/` et tous les répertoires PDF de `documents/` qui ne correspondent à aucun SKU actif de la base de données.
+  - Intégration de deux boutons d'action ("Compacter les Événements" et "Nettoyer Médias") dans l'onglet Migration de l'interface avec demandes de confirmation de sécurité natives.
+- **Cheminement Structuré des Documents & Icone Windows :**
+  - Refactorisation de l'importateur de documents dans `csv_importer.rs` pour classer les PDF selon la structure hiérarchique demandée : `documents\MARQUE\Famille\Sous-Famille\Référence\(fichiers pdf)`. Les noms de sous-dossiers sont automatiquement nettoyés de tout caractère invalide sous Windows.
+  - Mise à jour de la fonction `list_sku_pdfs` dans `lib.rs` pour qu'elle interroge le chemin de document réel stocké en base de données et gère dynamiquement la nouvelle arborescence au lieu d'utiliser un chemin fixe.
+  - Ajout de la configuration `"windows": { "nsis": { "installerIcon": "icons/icon.ico" } }` dans `tauri.conf.json` pour intégrer l'icône personnalisée de l'application dans l'installateur d'exécutable Windows.
+- **Correction Import des Prix & En-tête Sticky de la Spreadsheet :**
+  - Amélioration de l'importateur de prix dans `csv_importer.rs` : nettoyage dynamique des chaînes de caractères (filtre de tous les caractères non numériques, espaces de séparation de milliers, et symbole monétaire `€` avant parsing), résolvant l'import erroné ou nul des prix.
+  - Résolution du problème d'en-tête de tableau non figé lors du défilement dans `src/App.css` : changement de la directive `border-collapse: collapse` par `separate` avec `border-spacing: 0` sur `table.spreadsheet`. Cette modification garantit le bon fonctionnement et la fluidité de la propriété `position: sticky; top: 0` sur les éléments `th` dans tous les moteurs de rendu WebView.
+  - Consolidation de la directive sticky en appliquant la propriété `position: sticky; top: 0; z-index: 10;` de manière redondante sur `thead`, `thead tr` et `th` pour forcer le figeage complet de l'en-tête de la spreadsheet dans toutes les versions de WebView2.
+- **Déduplication & Consolidation des Événements d'Importation :**
+  - Résolution des échecs silencieux lors de la récupération des produits existants : correction de l'extraction des données SQLite dans `db.rs` et `csv_importer.rs` en récupérant de manière robuste les champs potentiellement `NULL` (`brand`, `category`, `sub_category`, `location`, `attributes`) via `Option<String>` avec repli sur une chaîne vide (`unwrap_or_default()`).
+  - Correction de l'initialisation de `image_path` et `pdf_path` dans `csv_importer.rs` : ils héritent désormais de leurs valeurs déjà stockées en base de données au lieu d'être écrasés à `None` si l'importateur ne trouve pas de nouveau fichier source ou si le dossier média n'est pas spécifié.
+  - Validation du fonctionnement : une seconde importation sur des données inchangées génère désormais exactement **0 nouveau fichier d'événement** (contre ~776 auparavant).
+- **Gestion Modale de l'Ajout de SKU & Autocomplétion :**
+  - Retrait de l'onglet fixe "Ajouter une référence" au profit d'un bouton `➕ Ajouter un SKU` positionné dans la barre d'outils de l'inventaire.
+  - Intégration de la création de SKU dans une fenêtre modale moderne.
+  - Ajout d'autocomplétion sur **tous les champs** de saisie (SKU, MPN, Désignation, Marque, Famille, Sous-famille, Emplacement, Seuil d'alerte, Prix) à l'aide d'éléments `<datalist>` natifs dynamiquement générés à partir des valeurs uniques existant déjà dans l'inventaire.
+- **Modification & Suppression de SKU :**
+  - Ajout d'un bouton `✏️ Modifier` dans le volet de détails du produit, ouvrant une modale pré-remplie avec autocomplétion pour mettre à jour les informations de la référence (ce qui émet un événement `PRODUCT_CREATE` / `PRODUCT_UPDATE` consolidé).
+  - Ajout d'un bouton `🗑️ Supprimer` demandant confirmation et générant un nouvel événement `PRODUCT_DELETE` qui retire le SKU et son historique de mouvements de la base locale et réseau.
+- **Filtrage Dynamique des Sous-Familles en Modale :**
+  - Implémentation du filtrage de l'autocomplétion des sous-familles en fonction de la famille sélectionnée, que ce soit dans la modale d'ajout ou dans la modale de modification (les datalists `add-subcategories-datalist` et `edit-subcategories-datalist` sont recalculées à la volée), respectant la règle globale : Famille -> Sous-famille.
+
