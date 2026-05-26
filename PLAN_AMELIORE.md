@@ -40,28 +40,28 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 
 **Objectif :** Mettre en place le moteur Event-Sourcing, l'application portable, et la gestion du référentiel produit.
 
-#### P1.1 — Configuration Initiale (Premier Lancement)
+#### [DONE] P1.1 — Configuration Initiale (Premier Lancement)
 > L'application étant par poste et sans comptes utilisateurs, la configuration se limite à la connexion au réseau.
 - Au premier lancement, l'interface invite l'utilisateur à **localiser le dossier réseau partagé** (ex: `Z:\Stockflow_Data`) qui contient ou contiendra les données de l'application.
 - L'application demande également d'entrer un **Nom de Poste ou Trigramme** (ex: `MAGASIN_01` ou `JDO`). Sans comptes, c'est ce nom qui sera utilisé pour signer les mouvements dans la traçabilité.
 - L'application crée automatiquement la structure de sous-dossiers si elle n'existe pas (Dossiers `Events`, `Images`, `Documents`).
 - Ces paramètres sont sauvegardés localement sur le PC (fichier `config.json`).
 
-#### P1.2 — Outil de Migration (Importation CSV & Médias)
+#### [IN PROGRESS] P1.2 — Outil de Migration (Importation CSV & Médias)
 > Transition depuis l'ancien système Excel vers le nouveau moteur.
 - Module spécifique au premier lancement pour importer le fichier historique `data to import exemple.csv`.
 - Nettoyage à la volée : Ignorer les lignes d'en-tête (métadonnées Excel), mapper les colonnes (Quantité, Référence, Description, Attributs dynamiques).
 - Conversion automatique : Chaque ligne du CSV génère le premier événement JSON ("Stock Initial") de l'article sur le lecteur réseau.
 - **Migration des fichiers :** L'outil demandera le dossier local actuel contenant les images/PDF et les copiera intelligemment vers le nouveau dossier réseau (`Z:\Stockflow_Data\Media\`) en les renommant selon le format standard de l'application.
 
-#### P1.3 — Gestion du Référentiel Produits
+#### [DONE] P1.3 — Gestion du Référentiel Produits
 - **Champs de base :** Référence fabricant (MPN), Référence interne (SKU), Description, Marque, Catégorie/Sous-catégorie.
 - **Attributs Techniques :** Propriétés dynamiques (Tension, Dimensions, Puissance, etc.).
 - **Localisation Physique :** Gestion hiérarchique stricte (Dépôt → Allée → Étagère → Bac) pour éviter les pertes de temps en magasin.
 - **Typologie d'Article :** Séparation claire entre les articles **Sérialisés** (suivi unitaire par S/N) et les articles en **Vrac/Consommable** (suivi purement quantitatif).
 - **Détection de Doublons :** À la saisie d'une nouvelle référence, l'application vérifie en temps réel si elle existe déjà et propose de charger la fiche existante pour la modifier plutôt que de créer un doublon.
 
-#### P1.4 — Moteur Event-Sourcing & Mouvements de Stock
+#### [DONE] P1.4 — Moteur Event-Sourcing & Mouvements de Stock
 - **Génération d'événements :** Chaque mouvement génère un fichier JSON (ex: `20260525-143000_REF_OUT.json`) sur le réseau.
 - **Cache Local & Performances (Critique) :** L'application maintient un cache local (ex: base SQLite locale sur le PC). Au démarrage, elle ne synchronise que les *nouveaux* fichiers JSON apparus depuis sa dernière session.
 - **Synchronisation Temps-Réel :** Un processus en arrière-plan surveille le dossier réseau (polling périodique toutes les 3-5 secondes). Les changements détectés (nouveaux événements créés par d'autres postes) sont intégrés au cache local et l'interface se met à jour dynamiquement sans aucune action de l'utilisateur.
@@ -69,12 +69,12 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 - **Seuils d'Alerte (Reorder Point) :** Définition d'un stock minimum avec notification locale.
 - **Auditing / Traçabilité (Natif) :** Le système de fichiers JSON sert de journal immuable (Qui=Trigramme, Quoi, Quand).
 
-#### P1.5 — Stockage Document & Images sur Réseau
+#### [TODO] P1.5 — Stockage Document & Images sur Réseau
 - Les fichiers (PDF de fiches techniques, Images de produits) sont téléversés directement dans l'arborescence du lecteur réseau désigné à l'étape P1.1.
 - L'application portable les affiche en les lisant via le système de fichiers Windows.
 - **UX Améliorée :** Affichage d'un aperçu miniature de l'image au simple survol de la souris (Hover) sur une référence dans les listes.
 
-#### P1.6 — Tableau de Bord (Dashboard)
+#### [DONE] P1.6 — Tableau de Bord (Dashboard)
 - Écran d'accueil synthétique affichant en un coup d'œil : nombre total de références, valeur estimée du stock, nombre d'articles sous le seuil d'alerte, derniers mouvements enregistrés.
 - Mise à jour dynamique au même rythme que la synchronisation réseau.
 
