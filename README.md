@@ -91,19 +91,19 @@ npm run tauri build
 ```
 Le fichier généré est entièrement autonome et peut être copié sur n'importe quel poste Windows.
 
-### ⚠️ Windows SmartScreen
-L'exécutable n'étant pas signé avec un certificat de signature de code (Code Signing Certificate), Windows SmartScreen peut afficher un avertissement au premier lancement. C'est un comportement normal pour tout `.exe` non signé.
+### ⚠️ Windows SmartScreen (Environnement sans droits admin)
+L'exécutable n'étant pas signé numériquement, Windows SmartScreen peut bloquer le lancement si le fichier a été **téléchargé depuis internet** (GitHub). Ce blocage est lié au marqueur "Mark of the Web" (MOTW) que Windows ajoute automatiquement aux téléchargements web. Le bouton "Exécuter quand même" nécessite des droits administrateur.
 
-**Pour débloquer l'application :**
-1. Cliquez sur **"Informations complémentaires"** (ou *"More info"*) dans la fenêtre SmartScreen.
-2. Cliquez sur **"Exécuter quand même"** (*"Run anyway"*).
+**Solution recommandée — Distribution via le lecteur réseau :**
+Copiez le `StockFlow.exe` compilé **directement** depuis le poste de développement vers le lecteur réseau partagé (ex: `Z:\Stockflow\app\StockFlow.exe`). Les fichiers copiés en local ou depuis un partage SMB **ne reçoivent pas** le marqueur MOTW et SmartScreen ne se déclenchera pas.
 
-**Alternative (PowerShell) — Retirer le marqueur de sécurité d'un fichier téléchargé depuis internet :**
+**Alternative — Retirer le marqueur manuellement (ne nécessite pas de droits admin) :**
 ```powershell
-Unblock-File -Path "C:\chemin\vers\StockFlow.exe"
+Unblock-File -Path ".\StockFlow.exe"
 ```
+Ou via l'explorateur Windows : clic droit sur le fichier → Propriétés → cocher **"Débloquer"** en bas → OK.
 
-> **Note :** Si l'exécutable est distribué via le lecteur réseau partagé (copie directe, pas un téléchargement web), SmartScreen ne se déclenche généralement pas.
+> **En résumé :** Ne distribuez jamais l'application en la faisant re-télécharger depuis GitHub sur les postes utilisateurs. Déposez-la sur le partage réseau depuis un poste de confiance.
 
 ---
 
