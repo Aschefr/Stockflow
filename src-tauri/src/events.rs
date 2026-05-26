@@ -30,11 +30,18 @@ pub fn write_event_file(network_path: &str, event_type: &str, trigramme: &str, p
         payload,
     };
 
+    // Extraire le SKU du payload pour un nom de fichier explicite et lisible
+    let sku = event.payload["sku"]
+        .as_str()
+        .unwrap_or("GLOBAL")
+        .to_string();
+
     let filename = format!(
-        "{}_{}_{}_{}.json",
+        "{}_{}_{}_{}_{}.json",
         Utc::now().format("%Y%m%dT%H%M%SZ"),
         event.trigramme,
         event.event_type,
+        sku,
         &event.event_id[..4]
     );
 

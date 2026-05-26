@@ -62,7 +62,7 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 - **Détection de Doublons :** À la saisie d'une nouvelle référence, l'application vérifie en temps réel si elle existe déjà et propose de charger la fiche existante pour la modifier plutôt que de créer un doublon.
 
 #### [DONE] P1.4 — Moteur Event-Sourcing & Mouvements de Stock
-- **Génération d'événements :** Chaque mouvement génère un fichier JSON (ex: `20260525-143000_REF_OUT.json`) sur le réseau.
+- **Génération d'événements :** Chaque mouvement génère un fichier JSON nommé explicitement avec le SKU du produit (ex: `20260525T143000Z_JDO_STOCK_OUT_6ES7507-0RA00-0AB0_c7b3.json`) sur le réseau.
 - **Cache Local & Performances (Critique) :** L'application maintient un cache local (ex: base SQLite locale sur le PC). Au démarrage, elle ne synchronise que les *nouveaux* fichiers JSON apparus depuis sa dernière session.
 - **Synchronisation Temps-Réel :** Un processus en arrière-plan surveille le dossier réseau (polling périodique toutes les 3-5 secondes). Les changements détectés (nouveaux événements créés par d'autres postes) sont intégrés au cache local et l'interface se met à jour dynamiquement sans aucune action de l'utilisateur.
 - **Résilience Réseau (Mode Hors-Ligne) :** Si le lecteur réseau se déconnecte, l'application affiche une bannière "Hors-Ligne". Elle permet la consultation du stock en cache, mais met en attente (file locale) les nouvelles écritures jusqu'au retour de la connexion.

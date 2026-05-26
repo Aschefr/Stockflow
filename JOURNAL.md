@@ -28,3 +28,12 @@ Ce document répertorie l'historique des modifications apportées au codebase de
   - Compilation réussie du livrable de production (`npm run tauri build`).
   - Préparation et renommage des livrables (`StockFlow.exe` portable, installeurs MSI et NSIS).
   - Création de la première release GitHub sous le tag `v1.0.0-mvp` avec téléversement automatique des assets binaires (via la CLI `gh` configurée par l'utilisateur).
+
+---
+
+## [2026-05-26] Nommage événements & Planification médias
+
+- **Amélioration Event-Sourcing (`events.rs`) :** Le format de nommage des fichiers JSON générés sur le réseau inclut désormais le SKU du produit pour une lecture humaine directe. Ancien format : `20260525T143000Z_JDO_STOCK_OUT_c7b3.json`. Nouveau format : `20260525T143000Z_JDO_STOCK_OUT_6ES7507-0RA00-0AB0_c7b3.json`.
+- **Mise à jour du plan (`PLAN_AMELIORE.md`) :** Ajout de tags `[DONE]`, `[IN PROGRESS]`, `[TODO]` sur toutes les étapes de la Phase 1 pour refléter l'avancement réel.
+- **Planification Phase 1 restante :** Analyse complète du CSV de production (784 lignes, 25 colonnes dont chemins relatifs vers images et PDF), du dossier `Images des références` (~450+ images) et du dossier `Manuels PDF` (70 sous-dossiers par marque). Rédaction du plan d'implémentation pour P1.2 (migration médias) et P1.5 (affichage images/documents).
+- **Décisions validées :** Plusieurs images par produit (`[SKU]_1.jpg`, `[SKU]_2.jpg`...), ouverture PDF dans le lecteur par défaut de Windows, deux saisies de dossiers séparées (images et PDF) dans le wizard de migration.
