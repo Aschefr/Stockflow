@@ -31,9 +31,22 @@ Ce document répertorie l'historique des modifications apportées au codebase de
 
 ---
 
-## [2026-05-26] Nommage événements & Planification médias
+## [2026-05-26] Améliorations de robustesse, Analyse de données & Planification Médias
 
-- **Amélioration Event-Sourcing (`events.rs`) :** Le format de nommage des fichiers JSON générés sur le réseau inclut désormais le SKU du produit pour une lecture humaine directe. Ancien format : `20260525T143000Z_JDO_STOCK_OUT_c7b3.json`. Nouveau format : `20260525T143000Z_JDO_STOCK_OUT_6ES7507-0RA00-0AB0_c7b3.json`.
-- **Mise à jour du plan (`PLAN_AMELIORE.md`) :** Ajout de tags `[DONE]`, `[IN PROGRESS]`, `[TODO]` sur toutes les étapes de la Phase 1 pour refléter l'avancement réel.
-- **Planification Phase 1 restante :** Analyse complète du CSV de production (784 lignes, 25 colonnes dont chemins relatifs vers images et PDF), du dossier `Images des références` (~450+ images) et du dossier `Manuels PDF` (70 sous-dossiers par marque). Rédaction du plan d'implémentation pour P1.2 (migration médias) et P1.5 (affichage images/documents).
-- **Décisions validées :** Plusieurs images par produit (`[SKU]_1.jpg`, `[SKU]_2.jpg`...), ouverture PDF dans le lecteur par défaut de Windows, deux saisies de dossiers séparées (images et PDF) dans le wizard de migration.
+- **Correction Réseau & Push Git :** Résolution des erreurs de connexion Git en forçant le protocole HTTPS sur le port 443 pour pousser la branche `master` vers GitHub.
+- **Rangement du Dépôt :** 
+  - Confirmation du stockage des binaires compilés directement dans le dépôt sous `release_bin/` pour une distribution aisée sur lecteur réseau (évitant les blocages SmartScreen).
+  - Résolution d'un problème d'encodage (octets nuls) dans le fichier `.gitignore` et configuration propre pour ignorer le dossier `exemple_data/*` tout en conservant la structure.
+- **Analyse du CSV de Production & Données Réelles :**
+  - Analyse du fichier `DB Stock du 26_05_26 08_09.csv` (784 lignes, encodage Windows-1252, délimiteur `;`, saut d'en-tête de 8 lignes).
+  - Découverte majeure : les colonnes 24 (PDF) et 25 (Image) contiennent directement les chemins relatifs des médias associés (ex: `Images des références\...` et `Manuels PDF\...`), ce qui élimine le besoin d'heuristiques de matching complexes.
+  - Identification de l'arborescence des manuels PDF (70 sous-dossiers classés par constructeur) et des images produits (~450 fichiers).
+- **Décisions de Conception Validées :**
+  - **Interface de Migration :** Remplacement de la recherche globale automatique par une saisie explicite de deux chemins distincts dans le wizard (un dossier source pour les images, un pour les PDF).
+  - **Gestion des Images :** Prise en charge de plusieurs images par référence nommées `[SKU]_1.jpg`, `[SKU]_2.jpg`, etc., avec intégration d'une vue carrousel.
+  - **Visualisation PDF :** Ouverture des manuels techniques dans le lecteur de PDF externe par défaut de Windows (Edge, Adobe Reader, etc.) via une commande native Rust.
+- **Amélioration Technique de l'Event-Sourcing (`events.rs`) :**
+  - Modification de la structure de nommage des fichiers d'événements JSON écrits sur le réseau pour y injecter directement le SKU du produit (ex: `20260525T143000Z_JDO_STOCK_OUT_6ES7507-0RA00-0AB0_c7b3.json`). Cela facilite l'audit direct par le service informatique ou l'utilisateur sans passer par la base SQLite locale.
+- **Documentation & Planification :**
+  - Rédaction et validation du plan d'implémentation de fin de Phase 1 (`implementation_plan.md`) traitant des modules de copie des fichiers médias et de leur affichage/survol dans l'UI.
+  - Mise à jour détaillée de `PLAN_AMELIORE.md` avec des listes de tâches (`[x] [DONE]`, `[ ] [TODO]`) ultra-précises pour le suivi de la fin de Phase 1.

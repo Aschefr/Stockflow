@@ -42,37 +42,43 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 
 #### [DONE] P1.1 — Configuration Initiale (Premier Lancement)
 > L'application étant par poste et sans comptes utilisateurs, la configuration se limite à la connexion au réseau.
-- Au premier lancement, l'interface invite l'utilisateur à **localiser le dossier réseau partagé** (ex: `Z:\Stockflow_Data`) qui contient ou contiendra les données de l'application.
-- L'application demande également d'entrer un **Nom de Poste ou Trigramme** (ex: `MAGASIN_01` ou `JDO`). Sans comptes, c'est ce nom qui sera utilisé pour signer les mouvements dans la traçabilité.
-- L'application crée automatiquement la structure de sous-dossiers si elle n'existe pas (Dossiers `Events`, `Images`, `Documents`).
-- Ces paramètres sont sauvegardés localement sur le PC (fichier `config.json`).
+- [x] **[DONE] Localisation du dossier réseau partagé** : Au premier lancement, l'interface invite l'utilisateur à localiser le dossier (ex: `Z:\Stockflow_Data`).
+- [x] **[DONE] Signature Trigramme** : Saisie d'un nom de poste ou trigramme (ex: `JDO`) pour signer les mouvements sans gestion de compte.
+- [x] **[DONE] Structure réseau automatique** : Création automatique des dossiers `Events`, `images` et `documents` sur le réseau.
+- [x] **[DONE] Fichier de configuration locale** : Sauvegarde des paramètres locaux dans `config.json`.
 
 #### [IN PROGRESS] P1.2 — Outil de Migration (Importation CSV & Médias)
 > Transition depuis l'ancien système Excel vers le nouveau moteur.
-- Module spécifique au premier lancement pour importer le fichier historique `data to import exemple.csv`.
-- Nettoyage à la volée : Ignorer les lignes d'en-tête (métadonnées Excel), mapper les colonnes (Quantité, Référence, Description, Attributs dynamiques).
-- Conversion automatique : Chaque ligne du CSV génère le premier événement JSON ("Stock Initial") de l'article sur le lecteur réseau.
-- **Migration des fichiers :** L'outil demandera le dossier local actuel contenant les images/PDF et les copiera intelligemment vers le nouveau dossier réseau (`Z:\Stockflow_Data\Media\`) en les renommant selon le format standard de l'application.
+- [x] **[DONE] Importation asynchrone du CSV** : Traitement non bloquant du fichier CSV (`DB Stock du 26_05_26 08_09.csv`).
+- [x] **[DONE] Transcodage & Nettoyage** : Encodage Windows-1252, saut intelligent des 8 lignes d'en-tête et traitement du délimiteur `;`.
+- [x] **[DONE] Génération d'événements initiaux** : Création automatique des événements JSON de stock initial pour chaque produit.
+- [ ] **[TODO] Saisie double des dossiers sources** : Ajout de deux champs de sélection distincts dans le wizard d'import :
+  1. Dossier source des images produits (ex: `Images des références`)
+  2. Dossier source des manuels PDF (ex: `Manuels PDF`)
+- [ ] **[TODO] Migration intelligente des fichiers** : Copie et renommage automatique des médias sur le réseau :
+  - Images renommées d'après le SKU (ex: `Z:\Stockflow_Data\images\[SKU]_1.jpg`, avec support de plusieurs images `[SKU]_1.jpg`, `[SKU]_2.jpg`, etc.).
+  - Documents stockés dans un sous-dossier par produit (ex: `Z:\Stockflow_Data\documents\[SKU]\[nom_original].pdf`).
+- [ ] **[TODO] Rapport de migration** : Bilan final affichant le nombre de fichiers copiés avec succès, les fichiers manquants et les erreurs.
 
 #### [DONE] P1.3 — Gestion du Référentiel Produits
-- **Champs de base :** Référence fabricant (MPN), Référence interne (SKU), Description, Marque, Catégorie/Sous-catégorie.
-- **Attributs Techniques :** Propriétés dynamiques (Tension, Dimensions, Puissance, etc.).
-- **Localisation Physique :** Gestion hiérarchique stricte (Dépôt → Allée → Étagère → Bac) pour éviter les pertes de temps en magasin.
-- **Typologie d'Article :** Séparation claire entre les articles **Sérialisés** (suivi unitaire par S/N) et les articles en **Vrac/Consommable** (suivi purement quantitatif).
-- **Détection de Doublons :** À la saisie d'une nouvelle référence, l'application vérifie en temps réel si elle existe déjà et propose de charger la fiche existante pour la modifier plutôt que de créer un doublon.
+- [x] **[DONE] Champs et attributs techniques** : Prise en charge des références MPN, SKU, Description, Marque, Catégories, dimensions, poids, prix et code RS.
+- [x] **[DONE] Localisation physique** : Gestion de l'emplacement hiérarchique (Dépôt → Allée → Étagère → Bac).
+- [x] **[DONE] Typologie d'article** : Séparation entre articles sérialisés et articles en vrac.
+- [x] **[DONE] Détection de doublons** : Vérification en temps réel du SKU/MPN lors de la création d'un article.
 
 #### [DONE] P1.4 — Moteur Event-Sourcing & Mouvements de Stock
-- **Génération d'événements :** Chaque mouvement génère un fichier JSON nommé explicitement avec le SKU du produit (ex: `20260525T143000Z_JDO_STOCK_OUT_6ES7507-0RA00-0AB0_c7b3.json`) sur le réseau.
-- **Cache Local & Performances (Critique) :** L'application maintient un cache local (ex: base SQLite locale sur le PC). Au démarrage, elle ne synchronise que les *nouveaux* fichiers JSON apparus depuis sa dernière session.
-- **Synchronisation Temps-Réel :** Un processus en arrière-plan surveille le dossier réseau (polling périodique toutes les 3-5 secondes). Les changements détectés (nouveaux événements créés par d'autres postes) sont intégrés au cache local et l'interface se met à jour dynamiquement sans aucune action de l'utilisateur.
-- **Résilience Réseau (Mode Hors-Ligne) :** Si le lecteur réseau se déconnecte, l'application affiche une bannière "Hors-Ligne". Elle permet la consultation du stock en cache, mais met en attente (file locale) les nouvelles écritures jusqu'au retour de la connexion.
-- **Seuils d'Alerte (Reorder Point) :** Définition d'un stock minimum avec notification locale.
-- **Auditing / Traçabilité (Natif) :** Le système de fichiers JSON sert de journal immuable (Qui=Trigramme, Quoi, Quand).
+- [x] **[DONE] Format de nommage explicite** : Fichiers JSON d'événements signés et contenant le SKU pour une lisibilité humaine optimale (ex: `20260525T143000Z_JDO_STOCK_OUT_6ES7507-0RA00-0AB0_c7b3.json`).
+- [x] **[DONE] Cache local SQLite** : Chargement instantané et synchronisation différentielle incrémentale.
+- [x] **[DONE] Synchronisation temps réel** : Surveillance arrière-plan (polling de 4s) avec mise à jour réactive de l'interface.
+- [x] **[DONE] Résilience & Mode Hors-Ligne** : Bannière d'avertissement et file d'attente d'écriture locale en cas de perte de connexion réseau.
+- [x] **[DONE] Seuils d'alerte** : Notifications et indicateurs visuels (rupture de stock, seuil bas).
 
 #### [TODO] P1.5 — Stockage Document & Images sur Réseau
-- Les fichiers (PDF de fiches techniques, Images de produits) sont téléversés directement dans l'arborescence du lecteur réseau désigné à l'étape P1.1.
-- L'application portable les affiche en les lisant via le système de fichiers Windows.
-- **UX Améliorée :** Affichage d'un aperçu miniature de l'image au simple survol de la souris (Hover) sur une référence dans les listes.
+- [ ] **[TODO] Chargement réseau** : Consultation directe des images et PDF depuis le lecteur réseau via Tauri.
+- [ ] **[TODO] Support multi-images** : Carrousel ou galerie pour visualiser les différentes vues d'un produit (`[SKU]_1.jpg`, `[SKU]_2.jpg`, etc.).
+- [ ] **[TODO] Ouverture PDF externe** : Lancement automatique du manuel PDF dans le lecteur de PDF par défaut du système (Edge, Adobe Reader, etc.) via la commande système native.
+- [ ] **[TODO] Miniatures au survol** : Affichage d'un popover d'aperçu de l'image de la référence au simple survol de la souris dans le tableau principal.
+- [ ] **[TODO] Téléversement drag & drop** : Ajout de fichiers images/PDF par glisser-déposer sur la fiche détaillée d'un produit existant.
 
 #### [DONE] P1.6 — Tableau de Bord (Dashboard)
 - Écran d'accueil synthétique affichant en un coup d'œil : nombre total de références, valeur estimée du stock, nombre d'articles sous le seuil d'alerte, derniers mouvements enregistrés.
