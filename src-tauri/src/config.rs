@@ -2,10 +2,36 @@ use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use std::fs;
 
+fn default_vpc_sites() -> Vec<String> {
+    vec!["RS".to_string(), "Farnell".to_string(), "Mouser".to_string()]
+}
+
+fn default_pdf_rename() -> Option<String> {
+    Some("{SKU}_datasheet.pdf".to_string())
+}
+
+fn default_image_rename() -> Option<String> {
+    Some("{SKU}_{Index}.jpg".to_string())
+}
+
+fn default_pdf_size_threshold() -> Option<f64> {
+    Some(5.0)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub trigramme: String,
     pub network_path: String,
+    #[serde(default)]
+    pub searxng_url: Option<String>,
+    #[serde(default = "default_vpc_sites")]
+    pub vpc_sites: Vec<String>,
+    #[serde(default = "default_pdf_rename")]
+    pub pdf_rename_convention: Option<String>,
+    #[serde(default = "default_image_rename")]
+    pub image_rename_convention: Option<String>,
+    #[serde(default = "default_pdf_size_threshold")]
+    pub pdf_size_threshold: Option<f64>,
 }
 
 pub fn get_config_dir() -> Option<PathBuf> {

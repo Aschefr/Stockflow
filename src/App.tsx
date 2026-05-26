@@ -1,12 +1,18 @@
 import { useState, useEffect } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { listen } from "@tauri-apps/api/event";
 import logoImg from "./assets/logo.png";
 import "./App.css";
 
 interface AppConfig {
   trigramme: string;
   network_path: string;
+  searxng_url?: string;
+  vpc_sites: string[];
+  pdf_rename_convention?: string;
+  image_rename_convention?: string;
+  pdf_size_threshold?: number;
 }
 
 interface Product {
@@ -24,6 +30,7 @@ interface Product {
   attributes: string;
   image_path?: string | null;
   pdf_path?: string | null;
+  pack_size: number;
 }
 
 interface ColumnConfig {
@@ -37,6 +44,7 @@ const DEFAULT_COLUMNS: ColumnConfig[] = [
   { id: "image", label: "Image", width: 80, visible: true },
   { id: "sku", label: "SKU (Interne)", width: 140, visible: true },
   { id: "mpn", label: "Ref Fabricant", width: 140, visible: true },
+  { id: "vpc_code", label: "Code VPC", width: 120, visible: true },
   { id: "brand", label: "Marque", width: 120, visible: true },
   { id: "label", label: "Désignation", width: 250, visible: true },
   { id: "location", label: "Emplacement", width: 110, visible: true },
@@ -44,7 +52,39 @@ const DEFAULT_COLUMNS: ColumnConfig[] = [
   { id: "min_stock", label: "Seuil Alerte", width: 100, visible: true },
   { id: "price", label: "Prix Unit.", width: 100, visible: true },
   { id: "total_value", label: "Valeur Total", width: 110, visible: true },
+  { id: "largeur", label: "Largeur (mm)", width: 100, visible: true },
+  { id: "hauteur", label: "Hauteur (mm)", width: 100, visible: true },
+  { id: "profondeur", label: "Profondeur (mm)", width: 110, visible: true },
+  { id: "poids", label: "Poids (g)", width: 90, visible: true },
 ];
+
+function getVpcCode(prod: Product): string {
+  try {
+    const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+    if (attrs && attrs.vpc) {
+      const keys = Object.keys(attrs.vpc);
+      if (keys.length > 0) {
+        const site = keys[0];
+        return `${site}: ${attrs.vpc[site]}`;
+      }
+    }
+    if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
+      return `RS: ${attrs.codeRS}`;
+    }
+  } catch (e) {}
+  return "";
+}
+
+function getAttribute(prod: Product, key: string): string {
+  try {
+    const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+    if (attrs && attrs[key] !== undefined && attrs[key] !== null) {
+      return attrs[key].toString();
+    }
+  } catch (e) {}
+  return "";
+}
+
 
 
 interface ProductHistoryItem {
@@ -120,11 +160,19 @@ function App() {
   const [configLoaded, setConfigLoaded] = useState(false);
   const [trigrammeInput, setTrigrammeInput] = useState("");
   const [networkPathInput, setNetworkPathInput] = useState("");
+  const [searxngUrlInput, setSearxngUrlInput] = useState("");
+  const [vpcSitesInput, setVpcSitesInput] = useState<string[]>([]);
+  const [newVpcSiteInput, setNewVpcSiteInput] = useState("");
+  const [pdfRenameInput, setPdfRenameInput] = useState("");
+  const [imageRenameInput, setImageRenameInput] = useState("");
+  const [pdfSizeThresholdInput, setPdfSizeThresholdInput] = useState(5);
+  const [editingPdfPath, setEditingPdfPath] = useState<string | null>(null);
+  const [newPdfName, setNewPdfName] = useState("");
   const [configError, setConfigError] = useState("");
   const [isEditingConfig, setIsEditingConfig] = useState(false);
 
   // Navigation & View States
-  const [activeTab, setActiveTab] = useState<"dashboard" | "inventory" | "add_product" | "migration">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "inventory" | "add_product" | "migration" | "settings">("dashboard");
   const [products, setProducts] = useState<Product[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [productHistory, setProductHistory] = useState<ProductHistoryItem[]>([]);
@@ -154,6 +202,7 @@ function App() {
     location: "",
     min_stock: 0,
     price: 0,
+    pack_size: 1,
   });
   const [duplicateWarning, setDuplicateWarning] = useState("");
   const [createSuccess, setCreateSuccess] = useState("");
@@ -175,7 +224,12 @@ function App() {
     image_path: null as string | null,
     pdf_path: null as string | null,
     attributes: "{}",
+    pack_size: 1,
   });
+  const [newVpcSite, setNewVpcSite] = useState("");
+  const [newVpcCode, setNewVpcCode] = useState("");
+  const [editVpcSite, setEditVpcSite] = useState("");
+  const [editVpcCode, setEditVpcCode] = useState("");
   const [editSuccess, setEditSuccess] = useState("");
   const [editError, setEditError] = useState("");
 
@@ -188,6 +242,14 @@ function App() {
   // Inline editing state
   const [editingCell, setEditingCell] = useState<{ sku: string; field: string } | null>(null);
   const [editValue, setEditValue] = useState("");
+
+  const [selectedSkus, setSelectedSkus] = useState<string[]>([]);
+  const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [batchTotal, setBatchTotal] = useState(0);
+  const [batchProgress, setBatchProgress] = useState(0);
+  const [batchSuccessCount, setBatchSuccessCount] = useState(0);
+  const [batchErrorCount, setBatchErrorCount] = useState(0);
+  const [batchStatus, setBatchStatus] = useState("");
 
   // CSV Migration State
   const [csvFilePath, setCsvFilePath] = useState(() => localStorage.getItem("sf_migration_csv_path") || "");
@@ -213,6 +275,308 @@ function App() {
   // Hover image preview state
   const [hoveredImage, setHoveredImage] = useState<string | null>(null);
   const [hoverPosition, setHoverPosition] = useState({ x: 0, y: 0 });
+  const [isScrapingPrice, setIsScrapingPrice] = useState(false);
+  const [isScrapingMedia, setIsScrapingMedia] = useState(false);
+
+  interface ScrapeProgressStep {
+    label: string;
+    status: "pending" | "active" | "success" | "error";
+    details?: string;
+  }
+
+  const [scrapeModalOpen, setScrapeModalOpen] = useState(false);
+  const [scrapeModalTitle, setScrapeModalTitle] = useState("");
+  const [scrapeSteps, setScrapeSteps] = useState<ScrapeProgressStep[]>([]);
+  const [scrapeError, setScrapeError] = useState<string | null>(null);
+  const [settingsSaveState, setSettingsSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+
+  interface ConfirmModalConfig {
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    onCancel?: () => void;
+  }
+
+  interface AlertModalConfig {
+    title: string;
+    message: string;
+  }
+
+  const [confirmModal, setConfirmModal] = useState<ConfirmModalConfig | null>(null);
+  const [alertModal, setAlertModal] = useState<AlertModalConfig | null>(null);
+
+  function getRenamePreview(convention: string, isPdf: boolean): string {
+    if (!convention) return "";
+    let name = convention
+      .replace(/{SKU}/g, "SKU12345")
+      .replace(/{Brand}/g, "SIEMENS")
+      .replace(/{MPN}/g, "5SY4110-7")
+      .replace(/{Type}/g, isPdf ? "datasheet" : "")
+      .replace(/{Index}/g, !isPdf ? "1" : "")
+      .replace(/{Source}/g, !isPdf ? "searxng" : "")
+      .replace(/{Date}/g, !isPdf ? "20260526" : "");
+    
+    if (isPdf) {
+      if (!name.toLowerCase().endsWith(".pdf")) {
+        name += ".pdf";
+      }
+    } else {
+      if (!name.toLowerCase().endsWith(".jpg") && !name.toLowerCase().endsWith(".jpeg")) {
+        name += ".jpg";
+      }
+    }
+    return name;
+  }
+
+  async function runBatchScraping(mediaType: "images" | "pdf") {
+    if (selectedSkus.length === 0 || !config) return;
+    setIsBatchRunning(true);
+    setBatchTotal(selectedSkus.length);
+    setBatchProgress(0);
+    setBatchSuccessCount(0);
+    setBatchErrorCount(0);
+    setBatchStatus("Initialisation du scraping par lot...");
+
+    const randomized = [...selectedSkus].sort(() => Math.random() - 0.5);
+
+    for (let i = 0; i < randomized.length; i++) {
+      const sku = randomized[i];
+      const prod = products.find(p => p.sku === sku);
+      if (!prod) continue;
+      let vpcCode = "";
+      try {
+        const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+        if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
+          vpcCode = attrs.codeRS.trim();
+        } else if (attrs && attrs.vpc) {
+          const keys = Object.keys(attrs.vpc);
+          if (keys.length > 0) {
+            vpcCode = attrs.vpc[keys[0]].toString().trim();
+          }
+        }
+      } catch (e) {}
+
+      const query = `${prod.brand || ""} ${prod.mpn || prod.sku} ${vpcCode} ${mediaType === "pdf" ? "datasheet pdf" : "image product"}`.trim();
+      setBatchStatus(`Scraping de ${sku} en cours (${i + 1}/${randomized.length})...`);
+      
+      try {
+        if (mediaType === "pdf") {
+          await invoke("scrape_pdf", { sku, query, networkPath: config.network_path });
+        } else {
+          await invoke("scrape_images", { sku, query, networkPath: config.network_path });
+        }
+        setBatchSuccessCount(prev => prev + 1);
+      } catch (err) {
+        console.error(err);
+        setBatchErrorCount(prev => prev + 1);
+      }
+      setBatchProgress(i + 1);
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    setBatchStatus("Scraping par lot terminé !");
+    setIsBatchRunning(false);
+    setSelectedSkus([]);
+    syncAndFetch(config);
+  }
+
+  async function handleScrapePrice() {
+    if (!config || !selectedProduct) return;
+    setIsScrapingPrice(true);
+    setMovementError("");
+    setMovementSuccess("");
+    try {
+      const price: number = await invoke("scrape_price", {
+        sku: selectedProduct.sku,
+        provider: "rs",
+        networkPath: config.network_path,
+        trigramme: config.trigramme
+      });
+      await invoke("create_product", {
+        networkPath: config.network_path,
+        trigramme: config.trigramme,
+        sku: selectedProduct.sku,
+        mpn: selectedProduct.mpn,
+        label: selectedProduct.label,
+        brand: selectedProduct.brand,
+        category: selectedProduct.category,
+        subCategory: selectedProduct.sub_category,
+        location: selectedProduct.location,
+        itemType: selectedProduct.item_type,
+        minStock: selectedProduct.min_stock,
+        price: price,
+        imagePath: selectedProduct.image_path,
+        pdfPath: selectedProduct.pdf_path,
+        attributes: typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes,
+        packSize: selectedProduct.pack_size
+      });
+      setMovementSuccess(`Prix mis à jour : ${price.toFixed(2)} €`);
+      syncAndFetch(config);
+    } catch (err: any) {
+      setMovementError(err.toString());
+    } finally {
+      setIsScrapingPrice(false);
+    }
+  }
+
+  async function handleScrapePdfSingle() {
+    if (!config || !selectedProduct) return;
+    setIsScrapingMedia(true);
+    setScrapeError(null);
+    setScrapeModalTitle(`Scraping PDF pour : ${selectedProduct.sku}`);
+    setScrapeSteps([
+      { label: "Recherche SearxNG pour PDF", status: "active" },
+      { label: "Téléchargement des documents", status: "pending" },
+      { label: "Déduplication par type & taille", status: "pending" },
+      { label: "Sauvegarde réseau (cascade)", status: "pending" },
+    ]);
+    setScrapeModalOpen(true);
+
+    const unlistens: (() => void)[] = [];
+
+    try {
+      const unlistenProgress = await listen<any>("pdf-download-progress", (event) => {
+        const payload = event.payload;
+        setScrapeSteps(prev => {
+          const next = [...prev];
+          next[0].status = "success";
+          next[1].status = "active";
+          next[1].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
+          return next;
+        });
+      });
+      unlistens.push(unlistenProgress);
+
+      const unlistenDedup = await listen<any>("pdf-dedup-summary", (event) => {
+        const payload = event.payload;
+        setScrapeSteps(prev => {
+          const next = [...prev];
+          next[1].status = "success";
+          next[2].status = "success";
+          next[2].details = payload.message;
+          next[3].status = "active";
+          return next;
+        });
+      });
+      unlistens.push(unlistenDedup);
+
+      let vpcCode = "";
+      try {
+        const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
+        if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
+          vpcCode = attrs.codeRS.trim();
+        } else if (attrs && attrs.vpc) {
+          const keys = Object.keys(attrs.vpc);
+          if (keys.length > 0) {
+            vpcCode = attrs.vpc[keys[0]].toString().trim();
+          }
+        }
+      } catch (e) {}
+      const query = `${selectedProduct.brand || ""} ${selectedProduct.mpn || selectedProduct.sku} ${vpcCode} datasheet pdf`.trim();
+      const relativePath: string = await invoke("scrape_pdf", { sku: selectedProduct.sku, query, networkPath: config.network_path });
+
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[0].status = "success";
+        next[1].status = "success";
+        next[2].status = "success";
+        next[3].status = "success";
+        next[3].details = `Sauvegardé : ${relativePath.split('/').pop()}`;
+        return next;
+      });
+      setMovementSuccess("PDF récupéré avec succès.");
+      syncAndFetch(config);
+    } catch (err: any) {
+      const errMsg = err.toString();
+      setScrapeError(errMsg);
+      setScrapeSteps(prev => {
+        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
+      });
+      setMovementError(errMsg);
+    } finally {
+      unlistens.forEach(fn => fn());
+      setIsScrapingMedia(false);
+    }
+  }
+
+  async function handleScrapeImageSingle() {
+    if (!config || !selectedProduct) return;
+    setIsScrapingMedia(true);
+    setScrapeError(null);
+    setScrapeModalTitle(`Scraping Images pour : ${selectedProduct.sku}`);
+    setScrapeSteps([
+      { label: "Recherche SearxNG pour images", status: "active" },
+      { label: "Analyse des images trouvées", status: "pending" },
+      { label: "Téléchargement & Redimensionnement", status: "pending" },
+      { label: "Création des miniatures & Sauvegarde", status: "pending" },
+    ]);
+    setScrapeModalOpen(true);
+
+    let stepTimer: any;
+    const startTime = Date.now();
+
+    const updateSimulatedSteps = () => {
+      const elapsed = Date.now() - startTime;
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        if (elapsed > 4000) {
+          if (next[2].status === "active") {
+            next[2].status = "success";
+            next[3].status = "active";
+          }
+        } else if (elapsed > 2500) {
+          if (next[1].status === "active") {
+            next[1].status = "success";
+            next[2].status = "active";
+          }
+        } else if (elapsed > 1000) {
+          if (next[0].status === "active") {
+            next[0].status = "success";
+            next[1].status = "active";
+          }
+        }
+        return next;
+      });
+      stepTimer = setTimeout(updateSimulatedSteps, 500);
+    };
+    stepTimer = setTimeout(updateSimulatedSteps, 500);
+
+    let vpcCode = "";
+    try {
+      const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
+      if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
+        vpcCode = attrs.codeRS.trim();
+      } else if (attrs && attrs.vpc) {
+        const keys = Object.keys(attrs.vpc);
+        if (keys.length > 0) {
+          vpcCode = attrs.vpc[keys[0]].toString().trim();
+        }
+      }
+    } catch (e) {}
+    const query = `${selectedProduct.brand || ""} ${selectedProduct.mpn || selectedProduct.sku} ${vpcCode} image product`.trim();
+    try {
+      const urls: string[] = await invoke("scrape_images", { sku: selectedProduct.sku, query, networkPath: config.network_path });
+      clearTimeout(stepTimer);
+      setScrapeSteps([
+        { label: "Recherche SearxNG pour images", status: "success" },
+        { label: "Analyse des images trouvées", status: "success", details: `${urls.length} images trouvées` },
+        { label: "Téléchargement & Redimensionnement", status: "success", details: `${urls.length} fichiers JPG` },
+        { label: "Création des miniatures & Sauvegarde", status: "success", details: "Sauvegardé avec miniatures" },
+      ]);
+      setMovementSuccess("Images récupérées avec succès.");
+      syncAndFetch(config);
+    } catch (err: any) {
+      clearTimeout(stepTimer);
+      const errMsg = err.toString();
+      setScrapeError(errMsg);
+      setScrapeSteps(prev => {
+        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
+      });
+      setMovementError(errMsg);
+    } finally {
+      setIsScrapingMedia(false);
+    }
+  }
 
   // Maintenance states
   const [maintenanceStatus, setMaintenanceStatus] = useState("");
@@ -228,6 +592,11 @@ function App() {
           setConfig(loaded);
           setTrigrammeInput(loaded.trigramme);
           setNetworkPathInput(loaded.network_path);
+          setSearxngUrlInput(loaded.searxng_url || "");
+          setVpcSitesInput(loaded.vpc_sites || []);
+          setPdfRenameInput(loaded.pdf_rename_convention || "");
+          setImageRenameInput(loaded.image_rename_convention || "");
+          setPdfSizeThresholdInput(loaded.pdf_size_threshold ?? 5);
           // Initial sync and load
           syncAndFetch(loaded);
         }
@@ -290,19 +659,53 @@ function App() {
     }
   }
 
+  async function handleSaveSettings(
+    tri: string,
+    net: string,
+    searx: string,
+    sites: string[],
+    pdfConv: string,
+    imgConv: string,
+    pdfThreshold: number
+  ) {
+    await invoke("save_config", {
+      trigramme: tri,
+      networkPath: net,
+      searxngUrl: searx || null,
+      vpcSites: sites,
+      pdfRenameConvention: pdfConv || null,
+      imageRenameConvention: imgConv || null,
+      pdfSizeThreshold: pdfThreshold,
+    });
+    
+    const newConfig: AppConfig = {
+      trigramme: tri.toUpperCase(),
+      network_path: net,
+      searxng_url: searx || undefined,
+      vpc_sites: sites,
+      pdf_rename_convention: pdfConv || undefined,
+      image_rename_convention: imgConv || undefined,
+      pdf_size_threshold: pdfThreshold,
+    };
+    setConfig(newConfig);
+    syncAndFetch(newConfig);
+  }
+
   // Handle configuration setup wizard submission
   async function handleSetup(e: React.FormEvent) {
     e.preventDefault();
     setConfigError("");
     try {
-      await invoke("save_config", {
-        trigramme: trigrammeInput,
-        networkPath: networkPathInput,
-      });
-      const newConfig = { trigramme: trigrammeInput.toUpperCase(), network_path: networkPathInput };
-      setConfig(newConfig);
+      await handleSaveSettings(
+        trigrammeInput,
+        networkPathInput,
+        searxngUrlInput,
+        vpcSitesInput,
+        pdfRenameInput,
+        imageRenameInput,
+        pdfSizeThresholdInput
+      );
       setIsEditingConfig(false);
-      syncAndFetch(newConfig);
     } catch (err: any) {
       setConfigError(err.toString());
     }
@@ -402,6 +805,11 @@ function App() {
     setCreateSuccess("");
     setCreateError("");
 
+    const attributesObj: any = {};
+    if (newVpcSite && newVpcCode) {
+      attributesObj.vpc = { [newVpcSite]: newVpcCode };
+    }
+
     try {
       await invoke("create_product", {
         networkPath: config.network_path,
@@ -418,10 +826,13 @@ function App() {
         price: Number(newProduct.price) || 0,
         imagePath: null,
         pdfPath: null,
-        attributes: {}
+        attributes: attributesObj,
+        packSize: Number(newProduct.pack_size) || 1
       });
 
       setCreateSuccess("Produit créé avec succès ! Événement généré.");
+      setNewVpcSite("");
+      setNewVpcCode("");
       setNewProduct({
         sku: "",
         mpn: "",
@@ -432,6 +843,7 @@ function App() {
         location: "",
         min_stock: 0,
         price: 0,
+        pack_size: 1,
       });
       setShowAddModal(false);
       syncAndFetch(config);
@@ -446,6 +858,17 @@ function App() {
     if (!config) return;
     setEditSuccess("");
     setEditError("");
+
+    let attributesObj: any = {};
+    try {
+      attributesObj = typeof editProduct.attributes === "string" ? JSON.parse(editProduct.attributes || "{}") : editProduct.attributes;
+    } catch (e) {}
+
+    if (editVpcSite && editVpcCode) {
+      attributesObj.vpc = { [editVpcSite]: editVpcCode };
+    } else {
+      delete attributesObj.vpc;
+    }
 
     try {
       await invoke("create_product", {
@@ -463,7 +886,8 @@ function App() {
         price: Number(editProduct.price) || 0,
         imagePath: editProduct.image_path,
         pdfPath: editProduct.pdf_path,
-        attributes: JSON.parse(editProduct.attributes || "{}")
+        attributes: attributesObj,
+        packSize: Number(editProduct.pack_size) || 1
       });
 
       setEditSuccess("Produit mis à jour avec succès !");
@@ -480,6 +904,7 @@ function App() {
         location: editProduct.location,
         min_stock: Number(editProduct.min_stock) || 0,
         price: Number(editProduct.price) || 0,
+        pack_size: Number(editProduct.pack_size) || 1,
       };
       setSelectedProduct(updated);
 
@@ -520,7 +945,8 @@ function App() {
         price: updatedProd.price,
         imagePath: updatedProd.image_path,
         pdfPath: updatedProd.pdf_path,
-        attributes: JSON.parse(updatedProd.attributes || "{}")
+        attributes: JSON.parse(updatedProd.attributes || "{}"),
+        packSize: updatedProd.pack_size
       });
       setEditingCell(null);
       syncAndFetch(config);
@@ -584,43 +1010,51 @@ function App() {
 
   async function handleCompaction() {
     if (!config) return;
-    if (!window.confirm("Êtes-vous sûr de vouloir compacter le dossier d'événements ? Cela va supprimer l'historique brut des fichiers JSON intermédiaires et générer des états de création et stock consolidés propres pour chaque produit actif.")) return;
-    
-    setIsMaintenanceRunning(true);
-    setMaintenanceStatus("Compaction en cours... Veuillez patienter.");
-    setMaintenanceError("");
-    try {
-      await invoke("compact_network_events", {
-        networkPath: config.network_path,
-        trigramme: config.trigramme
-      });
-      setMaintenanceStatus("Compaction réussie ! Tous les événements ont été consolidés.");
-      syncAndFetch(config);
-    } catch (err: any) {
-      setMaintenanceError(err.toString());
-    } finally {
-      setIsMaintenanceRunning(false);
-    }
+    setConfirmModal({
+      title: "Confirmer la compaction",
+      message: "Êtes-vous sûr de vouloir compacter le dossier d'événements ? Cela va supprimer l'historique brut des fichiers JSON intermédiaires et générer des états de création et stock consolidés propres pour chaque produit actif.",
+      onConfirm: async () => {
+        setIsMaintenanceRunning(true);
+        setMaintenanceStatus("Compaction en cours... Veuillez patienter.");
+        setMaintenanceError("");
+        try {
+          await invoke("compact_network_events", {
+            networkPath: config.network_path,
+            trigramme: config.trigramme
+          });
+          setMaintenanceStatus("Compaction réussie ! Tous les événements ont été consolidés.");
+          syncAndFetch(config);
+        } catch (err: any) {
+          setMaintenanceError(err.toString());
+        } finally {
+          setIsMaintenanceRunning(false);
+        }
+      }
+    });
   }
 
   async function handleMediaCleanup() {
     if (!config) return;
-    if (!window.confirm("Êtes-vous sûr de vouloir nettoyer le stockage des fichiers médias ? Toutes les images et tous les dossiers PDF qui ne correspondent à aucune référence de produit active dans la base de données seront définitivement supprimés.")) return;
-    
-    setIsMaintenanceRunning(true);
-    setMaintenanceStatus("Nettoyage en cours... Veuillez patienter.");
-    setMaintenanceError("");
-    try {
-      const result: string = await invoke("clean_network_media", {
-        networkPath: config.network_path
-      });
-      setMaintenanceStatus(result);
-      syncAndFetch(config);
-    } catch (err: any) {
-      setMaintenanceError(err.toString());
-    } finally {
-      setIsMaintenanceRunning(false);
-    }
+    setConfirmModal({
+      title: "Confirmer le nettoyage des médias",
+      message: "Êtes-vous sûr de vouloir nettoyer le stockage des fichiers médias ? Toutes les images et tous les dossiers PDF qui ne correspondent à aucune référence de produit active dans la base de données seront définitivement supprimés.",
+      onConfirm: async () => {
+        setIsMaintenanceRunning(true);
+        setMaintenanceStatus("Nettoyage en cours... Veuillez patienter.");
+        setMaintenanceError("");
+        try {
+          const result: string = await invoke("clean_network_media", {
+            networkPath: config.network_path
+          });
+          setMaintenanceStatus(result);
+          syncAndFetch(config);
+        } catch (err: any) {
+          setMaintenanceError(err.toString());
+        } finally {
+          setIsMaintenanceRunning(false);
+        }
+      }
+    });
   }
 
   // Drag & Drop handlers
@@ -851,7 +1285,10 @@ function App() {
       <header className="app-header">
         <div className="header-brand">
           <img src={logoImg} alt="StockFlow" className="header-logo-img" />
-          <span className="header-logo">StockFlow</span>
+          <div style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
+            <span className="header-logo" style={{ lineHeight: 1.1 }}>StockFlow</span>
+            <span className="version-badge" style={{ fontSize: "9px", alignSelf: "flex-start", backgroundColor: "var(--bg-tertiary)", color: "var(--text-secondary)", padding: "1px 5px", borderRadius: "4px", fontWeight: "bold", border: "1px solid var(--border-color)", marginTop: "2px", lineHeight: 1 }}>v1.4.0</span>
+          </div>
           <span className="text-muted">|</span>
           <span className={`status-badge ${isOnline ? "status-online" : "status-offline"}`}>
             ● {isOnline ? "Connecté au réseau" : "Hors-ligne"}
@@ -900,6 +1337,12 @@ function App() {
             onClick={() => setActiveTab("migration")}
           >
             ⚙️ Importation Excel/CSV
+          </div>
+          <div 
+            className={`nav-item ${activeTab === "settings" ? "active" : ""}`}
+            onClick={() => setActiveTab("settings")}
+          >
+            🔧 Paramètres
           </div>
         </aside>
 
@@ -971,6 +1414,39 @@ function App() {
                   />
                 </div>
 
+                {selectedSkus.length > 0 && (
+                  <div className="batch-actions-panel" style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.3rem 0.6rem", backgroundColor: "var(--accent-light)", border: "1px solid var(--accent)", borderRadius: "6px" }}>
+                    <span style={{ fontSize: "11px", fontWeight: "bold" }}>{selectedSkus.length} sélectionnés</span>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
+                      onClick={() => runBatchScraping("images")}
+                      disabled={isBatchRunning}
+                    >
+                      📷 Scraper Images
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
+                      onClick={() => runBatchScraping("pdf")}
+                      disabled={isBatchRunning}
+                    >
+                      📄 Scraper PDF
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
+                      onClick={() => setSelectedSkus([])}
+                      disabled={isBatchRunning}
+                    >
+                      Annuler
+                    </button>
+                  </div>
+                )}
+
                 <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
                   <label htmlFor="cat-filter">Famille :</label>
                   <select
@@ -1020,6 +1496,7 @@ function App() {
                       location: "",
                       min_stock: 0,
                       price: 0,
+                      pack_size: 1,
                     });
                     setShowAddModal(true);
                   }}
@@ -1058,17 +1535,46 @@ function App() {
                   )}
                 </div>
               </div>
+              
+              {isBatchRunning && (
+                <div className="batch-progress-bar-container" style={{ margin: "0.5rem 1rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginBottom: "0.3rem" }}>
+                    <span>{batchStatus}</span>
+                    <span>{batchProgress} / {batchTotal} ({batchTotal > 0 ? Math.round((batchProgress / batchTotal) * 100) : 0}%)</span>
+                  </div>
+                  <div style={{ width: "100%", height: "8px", backgroundColor: "rgba(0,0,0,0.2)", borderRadius: "4px", overflow: "hidden" }}>
+                    <div style={{ width: `${batchTotal > 0 ? (batchProgress / batchTotal) * 100 : 0}%`, height: "100%", backgroundColor: "var(--accent)", transition: "width 0.3s ease" }}></div>
+                  </div>
+                  <div style={{ display: "flex", gap: "1rem", fontSize: "11px", marginTop: "0.4rem", color: "var(--text-secondary)" }}>
+                    <span style={{ color: "var(--success)" }}>🟢 Succès: {batchSuccessCount}</span>
+                    <span style={{ color: "var(--danger)" }}>🔴 Échecs: {batchErrorCount}</span>
+                  </div>
+                </div>
+              )}
 
               <div className="table-container">
                 <table 
                   className="spreadsheet"
                   style={{ 
                     tableLayout: "fixed", 
-                    width: columns.filter(c => c.visible).reduce((sum, c) => sum + c.width, 0)
+                    width: columns.filter(c => c.visible).reduce((sum, c) => sum + c.width, 0) + 40
                   }}
                 >
                   <thead>
                     <tr>
+                      <th style={{ width: "40px", minWidth: "40px", maxWidth: "40px", textAlign: "center", position: "sticky", top: 0, zIndex: 11 }}>
+                        <input
+                          type="checkbox"
+                          checked={filteredProducts.length > 0 && selectedSkus.length === filteredProducts.length}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedSkus(filteredProducts.map(p => p.sku));
+                            } else {
+                              setSelectedSkus([]);
+                            }
+                          }}
+                        />
+                      </th>
                       {columns.map(col => col.visible && (
                         <th
                           key={col.id}
@@ -1093,9 +1599,9 @@ function App() {
                   </thead>
                   <tbody>
                     {filteredProducts.length === 0 ? (
-                      <tr>
-                        <td 
-                          colSpan={columns.filter(c => c.visible).length} 
+                       <tr>
+                         <td 
+                          colSpan={columns.filter(c => c.visible).length + 1} 
                           style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)" }}
                         >
                           Aucun produit correspondant.
@@ -1110,9 +1616,25 @@ function App() {
                         return (
                           <tr 
                             key={prod.sku}
-                            className={selectedProduct?.sku === prod.sku ? "selected" : ""}
+                            className={`${selectedProduct?.sku === prod.sku ? "selected" : ""} ${selectedSkus.includes(prod.sku) ? "batch-selected" : ""}`}
                             onClick={() => handleSelectProduct(prod)}
                           >
+                            <td 
+                              style={{ width: "40px", minWidth: "40px", maxWidth: "40px", textAlign: "center" }}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedSkus.includes(prod.sku)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedSkus([...selectedSkus, prod.sku]);
+                                  } else {
+                                    setSelectedSkus(selectedSkus.filter(s => s !== prod.sku));
+                                  }
+                                }}
+                              />
+                            </td>
                             {columns.find(c => c.id === "image")?.visible && (
                               <td 
                                 style={{ 
@@ -1156,6 +1678,20 @@ function App() {
                                 }}
                               >
                                 {prod.mpn}
+                              </td>
+                            )}
+                            {columns.find(c => c.id === "vpc_code")?.visible && (
+                              <td
+                                style={{ 
+                                  width: columns.find(c => c.id === "vpc_code")?.width,
+                                  minWidth: columns.find(c => c.id === "vpc_code")?.width,
+                                  maxWidth: columns.find(c => c.id === "vpc_code")?.width,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap"
+                                }}
+                              >
+                                {getVpcCode(prod)}
                               </td>
                             )}
                             {columns.find(c => c.id === "brand")?.visible && (
@@ -1226,6 +1762,62 @@ function App() {
                                 )}
                               </td>
                             )}
+                            {columns.find(c => c.id === "largeur")?.visible && (
+                              <td
+                                style={{ 
+                                  width: columns.find(c => c.id === "largeur")?.width,
+                                  minWidth: columns.find(c => c.id === "largeur")?.width,
+                                  maxWidth: columns.find(c => c.id === "largeur")?.width,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap"
+                                }}
+                              >
+                                {getAttribute(prod, "largeur") || "-"}
+                              </td>
+                            )}
+                            {columns.find(c => c.id === "hauteur")?.visible && (
+                              <td
+                                style={{ 
+                                  width: columns.find(c => c.id === "hauteur")?.width,
+                                  minWidth: columns.find(c => c.id === "hauteur")?.width,
+                                  maxWidth: columns.find(c => c.id === "hauteur")?.width,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap"
+                                }}
+                              >
+                                {getAttribute(prod, "hauteur") || "-"}
+                              </td>
+                            )}
+                            {columns.find(c => c.id === "profondeur")?.visible && (
+                              <td
+                                style={{ 
+                                  width: columns.find(c => c.id === "profondeur")?.width,
+                                  minWidth: columns.find(c => c.id === "profondeur")?.width,
+                                  maxWidth: columns.find(c => c.id === "profondeur")?.width,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap"
+                                }}
+                              >
+                                {getAttribute(prod, "profondeur") || "-"}
+                              </td>
+                            )}
+                            {columns.find(c => c.id === "poids")?.visible && (
+                              <td
+                                style={{ 
+                                  width: columns.find(c => c.id === "poids")?.width,
+                                  minWidth: columns.find(c => c.id === "poids")?.width,
+                                  maxWidth: columns.find(c => c.id === "poids")?.width,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap"
+                                }}
+                              >
+                                {getAttribute(prod, "poids") || "-"}
+                              </td>
+                            )}
                             {columns.find(c => c.id === "current_stock")?.visible && (
                               <td
                                 style={{ 
@@ -1280,7 +1872,9 @@ function App() {
                                     onKeyDown={(e) => e.key === "Enter" && handleCellSave(prod)}
                                   />
                                 ) : (
-                                  `${prod.price.toFixed(2)} €`
+                                  prod.pack_size > 1 
+                                     ? `${prod.price.toFixed(2)} € (Lot ${prod.pack_size})` 
+                                     : `${prod.price.toFixed(2)} €`
                                 )}
                               </td>
                             )}
@@ -1451,6 +2045,206 @@ function App() {
             </div>
           )}
 
+          {/* TAB 5: SETTINGS */}
+          {activeTab === "settings" && (
+            <div style={{ padding: "2rem", overflowY: "auto", maxWidth: "600px", margin: "0 auto", width: "100%" }}>
+              <h2 style={{ fontFamily: "var(--font-title)", marginBottom: "1.5rem" }}>Paramètres StockFlow</h2>
+              
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                setSettingsSaveState("saving");
+                try {
+                  await handleSaveSettings(
+                    trigrammeInput,
+                    networkPathInput,
+                    searxngUrlInput,
+                    vpcSitesInput,
+                    pdfRenameInput,
+                    imageRenameInput,
+                    pdfSizeThresholdInput
+                  );
+                  setSettingsSaveState("saved");
+                  setTimeout(() => setSettingsSaveState("idle"), 3000);
+                } catch (err: any) {
+                  setSettingsSaveState("error");
+                  setTimeout(() => setSettingsSaveState("idle"), 5000);
+                }
+              }} style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
+                <div className="form-group">
+                  <label htmlFor="settings-tri">Trigramme Utilisateur (3 caractères)</label>
+                  <input
+                    id="settings-tri"
+                    type="text"
+                    required
+                    maxLength={3}
+                    style={{ textTransform: "uppercase" }}
+                    value={trigrammeInput}
+                    onChange={(e) => setTrigrammeInput(e.target.value)}
+                  />
+                </div>
+                
+                <div className="form-group">
+                  <label htmlFor="settings-net">Chemin du dossier réseau partagé</label>
+                  <div className="input-with-button">
+                    <input
+                      id="settings-net"
+                      type="text"
+                      required
+                      value={networkPathInput}
+                      onChange={(e) => setNetworkPathInput(e.target.value)}
+                    />
+                    <button type="button" className="btn btn-secondary" onClick={pickNetworkDir}>Parcourir</button>
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="settings-searx">URL de l'instance SearxNG</label>
+                  <input
+                    id="settings-searx"
+                    type="text"
+                    placeholder="ex: http://localhost:8080"
+                    value={searxngUrlInput}
+                    onChange={(e) => setSearxngUrlInput(e.target.value)}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>Sites de VPC / Fournisseurs</label>
+                  <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                    <input
+                      type="text"
+                      placeholder="Ajouter un site (ex: Farnell)"
+                      value={newVpcSiteInput}
+                      onChange={(e) => setNewVpcSiteInput(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => {
+                        const s = newVpcSiteInput.trim();
+                        if (s && !vpcSitesInput.includes(s)) {
+                          setVpcSitesInput([...vpcSitesInput, s]);
+                          setNewVpcSiteInput("");
+                        }
+                      }}
+                    >
+                      Ajouter
+                    </button>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+                    {vpcSitesInput.map((site, i) => (
+                      <span key={i} className="trigramme-tag" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", padding: "0.2rem 0.5rem", textTransform: "none" }}>
+                        {site}
+                        <span
+                          style={{ cursor: "pointer", fontWeight: "bold" }}
+                          onClick={() => setVpcSitesInput(vpcSitesInput.filter(s => s !== site))}
+                        >
+                          ×
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="settings-pdf-rename">Convention de renommage PDF</label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.5rem" }}>
+                    {["{SKU}", "{Brand}", "{MPN}", "{Type}"].map((badge) => (
+                      <button
+                        key={badge}
+                        type="button"
+                        className="badge-btn"
+                        onClick={() => {
+                          const current = pdfRenameInput;
+                          const needsSeparator = current.length > 0 && !current.endsWith("_") && !current.endsWith("-");
+                          const newVal = current + (needsSeparator ? "_" : "") + badge;
+                          setPdfRenameInput(newVal);
+                        }}
+                      >
+                        {badge}
+                      </button>
+                    ))}
+                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => setPdfRenameInput(pdfRenameInput + "_")}>_</button>
+                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => setPdfRenameInput(pdfRenameInput + "-")}>-</button>
+                    <button type="button" className="badge-btn badge-btn-clear" onClick={() => setPdfRenameInput("")}>Effacer</button>
+                  </div>
+                  <input
+                    id="settings-pdf-rename"
+                    type="text"
+                    placeholder="ex: {SKU}_datasheet.pdf"
+                    value={pdfRenameInput}
+                    onChange={(e) => setPdfRenameInput(e.target.value)}
+                  />
+                  <div className="filename-preview">
+                    <span>Aperçu :</span>
+                    <code>{getRenamePreview(pdfRenameInput, true)}</code>
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="settings-img-rename">Convention de renommage Images</label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.5rem" }}>
+                    {["{SKU}", "{Index}", "{Brand}", "{MPN}", "{Source}", "{Date}"].map((badge) => (
+                      <button
+                        key={badge}
+                        type="button"
+                        className="badge-btn"
+                        onClick={() => {
+                          const current = imageRenameInput;
+                          const needsSeparator = current.length > 0 && !current.endsWith("_") && !current.endsWith("-");
+                          const newVal = current + (needsSeparator ? "_" : "") + badge;
+                          setImageRenameInput(newVal);
+                        }}
+                      >
+                        {badge}
+                      </button>
+                    ))}
+                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => setImageRenameInput(imageRenameInput + "_")}>_</button>
+                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => setImageRenameInput(imageRenameInput + "-")}>-</button>
+                    <button type="button" className="badge-btn badge-btn-clear" onClick={() => setImageRenameInput("")}>Effacer</button>
+                  </div>
+                  <input
+                    id="settings-img-rename"
+                    type="text"
+                    placeholder="ex: {SKU}_{Index}.jpg"
+                    value={imageRenameInput}
+                    onChange={(e) => setImageRenameInput(e.target.value)}
+                  />
+                  <div className="filename-preview">
+                    <span>Aperçu :</span>
+                    <code>{getRenamePreview(imageRenameInput, false)}</code>
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="settings-pdf-threshold">Seuil de similarité de taille PDF (%)</label>
+                  <input
+                    id="settings-pdf-threshold"
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={pdfSizeThresholdInput}
+                    onChange={(e) => setPdfSizeThresholdInput(Number(e.target.value) || 0)}
+                  />
+                  <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>Seuil en pourcentage pour considérer deux PDF comme doublons (valeur par défaut : 5%).</span>
+                </div>
+
+                <button 
+                  type="submit" 
+                  className={`btn btn-save-settings ${settingsSaveState}`} 
+                  disabled={settingsSaveState === "saving"}
+                  style={{ marginTop: "1rem" }}
+                >
+                  {settingsSaveState === "idle" && "Enregistrer les paramètres"}
+                  {settingsSaveState === "saving" && "Enregistrement..."}
+                  {settingsSaveState === "saved" && "Enregistré avec succès ! ✔️"}
+                  {settingsSaveState === "error" && "Erreur lors de la sauvegarde ❌"}
+                </button>
+              </form>
+            </div>
+          )}
+
         </main>
 
         {/* Right Details Panel */}
@@ -1471,11 +2265,42 @@ function App() {
               <div className="image-preview-container">
                 {productImages.length > 0 ? (
                   <div className="carousel" style={{ position: "relative", width: "100%", height: "100%" }}>
-                    <img 
+                     <img 
                       src={convertFileSrc(`${config.network_path}/${productImages[activeImageIndex]}`.replace(/\\/g, "/"))} 
                       alt={selectedProduct.label} 
                       style={{ width: "100%", height: "100%", objectFit: "contain" }}
                     />
+                    <button
+                      className="btn-delete-media"
+                      title="Supprimer cette image"
+                      style={{ position: "absolute", top: "10px", right: "10px", backgroundColor: "rgba(239, 68, 68, 0.8)", border: "none", color: "#fff", borderRadius: "4px", padding: "4px 8px", cursor: "pointer", fontSize: "11px", fontWeight: "bold", zIndex: 10 }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmModal({
+                          title: "Supprimer l'image",
+                          message: "Êtes-vous sûr de vouloir supprimer définitivement cette image ?",
+                          onConfirm: async () => {
+                            try {
+                              const imgPath = productImages[activeImageIndex];
+                              await invoke("delete_media", {
+                                networkPath: config.network_path,
+                                sku: selectedProduct.sku,
+                                mediaType: "image",
+                                filePath: imgPath
+                              });
+                              const updatedImgs: string[] = await invoke("list_sku_images", { networkPath: config.network_path, sku: selectedProduct.sku });
+                              setProductImages(updatedImgs);
+                              setActiveImageIndex(0);
+                              syncAndFetch(config);
+                            } catch (err: any) {
+                              setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+                            }
+                          }
+                        });
+                      }}
+                    >
+                      🗑️
+                    </button>
                     {productImages.length > 1 && (
                       <div className="carousel-controls" style={{ position: "absolute", bottom: "10px", left: 0, right: 0, display: "flex", justifyContent: "space-between", padding: "0 10px", alignItems: "center" }}>
                         <button 
@@ -1515,8 +2340,131 @@ function App() {
                   <div>Famille: <strong>{selectedProduct.category || "-"}</strong></div>
                   <div>Sous-Famille: <strong>{selectedProduct.sub_category || "-"}</strong></div>
                   <div>Emplacement: <strong>{selectedProduct.location || "Non assigné"}</strong></div>
-                  <div>Prix unitaire: <strong>{selectedProduct.price.toFixed(2)} €</strong></div>
+                  {(() => {
+                    const vpcCodeFull = getVpcCode(selectedProduct);
+                    if (vpcCodeFull) {
+                      const idx = vpcCodeFull.indexOf(":");
+                      const site = idx !== -1 ? vpcCodeFull.substring(0, idx).trim() : "VPC";
+                      const code = idx !== -1 ? vpcCodeFull.substring(idx + 1).trim() : vpcCodeFull;
+                      
+                      let url = `https://www.google.com/search?q=${encodeURIComponent(vpcCodeFull)}`;
+                      if (site.toLowerCase() === "rs" || site.toLowerCase().includes("rs component") || site.toLowerCase().includes("rs online")) {
+                        url = `https://fr.rs-online.com/web/c/?searchTerm=${encodeURIComponent(code)}`;
+                      } else if (site.toLowerCase().includes("farnell")) {
+                        url = `https://fr.farnell.com/w/c/?st=${encodeURIComponent(code)}`;
+                      } else if (site.toLowerCase().includes("mouser")) {
+                        url = `https://www.mouser.fr/Search/Refine?Keyword=${encodeURIComponent(code)}`;
+                      }
+                      
+                      return (
+                        <div style={{ gridColumn: "span 2", marginTop: "0.2rem" }}>
+                          Code VPC:{" "}
+                          <button
+                            type="button"
+                            className="btn-link"
+                            style={{ 
+                              background: "none", 
+                              border: "none", 
+                              color: "var(--primary)", 
+                              textDecoration: "underline", 
+                              cursor: "pointer", 
+                              padding: 0, 
+                              font: "inherit",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "0.2rem"
+                            }}
+                            onClick={async () => {
+                              try {
+                                await openPath(url);
+                              } catch (err) {
+                                console.error(err);
+                              }
+                            }}
+                          >
+                            🌐 {site} ({code})
+                          </button>
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
+                  {(() => {
+                    const width = getAttribute(selectedProduct, "largeur");
+                    const height = getAttribute(selectedProduct, "hauteur");
+                    const depth = getAttribute(selectedProduct, "profondeur");
+                    const weight = getAttribute(selectedProduct, "poids");
+                    const tension = getAttribute(selectedProduct, "tension");
+                    
+                    if (width || height || depth || weight || tension) {
+                      return (
+                        <div style={{ gridColumn: "span 2", borderTop: "1px solid var(--border-color)", paddingTop: "0.4rem", marginTop: "0.4rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.3rem" }}>
+                          {width && <div>Largeur: <strong>{width} mm</strong></div>}
+                          {height && <div>Hauteur: <strong>{height} mm</strong></div>}
+                          {depth && <div>Profondeur: <strong>{depth} mm</strong></div>}
+                          {weight && <div>Poids: <strong>{weight} g</strong></div>}
+                          {tension && <div style={{ gridColumn: "span 2" }}>Tension: <strong>{tension}</strong></div>}
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
+                  <div>
+                    {selectedProduct.pack_size > 1 ? "Prix du lot: " : "Prix unitaire: "}
+                    <strong>{selectedProduct.price.toFixed(2)} €</strong>
+                  </div>
+                  {selectedProduct.pack_size > 1 && (
+                    <>
+                      <div>Taille du lot: <strong>{selectedProduct.pack_size} u</strong></div>
+                      <div>Prix unitaire: <strong>{(selectedProduct.price / selectedProduct.pack_size).toFixed(4)} €</strong></div>
+                    </>
+                  )}
+                  <div>Valeur totale stock: <strong>{((selectedProduct.current_stock / (selectedProduct.pack_size || 1)) * selectedProduct.price).toFixed(2)} €</strong></div>
                 </div>
+
+                <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "11px" }}
+                    disabled={isScrapingPrice}
+                    onClick={handleScrapePrice}
+                  >
+                    {isScrapingPrice ? "Recherche prix..." : "🔍 Scraper Prix (RS)"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "11px" }}
+                    disabled={isScrapingMedia}
+                    onClick={handleScrapeImageSingle}
+                  >
+                    🔍 Scraper Image
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "11px" }}
+                    disabled={isScrapingMedia}
+                    onClick={handleScrapePdfSingle}
+                  >
+                    🔍 Scraper PDF
+                  </button>
+                </div>
+                {movementError && movementError.includes("déjà en cours") && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ marginTop: "0.5rem", fontSize: "11px", padding: "0.2rem 0.5rem", width: "100%", backgroundColor: "var(--danger-light)", color: "var(--danger)" }}
+                    onClick={async () => {
+                      await invoke("force_release_lock", { networkPath: config.network_path });
+                      setMovementError("");
+                      setAlertModal({ title: "Déverrouillage", message: "Verrou forcé et libéré !" });
+                    }}
+                  >
+                    🔓 Forcer le déverrouillage du Scraping
+                  </button>
+                )}
 
                 <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.8rem", marginBottom: "0.8rem" }}>
                   <button 
@@ -1526,6 +2474,22 @@ function App() {
                     onClick={() => {
                       setEditSuccess("");
                       setEditError("");
+                      
+                      let site = "";
+                      let code = "";
+                      try {
+                        const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
+                        if (attrs && attrs.vpc) {
+                          const keys = Object.keys(attrs.vpc);
+                          if (keys.length > 0) {
+                            site = keys[0];
+                            code = attrs.vpc[site];
+                          }
+                        }
+                      } catch (e) {}
+                      setEditVpcSite(site);
+                      setEditVpcCode(code);
+
                       setEditProduct({
                         sku: selectedProduct.sku,
                         mpn: selectedProduct.mpn,
@@ -1539,7 +2503,8 @@ function App() {
                         item_type: selectedProduct.item_type,
                         image_path: selectedProduct.image_path || null,
                         pdf_path: selectedProduct.pdf_path || null,
-                        attributes: selectedProduct.attributes || "{}",
+                        attributes: typeof selectedProduct.attributes === "string" ? selectedProduct.attributes : JSON.stringify(selectedProduct.attributes || {}),
+                        pack_size: selectedProduct.pack_size || 1,
                       });
                       setShowEditModal(true);
                     }}
@@ -1550,20 +2515,24 @@ function App() {
                     type="button" 
                     className="btn btn-danger" 
                     style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "12px", backgroundColor: "var(--danger)" }}
-                    onClick={async () => {
-                      if (confirm(`Êtes-vous sûr de vouloir supprimer définitivement le SKU ${selectedProduct.sku} ?`)) {
-                        try {
-                          await invoke("delete_product", {
-                            networkPath: config.network_path,
-                            trigramme: config.trigramme,
-                            sku: selectedProduct.sku
-                          });
-                          setSelectedProduct(null);
-                          syncAndFetch(config);
-                        } catch (err: any) {
-                          alert(`Erreur de suppression : ${err.toString()}`);
+                    onClick={() => {
+                      setConfirmModal({
+                        title: "Supprimer le produit",
+                        message: `Êtes-vous sûr de vouloir supprimer définitivement le SKU ${selectedProduct.sku} ?`,
+                        onConfirm: async () => {
+                          try {
+                            await invoke("delete_product", {
+                              networkPath: config.network_path,
+                              trigramme: config.trigramme,
+                              sku: selectedProduct.sku
+                            });
+                            setSelectedProduct(null);
+                            syncAndFetch(config);
+                          } catch (err: any) {
+                            setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+                          }
                         }
-                      }
+                      });
                     }}
                   >
                     🗑️ Supprimer
@@ -1573,24 +2542,132 @@ function App() {
 
               {/* PDF Document action */}
               <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.2rem" }}>
+                  <h4 style={{ fontFamily: "var(--font-title)", fontSize: "12px", margin: 0 }}>Documents PDF</h4>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ padding: "0.25rem 0.5rem", fontSize: "10px" }}
+                    onClick={async () => {
+                      if (!config || !selectedProduct) return;
+                      const brand = selectedProduct.brand.trim() || "INCONNU";
+                      const cat = selectedProduct.category.trim() || "INCONNU";
+                      const sub = selectedProduct.sub_category.trim() || "INCONNU";
+                      const sku = selectedProduct.sku;
+                      const path = `${config.network_path}/documents/${brand}/${cat}/${sub}/${sku}`.replace(/\//g, "\\");
+                      try {
+                        await invoke("ensure_directory", { path });
+                        await openPath(path);
+                      } catch (err: any) {
+                        setMovementError(`Impossible d'ouvrir le dossier : ${err.toString()}`);
+                      }
+                    }}
+                  >
+                    📂 Ouvrir dossier
+                  </button>
+                </div>
                 {productPdfs.length > 0 ? (
                   productPdfs.map((pdf, idx) => {
                     const fileName = pdf.split("/").pop() || "Manuel PDF";
+                    const isEditing = editingPdfPath === pdf;
                     return (
-                      <button 
-                        key={idx}
-                        className="btn btn-secondary"
-                        onClick={async () => {
-                          const fullPath = `${config.network_path}/${pdf}`.replace(/\//g, "\\");
-                          try {
-                            await openPath(fullPath);
-                          } catch (err: any) {
-                            setMovementError(`Impossible d'ouvrir le PDF : ${err.toString()}`);
-                          }
-                        }}
-                      >
-                        📄 {fileName}
-                      </button>
+                      <div key={idx} style={{ display: "flex", gap: "0.3rem" }}>
+                        {isEditing ? (
+                          <div style={{ display: "flex", gap: "0.2rem", flex: 1 }}>
+                            <input
+                              type="text"
+                              style={{ padding: "0.3rem 0.5rem", fontSize: "11px", flex: 1 }}
+                              value={newPdfName}
+                              onChange={(e) => setNewPdfName(e.target.value)}
+                            />
+                            <button
+                              className="btn"
+                              style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
+                              onClick={async () => {
+                                try {
+                                  await invoke("rename_media", {
+                                    networkPath: config.network_path,
+                                    sku: selectedProduct.sku,
+                                    mediaType: "pdf",
+                                    oldPath: pdf,
+                                    newName: newPdfName
+                                  });
+                                  setEditingPdfPath(null);
+                                  const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
+                                  setProductPdfs(updatedPdfs);
+                                  syncAndFetch(config);
+                                } catch (err: any) {
+                                  setAlertModal({ title: "Erreur de renommage", message: err.toString() });
+                                }
+                              }}
+                            >
+                              ✔️
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
+                              onClick={() => setEditingPdfPath(null)}
+                            >
+                              ❌
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <button 
+                              className="btn btn-secondary"
+                              style={{ flex: 1, padding: "0.4rem 0.6rem", fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}
+                              onClick={async () => {
+                                const fullPath = `${config.network_path}/${pdf}`.replace(/\//g, "\\");
+                                try {
+                                  await openPath(fullPath);
+                                } catch (err: any) {
+                                  setMovementError(`Impossible d'ouvrir le PDF : ${err.toString()}`);
+                                }
+                              }}
+                            >
+                              📄 {fileName}
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              title="Renommer"
+                              style={{ padding: "0.4rem 0.5rem", fontSize: "11px", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                              onClick={() => {
+                                setEditingPdfPath(pdf);
+                                setNewPdfName(fileName.replace(".pdf", "").replace(".PDF", ""));
+                              }}
+                            >
+                              ✏️
+                            </button>
+                          </>
+                        )}
+                        <button
+                          className="btn btn-danger"
+                          title="Supprimer cette notice"
+                          style={{ backgroundColor: "var(--danger)", color: "#fff", padding: "0 0.5rem", border: "none", borderRadius: "6px", cursor: "pointer" }}
+                          onClick={() => {
+                            setConfirmModal({
+                              title: "Supprimer la notice",
+                              message: `Êtes-vous sûr de vouloir supprimer définitivement la notice ${fileName} ?`,
+                              onConfirm: async () => {
+                                try {
+                                  await invoke("delete_media", {
+                                    networkPath: config.network_path,
+                                    sku: selectedProduct.sku,
+                                    mediaType: "pdf",
+                                    filePath: pdf
+                                  });
+                                  const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
+                                  setProductPdfs(updatedPdfs);
+                                  syncAndFetch(config);
+                                } catch (err: any) {
+                                  setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+                                }
+                              }
+                            });
+                          }}
+                        >
+                          🗑️
+                        </button>
+                      </div>
                     );
                   })
                 ) : (
@@ -1689,6 +2766,45 @@ function App() {
                 {createError && <div className="wizard-error">{createError}</div>}
                 {duplicateWarning && <div className="wizard-error" style={{ color: "var(--warning)", backgroundColor: "var(--warning-light)", borderColor: "rgba(245,158,11,0.2)" }}>{duplicateWarning}</div>}
 
+                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)", alignItems: "center" }}>
+                  <span style={{ fontSize: "11px", color: "var(--text-secondary)", flex: 1 }}>
+                    💡 Renseignez le <strong>SKU</strong> ou le <strong>Code VPC</strong> ci-dessous puis cliquez sur Pré-remplir pour charger automatiquement la désignation, la marque et le prix.
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ padding: "0.4rem 0.8rem", fontSize: "11px", whiteSpace: "nowrap" }}
+                    onClick={async () => {
+                      const code = newVpcCode.trim() || newProduct.sku.trim();
+                      if (!code) {
+                        setCreateError("Veuillez renseigner un SKU ou un Code VPC pour le pré-remplissage.");
+                        return;
+                      }
+                      setCreateError("");
+                      setCreateSuccess("");
+                      try {
+                        const details: any = await invoke("scrape_product_details", {
+                          vpcSite: newVpcSite || "RS",
+                          vpcCode: newVpcCode,
+                          sku: newProduct.sku
+                        });
+                        setNewProduct(prev => ({
+                          ...prev,
+                          label: details.label,
+                          brand: details.brand,
+                          price: details.price,
+                          pack_size: details.pack_size
+                        }));
+                        setCreateSuccess("Champs pré-remplis avec succès !");
+                      } catch (err: any) {
+                        setCreateError(`Échec du pré-remplissage : ${err.toString()}`);
+                      }
+                    }}
+                  >
+                    🔍 Pré-remplir
+                  </button>
+                </div>
+
                 <div className="form-group" style={{ marginBottom: "1rem" }}>
                   <label htmlFor="modal-p-sku">SKU (Référence Interne) *</label>
                   <input
@@ -1759,6 +2875,29 @@ function App() {
                     />
                   </div>
                 </div>
+                <div className="row" style={{ gap: "1rem", marginBottom: "1rem", justifyContent: "stretch" }}>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label htmlFor="modal-p-vpc-site">Fournisseur VPC</label>
+                    <select
+                      id="modal-p-vpc-site"
+                      value={newVpcSite}
+                      onChange={(e) => setNewVpcSite(e.target.value)}
+                    >
+                      <option value="">Sélectionner</option>
+                      {config?.vpc_sites?.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label htmlFor="modal-p-vpc-code">Code VPC (Catalogue)</label>
+                    <input
+                      id="modal-p-vpc-code"
+                      type="text"
+                      placeholder="ex: RS-123-456"
+                      value={newVpcCode}
+                      onChange={(e) => setNewVpcCode(e.target.value)}
+                    />
+                  </div>
+                </div>
                 <div className="form-group" style={{ marginBottom: "1rem" }}>
                   <label htmlFor="modal-p-loc">Emplacement Physique</label>
                   <input
@@ -1792,6 +2931,16 @@ function App() {
                       list="prices-datalist"
                       value={newProduct.price}
                       onChange={(e) => setNewProduct(prev => ({ ...prev, price: Number(e.target.value) || 0 }))}
+                    />
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label htmlFor="modal-p-pack">Taille du Lot (pack)</label>
+                    <input
+                      id="modal-p-pack"
+                      type="number"
+                      min={1}
+                      value={newProduct.pack_size}
+                      onChange={(e) => setNewProduct(prev => ({ ...prev, pack_size: Number(e.target.value) || 1 }))}
                     />
                   </div>
                 </div>
@@ -1876,6 +3025,29 @@ function App() {
                     />
                   </div>
                 </div>
+                <div className="row" style={{ gap: "1rem", marginBottom: "1rem", justifyContent: "stretch" }}>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label htmlFor="edit-p-vpc-site">Fournisseur VPC</label>
+                    <select
+                      id="edit-p-vpc-site"
+                      value={editVpcSite}
+                      onChange={(e) => setEditVpcSite(e.target.value)}
+                    >
+                      <option value="">Sélectionner</option>
+                      {config?.vpc_sites?.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label htmlFor="edit-p-vpc-code">Code VPC (Catalogue)</label>
+                    <input
+                      id="edit-p-vpc-code"
+                      type="text"
+                      placeholder="ex: RS-123-456"
+                      value={editVpcCode}
+                      onChange={(e) => setEditVpcCode(e.target.value)}
+                    />
+                  </div>
+                </div>
                 <div className="form-group" style={{ marginBottom: "1rem" }}>
                   <label htmlFor="edit-p-loc">Emplacement Physique</label>
                   <input
@@ -1909,6 +3081,16 @@ function App() {
                       list="prices-datalist"
                       value={editProduct.price}
                       onChange={(e) => setEditProduct(prev => ({ ...prev, price: Number(e.target.value) || 0 }))}
+                    />
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label htmlFor="edit-p-pack">Taille du Lot (pack)</label>
+                    <input
+                      id="edit-p-pack"
+                      type="number"
+                      min={1}
+                      value={editProduct.pack_size}
+                      onChange={(e) => setEditProduct(prev => ({ ...prev, pack_size: Number(e.target.value) || 1 }))}
                     />
                   </div>
                 </div>
@@ -1953,6 +3135,132 @@ function App() {
       <datalist id="prices-datalist">
         {uniquePrices.map(p => <option key={p} value={p} />)}
       </datalist>
+
+      {/* Scrape Progress Modal */}
+      {scrapeModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-container" style={{ maxWidth: "450px" }}>
+            <div className="modal-header">
+              <h3>{scrapeModalTitle}</h3>
+              <button 
+                className="modal-close" 
+                onClick={() => setScrapeModalOpen(false)}
+                disabled={isScrapingMedia}
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal-body" style={{ padding: "1.5rem" }}>
+              <div className="scrape-steps-list" style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
+                {scrapeSteps.map((step, idx) => {
+                  let statusIcon = "⏳";
+                  let statusClass = "step-pending";
+                  if (step.status === "active") {
+                    statusIcon = "🌀";
+                    statusClass = "step-active";
+                  } else if (step.status === "success") {
+                    statusIcon = "✔️";
+                    statusClass = "step-success";
+                  } else if (step.status === "error") {
+                    statusIcon = "❌";
+                    statusClass = "step-error";
+                  }
+                  return (
+                    <div key={idx} className={`scrape-step ${statusClass}`} style={{ display: "flex", alignItems: "flex-start", gap: "0.8rem" }}>
+                      <span className="step-icon" style={{ fontSize: "1.2rem", lineHeight: 1 }}>{statusIcon}</span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", flex: 1, minWidth: 0 }}>
+                        <span className="step-label" style={{ fontWeight: step.status === "active" ? "600" : "500", color: step.status === "pending" ? "var(--text-muted)" : "var(--text-primary)" }}>
+                          {step.label}
+                        </span>
+                        {step.details && (
+                          <span className="step-details" style={{ fontSize: "11px", color: step.status === "error" ? "var(--danger)" : "var(--text-secondary)", wordBreak: "break-all", whiteSpace: "normal", display: "block" }}>
+                            {step.details}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {scrapeError && (
+                <div className="wizard-error" style={{ marginTop: "1.5rem", marginBottom: 0 }}>
+                  {scrapeError}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button 
+                type="button" 
+                className="btn" 
+                onClick={() => setScrapeModalOpen(false)}
+                disabled={isScrapingMedia}
+              >
+                {isScrapingMedia ? "Recherche en cours..." : "Fermer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Local Confirmation Modal Overlay */}
+      {confirmModal && (
+        <div className="modal-overlay" style={{ zIndex: 2000 }}>
+          <div className="modal-container" style={{ maxWidth: "420px" }}>
+            <div className="modal-header">
+              <h3>{confirmModal.title}</h3>
+              <button className="modal-close" onClick={() => {
+                if (confirmModal.onCancel) confirmModal.onCancel();
+                setConfirmModal(null);
+              }}>×</button>
+            </div>
+            <div className="modal-body" style={{ padding: "1.5rem", fontSize: "12.5px", color: "var(--text-primary)" }}>
+              {confirmModal.message}
+            </div>
+            <div className="modal-footer">
+              <button 
+                type="button" 
+                className="btn btn-secondary" 
+                onClick={() => {
+                  if (confirmModal.onCancel) confirmModal.onCancel();
+                  setConfirmModal(null);
+                }}
+              >
+                Annuler
+              </button>
+              <button 
+                type="button" 
+                className="btn btn-danger" 
+                style={{ backgroundColor: "var(--danger)" }}
+                onClick={() => {
+                  confirmModal.onConfirm();
+                  setConfirmModal(null);
+                }}
+              >
+                Confirmer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Local Alert Modal Overlay */}
+      {alertModal && (
+        <div className="modal-overlay" style={{ zIndex: 2100 }}>
+          <div className="modal-container" style={{ maxWidth: "400px" }}>
+            <div className="modal-header">
+              <h3>{alertModal.title}</h3>
+              <button className="modal-close" onClick={() => setAlertModal(null)}>×</button>
+            </div>
+            <div className="modal-body" style={{ padding: "1.5rem", fontSize: "12.5px", color: "var(--text-primary)" }}>
+              {alertModal.message}
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn" onClick={() => setAlertModal(null)}>OK</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Hover Image Preview Overlay */}
       {hoveredImage && (

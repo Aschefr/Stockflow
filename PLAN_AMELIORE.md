@@ -90,40 +90,52 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 
 **Objectif :** Automatiser l'enrichissement des fiches produits via internet, directement depuis les postes clients.
 
-#### P2.1 — Recherche Intégrée (SearxNG) & Scraping PDF
+#### [DONE] P2.1 — Recherche Intégrée (SearxNG) & Scraping PDF
 - Interrogation d'une instance SearxNG depuis le PC de l'utilisateur pour trouver les fiches techniques.
 - Extraction asynchrone des URLs de PDF, téléchargement automatique et dépôt sur le lecteur réseau partagé.
 - **Structure de stockage en cascade :** Les PDF sont stockés en respectant la structure de dossiers hiérarchique de la migration : `documents/MARQUE/Famille/Sous-Famille/Référence/(fichiers pdf)` (avec sanitization des caractères invalides pour Windows).
-- **Paramétrage SearxNG & Renommage :** Configuration de l'instance SearxNG et définition d'une convention de renommage des documents PDF téléchargés dans les paramètres (ex: `{SKU}_datasheet.pdf` ou `{SKU}_{Brand}_{MPN}.pdf`).
+- **Détection intelligente du type de document :** Le module de scraping analyse le texte et le nom du lien d'origine (ex: *datasheet*, *manuel*, *fiche-technique*) pour identifier automatiquement le type de document et l'injecter comme variable `{Type}` dans le renommage.
+- **Convention de renommage paramétrable :** Configuration de l'instance SearxNG et définition d'une convention de renommage des documents PDF téléchargés dans les paramètres (ex: `{SKU}_{Type}.pdf` ou `{SKU}_{Brand}_{MPN}.pdf`).
+- **Modal de progression en direct :** Un modal s'affiche dès le lancement du scraping pour montrer l'avancement détaillé de la recherche (mots-clés testés, liens trouvés, statut du téléchargement du document).
 - **Modal de validation PDF :** Lors d'un scraping au cas par cas, ouverture d'un modal de validation montrant les PDF trouvés pour permettre à l'utilisateur de choisir et de valider celui à enregistrer.
 - **Suppression de PDF :** Possibilité de supprimer une documentation PDF associée à une référence, entraînant sa suppression physique sur le lecteur réseau partagé.
 
-#### P2.2 — Scraping des Prix & Anti-Redondance
+#### [DONE] P2.2 — Scraping des Prix & Anti-Redondance
 - Veille tarifaire sur demande utilisateur (ex: RS Components).
 - **Contrôle de concurrence :** Pour éviter que plusieurs postes ne lancent le scraping du même produit en même temps, vérification d'un fichier `last_scrape_lock.json`. L'information mise à jour est ensuite publiée comme un événement JSON.
 - **Résilience aux Crashs (Locks fantômes) :** Si un poste plante pendant un scraping, le fichier lock reste sur le réseau. L'application détectera un verrou anormalement long (> 5 minutes), affichera un avertissement visuel, et permettra à l'utilisateur de "Forcer le déverrouillage" d'un simple clic pour reprendre la main.
 - Mesures anti-spam : Limiter le nombre de requêtes par seconde et par utilisateur.
 
-#### P2.3 — Gestion Dépôts vs Fournisseurs
+#### [DONE] P2.3 — Gestion Dépôts vs Fournisseurs
 - Distinction sémantique et logique entre les **Dépôts Physiques** internes (Usine, Atelier) et les **Fournisseurs / VPC** externes.
 - **Gestion des codes fournisseurs (ex: Code RS, Code VPC) :** Identification d'un code article spécifique chez un fournisseur donné.
 - **Colonne "Code VPC" dans le tableau principal :** Ajout d'une colonne dédiée dans la grille principale pour visualiser rapidement ces codes.
-- **Détails SKU :** Affichage des informations de code fournisseur dans le panneau latéral de détails du SKU.
+- **Colonnes de Dimensions :** Restauration des colonnes de caractéristiques physiques (Largeur, Hauteur, Profondeur, Poids, Tension) issues du CSV de migration, stockées en attributs et affichées de manière dynamique.
+- **Détails SKU :** Affichage des informations de code fournisseur et des caractéristiques physiques dans le panneau latéral de détails du SKU.
 - **Formulaire SKU (Modal) :** Ajout de nouveaux champs dans le modal de création/édition pour saisir et associer les codes fournisseurs.
+- **Gestion de la Taille du Lot (Relation Quantité/Prix) :** Liaison entre la quantité d'unités physiques et le prix d'achat défini pour un lot (pack). Intégration du champ dans la base SQLite, événements, formulaires et adaptation des calculs de valeur globale du stock.
 - **Page Paramètres (Gestion des sites de VPC) :** Interface permettant d'ajouter, modifier ou supprimer des sites de VPC (fournisseurs) dans le système.
+- **Zéro boîte système (globale) :** Aucune boîte d'alerte ou de confirmation système n'est affichée (pas de `alert()` ni de `confirm()`). Toutes les confirmations se font via des modaux React localisés et les erreurs via des animations ou encarts de retours visuels.
 
-#### P2.4 — Scraping Images Automatique
+#### [DONE] P2.4 — Scraping Images Automatique
 - Téléchargement et standardisation automatique des illustrations produits.
 - **Convention de renommage paramétrable :** Format de renommage des images personnalisable dans les paramètres (ex: `{SKU}_{Index}.jpg` ou `{SKU}_{Source}_{Date}.jpg`).
+- **Éditeur de convention visuel :** Les champs de convention de nommage affichent des badges glisser-déposer pour composer la formule facilement avec insertion de séparateurs automatiques et aperçu en temps réel d'un exemple de nom de fichier simulé.
+- **Modal de progression en direct :** Affichage d'un modal montrant les étapes de la recherche d'images et du téléchargement en cours.
 - **Modal de validation d'images :** Lors d'un scraping au cas par cas, affichage d'un modal pour valider, réordonner ou sélectionner les images trouvées avant leur dépôt final.
 - **Suppression d'images :** Possibilité de supprimer individuellement une ou plusieurs images associées à une référence depuis le carrousel/galerie (avec renommage/réindexation automatique des fichiers restants si nécessaire).
 - Génération de miniatures gérée localement par le PC client avant l'écriture réseau pour des performances d'affichage optimales.
 
-#### P2.5 — Scraping par Lot (Images & PDF)
+#### [DONE] P2.5 — Scraping par Lot (Images & PDF)
 - **Sélection par case à cocher :** Ajout de cases à cocher dans le tableau principal pour sélectionner une liste de références.
 - **Lancement groupé :** Possibilité de lancer le scraping (images et/ou PDF) sur l'ensemble de la sélection.
 - **Progression aléatoire :** La file d'attente traite la sélection dans un ordre aléatoire (randomisé) pour éviter les requêtes successives trop prévisibles sur les mêmes serveurs/marques.
 - **Indicateur de progression :** Barre de progression globale avec statistiques de réussite/échec de la tâche de lot.
+
+#### [TODO] P2.6 — Pré-remplissage Intelligent à la Création
+- **Recherche Instantanée :** À partir de la seule saisie du code VPC ou du SKU dans le formulaire de création, l'utilisateur peut cliquer sur un bouton "🔍 Pré-remplir".
+- **Scraping en Arrière-plan :** Requête rapide vers le fournisseur configuré (ex: RS) pour extraire dynamiquement : la désignation (label), la marque (brand), le prix, la taille du lot (pack size), et éventuellement lancer en tâche de fond le scraping d'images et de PDF.
+- **Remplissage Automatique :** Renseigne automatiquement tous les champs du modal d'ajout pour faire gagner un temps précieux à l'utilisateur lors des saisies manuelles.
 
 ---
 

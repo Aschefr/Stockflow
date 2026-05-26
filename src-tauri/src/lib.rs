@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod events;
 mod csv_importer;
+mod scraper;
 
 use config::{AppConfig, load_config_internal, save_config_internal};
 use db::{Product, ProductHistoryItem};
@@ -14,7 +15,15 @@ fn get_config() -> Option<AppConfig> {
 }
 
 #[tauri::command]
-fn save_config(trigramme: String, network_path: String) -> Result<(), String> {
+fn save_config(
+    trigramme: String,
+    network_path: String,
+    searxng_url: Option<String>,
+    vpc_sites: Vec<String>,
+    pdf_rename_convention: Option<String>,
+    image_rename_convention: Option<String>,
+    pdf_size_threshold: Option<f64>,
+) -> Result<(), String> {
     let clean_trigramme = trigramme.trim().to_uppercase();
     if clean_trigramme.len() != 3 {
         return Err("Le trigramme doit comporter exactement 3 caractères.".to_string());
@@ -27,6 +36,11 @@ fn save_config(trigramme: String, network_path: String) -> Result<(), String> {
     let config = AppConfig {
         trigramme: clean_trigramme,
         network_path: new_path,
+        searxng_url: searxng_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        vpc_sites,
+        pdf_rename_convention: pdf_rename_convention.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        image_rename_convention: image_rename_convention.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        pdf_size_threshold,
     };
     
     // Initialiser les dossiers réseau
@@ -120,6 +134,7 @@ fn create_product(
     image_path: Option<String>,
     pdf_path: Option<String>,
     attributes: serde_json::Value,
+    pack_size: i64,
 ) -> Result<(), String> {
     let clean_sku = db::sanitize_sku(&sku);
     if clean_sku.is_empty() {
@@ -140,6 +155,7 @@ fn create_product(
         "image_path": image_path,
         "pdf_path": pdf_path,
         "attributes": attributes,
+        "packSize": pack_size,
     });
 
     events::write_event_file(&network_path, "PRODUCT_CREATE", &trigramme, payload)
@@ -154,6 +170,59 @@ fn delete_product(
     let clean_sku = db::sanitize_sku(&sku);
     if clean_sku.is_empty() {
         return Err("Le SKU/Référence interne ne peut pas être vide.".to_string());
+    }
+
+    // Récupérer les métadonnées (brand, category, sub_category) pour construire le chemin cascade des PDF
+    if let Some(db_path) = events::get_db_path() {
+        if let Ok(conn) = Connection::open(&db_path) {
+            let row_opt: Option<(String, String, String)> = conn.query_row(
+                "SELECT brand, category, sub_category FROM products WHERE sku = ?",
+                [&clean_sku],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    ))
+                }
+            ).ok();
+
+            if let Some((brand, category, sub_category)) = row_opt {
+                // 1. Supprimer le dossier cascade de notices PDF
+                let clean_brand = csv_importer::sanitize_folder_name(&brand, "INCONNUE");
+                let clean_cat = csv_importer::sanitize_folder_name(&category, "SANS_FAMILLE");
+                let clean_subcat = csv_importer::sanitize_folder_name(&sub_category, "SANS_SOUS_FAMILLE");
+                
+                let doc_dir = std::path::Path::new(&network_path)
+                    .join("documents")
+                    .join(&clean_brand)
+                    .join(&clean_cat)
+                    .join(&clean_subcat)
+                    .join(&clean_sku);
+                    
+                if doc_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&doc_dir);
+                }
+
+                // 2. Supprimer les images associées dans le dossier images/
+                let img_dir = std::path::Path::new(&network_path).join("images");
+                if img_dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(img_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_file() {
+                                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                                    if file_name.starts_with(&format!("{}_", clean_sku.to_uppercase())) 
+                                        || file_name.starts_with(&format!("{}_", clean_sku)) {
+                                        let _ = std::fs::remove_file(&path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let payload = json!({
@@ -311,7 +380,7 @@ fn get_dashboard_stats() -> Result<serde_json::Value, String> {
     let total_refs: i64 = conn.query_row("SELECT COUNT(*) FROM products", [], |row| row.get(0)).unwrap_or(0);
     
     let total_value: f64 = conn.query_row(
-        "SELECT SUM(price * current_stock) FROM products",
+        "SELECT SUM((current_stock / CAST(pack_size AS REAL)) * price) FROM products",
         [],
         |row| row.get(0)
     ).unwrap_or(0.0);
@@ -473,6 +542,177 @@ async fn clean_network_media(network_path: String) -> Result<String, String> {
     }).await.map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+fn delete_media(
+    network_path: String,
+    sku: String,
+    media_type: String,
+    file_path: String,
+) -> Result<(), String> {
+    let full_path = std::path::Path::new(&network_path).join(&file_path);
+    if !full_path.exists() {
+        return Err("Le fichier média spécifié n'existe pas.".to_string());
+    }
+    
+    let path_str = file_path.replace("\\", "/");
+    let safe = (media_type == "image" && path_str.starts_with("images/"))
+        || (media_type == "pdf" && path_str.starts_with("documents/"));
+        
+    if !safe {
+        return Err("Chemin de média non autorisé.".to_string());
+    }
+    
+    std::fs::remove_file(&full_path).map_err(|e| format!("Erreur lors de la suppression : {}", e))?;
+    
+    if let Some(db_path) = events::get_db_path() {
+        if let Ok(conn) = Connection::open(db_path) {
+            let sku_upper = sku.to_uppercase();
+            if media_type == "pdf" {
+                let current_pdf: Option<String> = conn.query_row(
+                    "SELECT pdf_path FROM products WHERE sku = ?",
+                    [&sku_upper],
+                    |row| row.get(0)
+                ).unwrap_or(None);
+                
+                if let Some(ref cp) = current_pdf {
+                    if cp.replace("\\", "/") == path_str {
+                        let _ = conn.execute("UPDATE products SET pdf_path = NULL WHERE sku = ?", [&sku_upper]);
+                    }
+                }
+            } else if media_type == "image" {
+                let current_img: Option<String> = conn.query_row(
+                    "SELECT image_path FROM products WHERE sku = ?",
+                    [&sku_upper],
+                    |row| row.get(0)
+                ).unwrap_or(None);
+                
+                if let Some(ref ci) = current_img {
+                    if ci.replace("\\", "/") == path_str {
+                        let remaining_images = list_sku_images(network_path.clone(), sku.clone()).unwrap_or_default();
+                        let next_img = remaining_images.first().cloned();
+                        let _ = conn.execute("UPDATE products SET image_path = ? WHERE sku = ?", (next_img, &sku_upper));
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
+fn rename_media(
+    network_path: String,
+    sku: String,
+    media_type: String,
+    old_path: String,
+    new_name: String,
+) -> Result<String, String> {
+    let old_full = std::path::Path::new(&network_path).join(&old_path);
+    if !old_full.exists() {
+        return Err("Le fichier à renommer n'existe pas.".to_string());
+    }
+
+    let parent = old_full.parent().ok_or("Dossier parent introuvable")?;
+    
+    let mut clean_new_name = new_name.trim().to_string();
+    let ext = old_full.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !clean_new_name.to_lowercase().ends_with(&format!(".{}", ext.to_lowercase())) {
+        clean_new_name = format!("{}.{}", clean_new_name, ext);
+    }
+
+    let sanitized_name = db::sanitize_sku(&clean_new_name.replace(".pdf", "").replace(".jpg", "").replace(".jpeg", ""));
+    let final_name = format!("{}.{}", sanitized_name, ext);
+
+    let new_full = parent.join(&final_name);
+    if new_full.exists() {
+        return Err("Un fichier avec ce nom existe déjà.".to_string());
+    }
+
+    std::fs::rename(&old_full, &new_full).map_err(|e| format!("Erreur système rename : {}", e))?;
+
+    let new_relative = new_full.strip_prefix(&network_path)
+        .map(|p| p.to_string_lossy().to_string().replace("\\", "/"))
+        .map_err(|e| e.to_string())?;
+
+    if let Some(db_path) = events::get_db_path() {
+        if let Ok(conn) = Connection::open(db_path) {
+            let sku_upper = sku.to_uppercase();
+            if media_type == "pdf" {
+                let current_pdf: Option<String> = conn.query_row(
+                    "SELECT pdf_path FROM products WHERE sku = ?",
+                    [&sku_upper],
+                    |row| row.get(0)
+                ).unwrap_or(None);
+                if let Some(ref cp) = current_pdf {
+                    if cp.replace("\\", "/") == old_path.replace("\\", "/") {
+                        let _ = conn.execute("UPDATE products SET pdf_path = ? WHERE sku = ?", (&new_relative, &sku_upper));
+                    }
+                }
+            } else if media_type == "image" {
+                let current_img: Option<String> = conn.query_row(
+                    "SELECT image_path FROM products WHERE sku = ?",
+                    [&sku_upper],
+                    |row| row.get(0)
+                ).unwrap_or(None);
+                if let Some(ref ci) = current_img {
+                    if ci.replace("\\", "/") == old_path.replace("\\", "/") {
+                        let _ = conn.execute("UPDATE products SET image_path = ? WHERE sku = ?", (&new_relative, &sku_upper));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(new_relative)
+}
+
+#[tauri::command]
+fn ensure_directory(path: String) -> Result<(), String> {
+    std::fs::create_dir_all(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn force_release_lock(network_path: String) {
+    scraper::force_release_lock(&network_path);
+}
+
+#[tauri::command]
+async fn scrape_price(sku: String, provider: String, network_path: String, trigramme: String) -> Result<f64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        scraper::scrape_price_internal(&sku, &provider, &network_path, &trigramme)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn scrape_pdf(window: tauri::Window, sku: String, query: String, network_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config_internal().ok_or("Configuration introuvable")?;
+        let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+        let conv = config.pdf_rename_convention.clone().unwrap_or_else(|| "{SKU}_datasheet.pdf".to_string());
+        
+        scraper::scrape_pdf_internal(&window, &sku, &url, &query, &conv, &network_path)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn scrape_images(sku: String, query: String, network_path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config_internal().ok_or("Configuration introuvable")?;
+        let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+        let conv = config.image_rename_convention.clone().unwrap_or_else(|| "{SKU}_{Index}.jpg".to_string());
+        
+        scraper::scrape_images_internal(&sku, &url, &query, &conv, &network_path)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn scrape_product_details(vpc_site: String, vpc_code: String, sku: String) -> Result<scraper::ScrapedProductDetails, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        scraper::scrape_product_details_internal(&vpc_site, &vpc_code, &sku)
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -497,7 +737,15 @@ pub fn run() {
             list_sku_pdfs,
             get_dashboard_stats,
             compact_network_events,
-            clean_network_media
+            clean_network_media,
+            delete_media,
+            rename_media,
+            force_release_lock,
+            scrape_price,
+            scrape_pdf,
+            scrape_images,
+            ensure_directory,
+            scrape_product_details
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

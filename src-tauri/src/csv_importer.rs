@@ -91,7 +91,7 @@ pub fn import_csv_file(
 
         // Récupérer le produit s'il existe déjà
         let existing: Option<super::db::Product> = conn.query_row(
-            "SELECT sku, mpn, label, brand, category, sub_category, location, item_type, min_stock, price, current_stock, attributes, image_path, pdf_path FROM products WHERE sku = ?",
+            "SELECT sku, mpn, label, brand, category, sub_category, location, item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size FROM products WHERE sku = ?",
             [&sku],
             |row| Ok(super::db::Product {
                 sku: row.get(0)?,
@@ -108,6 +108,7 @@ pub fn import_csv_file(
                 attributes: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
                 image_path: row.get(12)?,
                 pdf_path: row.get(13)?,
+                pack_size: row.get::<_, Option<i64>>(14)?.unwrap_or(1),
             })
         ).ok();
 
@@ -246,6 +247,19 @@ pub fn import_csv_file(
 
         // Créer l'événement de création/mise à jour de produit si les détails ont changé ou si le produit n'existe pas
         if details_changed || existing.is_none() {
+            let mut attributes_json = json!({
+                "tension": tension,
+                "largeur": largeur,
+                "hauteur": hauteur,
+                "profondeur": profondeur,
+                "poids": poids,
+                "codeRS": code_rs,
+                "notes": notes
+            });
+            if !code_rs.is_empty() {
+                attributes_json["vpc"] = json!({ "RS": code_rs });
+            }
+
             let create_payload = json!({
                 "sku": sku,
                 "mpn": ref_str.to_string(),
@@ -260,15 +274,8 @@ pub fn import_csv_file(
                 "image_path": image_path,
                 "pdf_path": pdf_path,
                 "initial_stock": qte,
-                "attributes": {
-                    "tension": tension,
-                    "largeur": largeur,
-                    "hauteur": hauteur,
-                    "profondeur": profondeur,
-                    "poids": poids,
-                    "codeRS": code_rs,
-                    "notes": notes
-                }
+                "packSize": existing.as_ref().map(|p| p.pack_size).unwrap_or(1),
+                "attributes": attributes_json
             });
 
             if super::events::write_event_file(network_path, "PRODUCT_CREATE", trigramme, create_payload).is_ok() {
@@ -342,7 +349,7 @@ fn resolve_source_path(base_dir: &Path, relative_path: &str) -> std::path::PathB
     joined
 }
 
-fn sanitize_folder_name(name: &str, fallback: &str) -> String {
+pub fn sanitize_folder_name(name: &str, fallback: &str) -> String {
     let clean = name.trim()
         .replace("/", "-")
         .replace("\\", "-")

@@ -227,8 +227,8 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
             conn.execute(
                 "INSERT OR REPLACE INTO products (
                     sku, mpn, label, brand, category, sub_category, location, 
-                    item_type, min_stock, price, current_stock, attributes, image_path, pdf_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), ?), ?, ?, ?)",
+                    item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), ?), ?, ?, ?, ?)",
                 (
                     p["sku"].as_str().unwrap_or(""),
                     p["mpn"].as_str().unwrap_or(""),
@@ -245,6 +245,7 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
                     p["attributes"].to_string(),
                     p["image_path"].as_str().or(None),
                     p["pdf_path"].as_str().or(None),
+                    p["packSize"].as_i64().unwrap_or(1),
                 )
             ).map_err(|e| e.to_string())?;
         }
@@ -297,8 +298,8 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
             tx.execute(
                 "INSERT OR REPLACE INTO products (
                     sku, mpn, label, brand, category, sub_category, location, 
-                    item_type, min_stock, price, current_stock, attributes, image_path, pdf_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), ?), ?, ?, ?)",
+                    item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), ?), ?, ?, ?, ?)",
                 (
                     p["sku"].as_str().unwrap_or(""),
                     p["mpn"].as_str().unwrap_or(""),
@@ -315,6 +316,7 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
                     p["attributes"].to_string(),
                     p["image_path"].as_str().or(None),
                     p["pdf_path"].as_str().or(None),
+                    p["packSize"].as_i64().unwrap_or(1),
                 )
             ).map_err(|e| e.to_string())?;
         }

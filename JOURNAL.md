@@ -56,6 +56,12 @@ Ce document répertorie l'historique des modifications apportées au codebase de
   - **Extension Fiche Produit (Médias) :**
     - Carrousel interactif multi-images supportant les vues séquentielles `[SKU]_1.jpg`, `[SKU]_2.jpg`, etc. via une numérisation dynamique du dossier réseau en Rust.
     - Liste des notices PDF disponibles associées à la référence avec ouverture externe instantanée (Edge/lecteur par défaut) par appel natif.
+    - **Intégration des Colonnes de Dimensions :**
+      - **Spreadsheet Principal (`App.tsx`) :** Ajout des colonnes "Largeur (mm)", "Hauteur (mm)", "Profondeur (mm)", et "Poids (g)" dans `DEFAULT_COLUMNS`.
+      - **Extraction des Attributs :** Ajout de la fonction utilitaire `getAttribute` pour extraire dynamiquement les valeurs stockées au format JSON dans la colonne `attributes` de la base de données.
+      - **Affichage des Détails :** Intégration d'un bloc de caractéristiques physiques (Largeur, Hauteur, Profondeur, Poids, Tension) dans le panneau latéral de détails du produit.
+      - **Configuration des Colonnes :** Mise à jour automatique du menu déroulant `⚙️ Colonnes` permettant de masquer/afficher ces nouvelles colonnes selon le besoin de l'utilisateur.
+      - **Tests E2E :** Mise à jour du script de test `test_e2e.cjs` pour couvrir les nouvelles fonctionnalités de Phase 2 (ajout de produit, scraping de prix, d'images et de PDF, modification du lot et suppression).
     - Zone de Drag & Drop pour ajouter d'autres images ou documentations PDF directement depuis la fiche en copiant à chaud les fichiers sur le lecteur réseau.
 - **Outils & Automatisation :**
   - Création du script de build et déploiement automatisé `build.ps1` à la racine pour compiler l'application Tauri v2 et distribuer les livrables renommés dans `release_bin/`.
@@ -120,4 +126,41 @@ Ce document répertorie l'historique des modifications apportées au codebase de
   - Ajout d'un bouton `🗑️ Supprimer` demandant confirmation et générant un nouvel événement `PRODUCT_DELETE` qui retire le SKU et son historique de mouvements de la base locale et réseau.
 - **Filtrage Dynamique des Sous-Familles en Modale :**
   - Implémentation du filtrage de l'autocomplétion des sous-familles en fonction de la famille sélectionnée, que ce soit dans la modale d'ajout ou dans la modale de modification (les datalists `add-subcategories-datalist` et `edit-subcategories-datalist` sont recalculées à la volée), respectant la règle globale : Famille -> Sous-famille.
+
+- **Téléchargement Multi-PDF & Déduplication :**
+  - Modification de `scrape_pdf_internal` en Rust pour télécharger jusqu'à 5 PDF candidats.
+  - Implémentation d'un algorithme de déduplication par taille et type à 5% près (seuil modifiable dans les paramètres).
+  - Émission d'événements Tauri en direct pour afficher la progression dans la modale.
+  - Sauvegarde en cascade corrigée : suffixe `_X` appliqué uniquement si collision réelle de nom de fichier.
+- **Ouverture de dossier & Renommage Manuel :**
+  - Ajout d'un bouton crayon ✏️ et édition en ligne dans l'UI pour renommer manuellement les notices PDF sur le réseau et dans la base SQLite.
+  - Ajout d'un bouton `📂 Ouvrir dossier` dans la fiche produit pour explorer directement le dossier cascade de documents du SKU.
+  - Sécurisation de l'ouverture de dossier : intégration de la commande backend `ensure_directory` pour créer automatiquement et récursivement le dossier cible s'il n'existe pas, évitant ainsi le popup d'erreur Windows "Windows ne trouve pas...".
+- **Éradication des dialogues système (Global) :**
+  - Remplacement global de tous les `alert()` et `confirm()` du code par des modaux React intégrés (`confirmModal` et `alertModal`) pour préserver l'esthétique premium de l'application.
+
+- **Intégration de la Taille du Lot (Pack Size) :**
+  - **Base de données & Événements :** Ajout de la colonne `pack_size` (défaut 1) dans la table `products`. Prise en charge de la migration SQLite automatique pour les bases existantes. Hydratation dans les transactions d'événements et dans l'importation de fichiers CSV.
+  - **Calculs Financiers :** Correction de la formule de valeur totale du stock dans `get_dashboard_stats` et dans l'affichage React pour utiliser `(current_stock / pack_size) * price`.
+  - **Interface utilisateur :**
+    - Ajout de champs de saisie pour la taille de lot dans les modales de création et modification de SKU.
+    - Affichage adapté du prix dans la spreadsheet principale (`Prix € (Lot N)`) s'il y a un conditionnement par lot.
+    - Affichage détaillé dans le panneau latéral (avec prix du lot, taille du lot, prix unitaire calculé et valeur totale en stock calculée).
+
+- **Correctif Ergonomie Modales (Défilement & Boutons Fixes) :**
+  - **CSS (`App.css`) :** Style flexbox appliqué à l'élément `form` dans `.modal-container` et `flex: 1` appliqué à `.modal-body` afin de forcer le défilement vertical interne de la modale en conservant le footer (`modal-footer`) visible en bas à tout instant (résout le problème des boutons invisibles hors de l'écran 90vh).
+
+- **Approfondissement Codes VPC & Scraper Prioritaire :**
+  - **Importation :** `csv_importer.rs` écrit désormais le code RS dans la structure standardisée `vpc: { "RS": code }` pour les fiches produits importées.
+  - **Fallback :** `App.tsx` : `getVpcCode` supporte en fallback la lecture de la clé historique `codeRS`.
+  - **Affichage & Redirection UI :** Le volet de détails du produit affiche désormais une ligne cliquable `🌐 [Site] (Code)` qui ouvre le navigateur web directement sur la page produit/recherche du fournisseur officiel (RS, Farnell, Mouser).
+  - **Scraper Prioritaire (Rust) :** Dans `scraper.rs`, le scraper charge et analyse les attributs. S'il détecte un fournisseur VPC, il trie et place systématiquement en tête de liste des résultats SearxNG les liens correspondants à ces domaines officiels avant de télécharger les images ou PDF.
+
+- **Renommage de "RS Components" en "RS" & Nommage Windows :**
+  - **RS Shorthand :** Remplacement global de la désignation "RS Components" par la version courte "RS" (dans `config.rs`, `csv_importer.rs` et `App.tsx`). Les algorithmes de correspondance du scraper et le constructeur d'URLs ont été adaptés en conséquence.
+  - **Nom de l'Application :** Configuration dans `tauri.conf.json` de `productName` et `title` à "StockFlow". L'exécutable compilé s'appelle désormais `StockFlow.exe` et la fenêtre affiche "StockFlow" (corrigé du "tauri-app" par défaut) avec son icône dans la barre des tâches Windows.
+
+
+
+
 

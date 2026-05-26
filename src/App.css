@@ -517,6 +517,10 @@ table.spreadsheet tr.selected {
   background-color: var(--accent-light) !important;
 }
 
+table.spreadsheet tr.batch-selected {
+  background-color: rgba(59, 130, 246, 0.05);
+}
+
 /* Alert stock colors */
 .stock-status-badge {
   display: inline-block;
@@ -795,9 +799,17 @@ table.spreadsheet tr.selected {
   color: var(--text-primary);
 }
 
+.modal-container form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
 .modal-body {
   padding: 1.5rem;
   overflow-y: auto;
+  flex: 1;
 }
 
 .modal-footer {
@@ -818,5 +830,125 @@ table.spreadsheet tr.selected {
   from { transform: translateY(20px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
 }
+
+/* Convention Renaming Editor Badges */
+.badge-btn {
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 0.35rem 0.7rem;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.badge-btn:hover {
+  background-color: var(--accent-light);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.badge-btn-sep {
+  background-color: rgba(255, 255, 255, 0.05);
+  font-family: var(--font-mono);
+}
+
+.badge-btn-clear {
+  background-color: var(--danger-light);
+  border-color: rgba(239, 68, 68, 0.2);
+  color: var(--danger);
+  margin-left: auto;
+}
+
+.badge-btn-clear:hover {
+  background-color: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+
+.filename-preview {
+  margin-top: 0.5rem;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 11px;
+}
+
+.filename-preview span {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.filename-preview code {
+  font-family: var(--font-mono);
+  color: var(--success);
+  font-weight: 600;
+}
+
+/* Save settings button states */
+.btn-save-settings {
+  transition: background-color 0.4s ease, border-color 0.4s ease, transform 0.1s ease !important;
+}
+
+.btn-save-settings.saving {
+  background-color: var(--warning) !important;
+  color: #fff !important;
+}
+
+.btn-save-settings.saved {
+  background-color: var(--success) !important;
+  color: #fff !important;
+}
+
+.btn-save-settings.error {
+  background-color: var(--danger) !important;
+  color: #fff !important;
+}
+
+/* Scrape modal steps */
+.scrape-steps-list {
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1.25rem;
+}
+
+.scrape-step {
+  transition: all 0.3s ease;
+}
+
+.scrape-step.step-pending {
+  opacity: 0.5;
+}
+
+.scrape-step.step-active {
+  opacity: 1;
+}
+
+.scrape-step.step-active .step-icon {
+  animation: spin 1.5s linear infinite;
+  display: inline-block;
+}
+
+.scrape-step.step-success .step-icon {
+  color: var(--success);
+}
+
+.scrape-step.step-error .step-icon {
+  color: var(--danger);
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 
 

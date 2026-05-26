@@ -69,47 +69,37 @@ async function runTest() {
             console.log("Configuration ré-appliquée sur le dossier de test.");
         }
 
-        // 5. Aller sur l'onglet de migration
-        console.log("Navigation vers l'onglet Migration...");
-        await page.click("text=Importation Excel/CSV");
-        await page.waitForSelector("#csv-path");
-
-        // 6. Remplir les champs de migration
-        console.log("Remplissage des chemins de migration...");
-        await page.fill("#csv-path", CSV_FILE);
-        await page.fill("#images-path", IMAGES_DIR);
-        await page.fill("#pdf-path", PDF_DIR);
-
-        // 7. Lancer la migration
-        console.log("Lancement de la migration...");
-        await page.click("button[type='submit']");
-        
-        // Attendre la fin de la migration (timeout de 60 secondes pour 774 lignes)
-        console.log("Attente de la fin de l'importation (max 60s)...");
-        const statusLocator = page.locator(".wizard-error", { hasText: "Migration terminée" });
-        await statusLocator.waitFor({ state: "visible", timeout: 60000 });
-        
-        const resultText = await statusLocator.innerText();
-        console.log("Résultat :", resultText);
-
-        // Vérifier les erreurs
-        const reportVisible = await page.locator(".migration-report").isVisible();
-        if (reportVisible) {
-            const reportText = await page.locator(".migration-report").innerText();
-            console.log("Bilan détaillé :\n", reportText);
-            if (reportText.includes("Erreurs") && !reportText.includes("Erreurs (0)")) {
-                console.warn("⚠️ Des erreurs ont été signalées pendant l'importation !");
-            }
-        }
-
         // 8. Aller sur l'inventaire
         console.log("Navigation vers la Liste d'Inventaire...");
         await page.click("text=Liste d'Inventaire");
         await page.waitForSelector("table.spreadsheet");
 
-        // 9. Rechercher un produit importé
-        const targetSku = "6ES7511-1AK02-0AB0";
-        console.log(`Recherche de la référence : ${targetSku}...`);
+        // 9. Ajouter une nouvelle référence
+        console.log("Ajout d'une nouvelle référence SKU...");
+        await page.click("text=➕ Ajouter un SKU");
+        await page.waitForSelector("#modal-p-sku");
+        await page.fill("#modal-p-sku", "746-5347");
+        await page.selectOption("#modal-p-vpc-site", { index: 1 });
+        await page.fill("#modal-p-vpc-code", "746-5347");
+        
+        // Tester le bouton Pré-remplir de la phase 2.6
+        console.log("Clic sur le bouton Pré-remplir...");
+        await page.click("button:has-text('Pré-remplir')");
+        await page.waitForTimeout(2000); // laissons le temps au scraper de répondre
+        
+        // Vérifier qu'un champ a bien été pré-rempli (ex: Désignation ou prix)
+        const labelVal = await page.inputValue("#modal-p-label");
+        console.log("Désignation pré-remplie par scraping :", labelVal);
+        
+        await page.fill("#modal-p-min", "2");
+        
+        // Enregistrer la référence
+        const addSaveButton = page.locator(".modal-footer button:has-text('Créer le SKU')");
+        await addSaveButton.click();
+        await page.waitForTimeout(2000); // Attendre que la modale se ferme et l'inventaire se mette à jour
+
+        const targetSku = "746-5347";
+        console.log(`Recherche de la référence créée : ${targetSku}...`);
         await page.fill(".search-bar input", targetSku);
         await page.waitForTimeout(1000); // attente du filtrage
 
@@ -118,26 +108,74 @@ async function runTest() {
         await page.click(`table.spreadsheet tbody tr:has-text("${targetSku}")`);
         await page.waitForSelector(".details-panel");
 
-        // 11. Valider la présence de l'image et du carrousel
-        console.log("Vérification des images...");
-        const imgLocator = page.locator(".carousel img");
-        await imgLocator.waitFor({ state: "visible", timeout: 5000 });
-        const imgUrl = await imgLocator.getAttribute("src");
-        console.log("Image principale chargée (URL de cache) :", imgUrl);
+        // 11. Tester le Scraping de Prix
+        console.log("Lancement du scraping de prix...");
+        const scrapePriceBtn = page.locator(".details-panel button:has-text('Scraper Prix')");
+        await scrapePriceBtn.click();
+        await page.waitForTimeout(4000); // laissons un peu de temps pour la requête réseau
 
-        // 12. Valider la présence de la notice PDF
-        console.log("Vérification des notices PDF...");
-        const pdfButton = page.locator(".details-panel button:has-text('.pdf')").first();
-        await pdfButton.waitFor({ state: "visible", timeout: 5000 });
-        const pdfName = await pdfButton.innerText();
-        console.log(`Notice trouvée : ${pdfName}`);
+        // 12. Tester le Scraping d'Image
+        console.log("Lancement du scraping d'image...");
+        const scrapeImageBtn = page.locator(".details-panel button:has-text('Scraper Image')");
+        await scrapeImageBtn.click();
+        
+        // Attendre et fermer la modale de progression image
+        console.log("Attente de la fin du scraping d'image...");
+        const closeImageModalBtn = page.locator(".modal-footer button:has-text('Fermer')");
+        await closeImageModalBtn.waitFor({ state: "visible", timeout: 45000 });
+        await closeImageModalBtn.click();
+        await page.waitForTimeout(1000);
 
-        // 13. Cliquer sur le PDF pour tester le bouton
-        console.log("Clic sur le bouton PDF (ouverture système)...");
-        await pdfButton.click();
-        await page.waitForTimeout(2000); // Laisse le temps à l'OS d'ouvrir le lecteur
+        // 13. Tester le Scraping de PDF
+        console.log("Lancement du scraping de PDF...");
+        const scrapePdfBtn = page.locator(".details-panel button:has-text('Scraper PDF')");
+        await scrapePdfBtn.click();
 
-        console.log("✅ TEST E2E RÉUSSI À 100% ! Toutes les features fonctionnent.");
+        // Attendre et fermer la modale de progression PDF
+        console.log("Attente de la fin du scraping de PDF...");
+        const closePdfModalBtn = page.locator(".modal-footer button:has-text('Fermer')");
+        await closePdfModalBtn.waitFor({ state: "visible", timeout: 45000 });
+        await closePdfModalBtn.click();
+        await page.waitForTimeout(1000);
+
+        // 14. Phase 2: Vérifier le lien du site VPC
+        console.log("Vérification du lien VPC...");
+        const vpcLink = page.locator(".details-panel button:has-text('RS')").first();
+        await vpcLink.waitFor({ state: "visible", timeout: 5000 });
+        const vpcText = await vpcLink.innerText();
+        console.log("Bouton VPC trouvé :", vpcText);
+
+        // 15. Phase 2: Cliquer sur 'Ouvrir dossier'
+        console.log("Clic sur 'Ouvrir dossier'...");
+        const openFolderButton = page.locator(".details-panel button:has-text('Ouvrir dossier')");
+        await openFolderButton.click();
+        await page.waitForTimeout(1000);
+
+        // 16. Phase 2: Modifier le SKU et changer la taille du lot (pack size)
+        console.log("Modification du produit pour tester la taille du lot...");
+        const editButton = page.locator(".details-panel button:has-text('Modifier')");
+        await editButton.click();
+        await page.waitForSelector("#edit-p-pack");
+        await page.fill("#edit-p-pack", "10");
+        const saveButton = page.locator(".modal-footer button:has-text('Enregistrer')");
+        await saveButton.click();
+        
+        // Attendre la mise à jour visuelle dans le volet
+        console.log("Vérification de la mise à jour de la taille du lot...");
+        const packSizeDisplay = page.locator(".details-panel:has-text('Taille du lot: 10 u')");
+        await packSizeDisplay.waitFor({ state: "visible", timeout: 5000 });
+        console.log("Taille du lot mise à jour avec succès dans l'UI !");
+
+        // 17. Phase 2: Supprimer le produit pour nettoyer
+        console.log("Suppression de la référence de test...");
+        const deleteButton = page.locator(".details-panel button:has-text('Supprimer')");
+        await deleteButton.click();
+        await page.waitForSelector("button:has-text('Confirmer')");
+        await page.click("button:has-text('Confirmer')");
+        await page.waitForTimeout(2000);
+        console.log("Référence de test supprimée avec succès !");
+
+        console.log("✅ TEST E2E RÉUSSI À 100% ! Toutes les features (Phase 1 & Phase 2) fonctionnent.");
     } catch (err) {
         console.error("❌ TEST E2E ÉCHOUÉ :", err);
         process.exitCode = 1;

@@ -18,6 +18,7 @@ pub struct Product {
     pub attributes: String, // JSON String
     pub image_path: Option<String>,
     pub pdf_path: Option<String>,
+    pub pack_size: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -50,10 +51,23 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             current_stock REAL DEFAULT 0,
             attributes TEXT,
             image_path TEXT,
-            pdf_path TEXT
+            pdf_path TEXT,
+            pack_size INTEGER DEFAULT 1
         )",
         [],
     )?;
+
+    // Vérifier si la colonne pack_size existe, sinon l'ajouter
+    let has_pack_size: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('products') WHERE name='pack_size')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_pack_size {
+        let _ = conn.execute("ALTER TABLE products ADD COLUMN pack_size INTEGER DEFAULT 1", []);
+    }
 
     // 2. Table pour le suivi des fichiers événements déjà appliqués
     conn.execute(
@@ -107,7 +121,7 @@ pub fn clear_db(conn: &Connection) -> Result<()> {
 pub fn get_all_products(conn: &Connection) -> Result<Vec<Product>> {
     let mut stmt = conn.prepare(
         "SELECT sku, mpn, label, brand, category, sub_category, location, 
-                item_type, min_stock, price, current_stock, attributes, image_path, pdf_path 
+                item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size 
          FROM products ORDER BY sku ASC",
     )?;
     
@@ -127,6 +141,7 @@ pub fn get_all_products(conn: &Connection) -> Result<Vec<Product>> {
             attributes: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
             image_path: row.get(12)?,
             pdf_path: row.get(13)?,
+            pack_size: row.get::<_, Option<i64>>(14)?.unwrap_or(1),
         })
     })?;
 
