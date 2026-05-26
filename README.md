@@ -91,6 +91,20 @@ npm run tauri build
 ```
 Le fichier généré est entièrement autonome et peut être copié sur n'importe quel poste Windows.
 
+### ⚠️ Windows SmartScreen
+L'exécutable n'étant pas signé avec un certificat de signature de code (Code Signing Certificate), Windows SmartScreen peut afficher un avertissement au premier lancement. C'est un comportement normal pour tout `.exe` non signé.
+
+**Pour débloquer l'application :**
+1. Cliquez sur **"Informations complémentaires"** (ou *"More info"*) dans la fenêtre SmartScreen.
+2. Cliquez sur **"Exécuter quand même"** (*"Run anyway"*).
+
+**Alternative (PowerShell) — Retirer le marqueur de sécurité d'un fichier téléchargé depuis internet :**
+```powershell
+Unblock-File -Path "C:\chemin\vers\StockFlow.exe"
+```
+
+> **Note :** Si l'exécutable est distribué via le lecteur réseau partagé (copie directe, pas un téléchargement web), SmartScreen ne se déclenche généralement pas.
+
 ---
 
 ## 🗃️ Structure du Code source

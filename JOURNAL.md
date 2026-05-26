@@ -24,3 +24,7 @@ Ce document répertorie l'historique des modifications apportées au codebase de
   - Correction d'un bug dans l'importateur CSV : remplacement du sélecteur de dossier par un sélecteur de fichier spécifique aux extensions `.csv` (`select_csv_file` en Rust / invoke dans `App.tsx`).
   - Résolution du gel de l'interface utilisateur pendant les longues opérations d'import réseau : conversion des commandes Rust `import_csv` et `sync_events` en commandes asynchrones (`async fn` s'exécutant sur un thread pool `tauri::async_runtime::spawn_blocking`).
   - Ajout d'états d'inactivité/chargement visuels dans le formulaire de migration React pour désactiver les boutons et inputs durant l'import.
+- **Publication & Release [2026-05-25] :**
+  - Compilation réussie du livrable de production (`npm run tauri build`).
+  - Préparation et renommage des livrables (`StockFlow.exe` portable, installeurs MSI et NSIS).
+  - Création de la première release GitHub sous le tag `v1.0.0-mvp` avec téléversement automatique des assets binaires (via la CLI `gh` configurée par l'utilisateur).
