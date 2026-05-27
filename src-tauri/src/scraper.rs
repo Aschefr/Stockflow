@@ -46,11 +46,7 @@ fn get_product_details(sku: &str) -> Result<ProductDetails, String> {
 }
 
 fn sanitize_folder_name(name: &str) -> String {
-    let s = name.trim();
-    if s.is_empty() {
-        return "INCONNU".to_string();
-    }
-    crate::db::sanitize_sku(s)
+    crate::csv_importer::sanitize_folder_name(name, "INCONNU")
 }
 
 // 1. Scraping des Prix
