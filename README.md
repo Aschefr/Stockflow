@@ -1,4 +1,4 @@
-# 📈 StockFlow (v1.4.0)
+# 📈 StockFlow (v1.1.0)
 
 **StockFlow** est un système intelligent de gestion d'inventaire industriel conçu pour fonctionner dans un environnement d'entreprise Windows hautement restreint. 
 
@@ -62,6 +62,18 @@ Pour éviter les corruptions de base de données (comme SQLite ou Access) induit
 - [x] **Miniature au survol (Hover UX) :** Affichage d'un aperçu d'image en miniature au survol de la souris sur l'inventaire.
 - [x] **Outil de migration CSV :** Importation de l'ancien fichier de stock (décodage Windows-1252, saut de 8 lignes d'en-tête Excel, copie physique des images/PDFs locaux associés vers le réseau et génération des événements de création initiale).
 - [x] **Thèmes Sombre et Clair :** Changement de thème d'un seul clic.
+
+---
+
+## 📋 Fonctionnalités de la Phase 2 (Scraping & Médias)
+
+- [x] **Colonnes de dimensions industrielles :** Ajout des colonnes physiques (Largeur, Hauteur, Profondeur, Poids, Tension) dans la grille principale et le volet détails.
+- [x] **Pré-remplissage Intelligent :** Scraping en tâche de fond de la marque, désignation, prix et taille de lot à partir du SKU ou du code VPC lors de la création.
+- [x] **Scraping PDF et cascade de répertoires :** Récupération automatique des fiches techniques par SearxNG et structuration en sous-dossiers réseau partagés (`documents/MARQUE/CATEGORIE/...`).
+- [x] **Déduplication robuste des PDF :** Comparaison avancée des fichiers PDF existants (par métadonnées, taille et type) pour éviter le gaspillage de bande passante.
+- [x] **Scraping et standardisation d'images :** Téléchargement d'illustrations produits, création de miniatures rapides locales, et déduplication automatique par comparaison d'octets.
+- [x] **Scraping par lot :** Files d'attente randomisées pour le traitement par lot d'images et de PDF sur plusieurs références sélectionnées.
+- [x] **Suppression en cascade :** Le retrait d'un produit supprime physiquement ses fiches techniques PDF et ses images stockées sur le réseau partagé.
 
 ---
 
