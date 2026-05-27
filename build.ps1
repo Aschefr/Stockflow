@@ -44,7 +44,7 @@ if (Test-Path $SourcePortable) {
 # Source - Installateur NSIS
 $NsisFolder = Join-Path $PSScriptRoot "src-tauri\target\release\bundle\nsis"
 if (Test-Path $NsisFolder) {
-    $SourceSetup = Get-ChildItem -Path $NsisFolder -Filter "*setup.exe" | Select-Object -First 1
+    $SourceSetup = Get-ChildItem -Path $NsisFolder -Filter "*setup.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($SourceSetup) {
         Copy-Item -Path $SourceSetup.FullName -Destination $TargetSetup -Force
         Write-Host "Copie réussie : Installateur NSIS -> release_bin/StockFlow_Setup_x64.exe" -ForegroundColor Green
@@ -58,7 +58,7 @@ if (Test-Path $NsisFolder) {
 # Source - Installateur MSI
 $MsiFolder = Join-Path $PSScriptRoot "src-tauri\target\release\bundle\msi"
 if (Test-Path $MsiFolder) {
-    $SourceMsi = Get-ChildItem -Path $MsiFolder -Filter "*.msi" | Select-Object -First 1
+    $SourceMsi = Get-ChildItem -Path $MsiFolder -Filter "*.msi" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($SourceMsi) {
         Copy-Item -Path $SourceMsi.FullName -Destination $TargetMsi -Force
         Write-Host "Copie réussie : Installateur MSI -> release_bin/StockFlow_x64.msi" -ForegroundColor Green
