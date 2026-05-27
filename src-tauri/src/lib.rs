@@ -5,7 +5,7 @@ mod csv_importer;
 mod scraper;
 
 use config::{AppConfig, load_config_internal, save_config_internal};
-use db::{Product, ProductHistoryItem};
+use db::{Product, ProductHistoryItem, AuditLogItem};
 use rusqlite::Connection;
 use serde_json::json;
 
@@ -23,6 +23,8 @@ fn save_config(
     pdf_rename_convention: Option<String>,
     image_rename_convention: Option<String>,
     pdf_size_threshold: Option<f64>,
+    vpc_api_keys: std::collections::HashMap<String, String>,
+    vpc_urls: std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     let clean_trigramme = trigramme.trim().to_uppercase();
     if clean_trigramme.len() != 3 {
@@ -41,6 +43,8 @@ fn save_config(
         pdf_rename_convention: pdf_rename_convention.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         image_rename_convention: image_rename_convention.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         pdf_size_threshold,
+        vpc_api_keys,
+        vpc_urls,
     };
     
     // Initialiser les dossiers réseau
@@ -111,9 +115,19 @@ fn get_product_history(sku: String) -> Result<Vec<ProductHistoryItem>, String> {
 }
 
 #[tauri::command]
+fn get_product_audit_log(sku: String) -> Result<Vec<AuditLogItem>, String> {
+    let db_path = events::get_db_path().ok_or("Base de données cache introuvable")?;
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    let _ = db::init_db(&conn);
+    db::get_audit_log(&conn, &sku).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn sync_events(network_path: String) -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        events::sync_events_network(&network_path)
+        let event_count = events::sync_events_network(&network_path)?;
+        let _ = events::sync_audit_files(&network_path);
+        Ok(event_count)
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -139,6 +153,76 @@ fn create_product(
     let clean_sku = db::sanitize_sku(&sku);
     if clean_sku.is_empty() {
         return Err("Le SKU/Référence interne ne peut pas être vide.".to_string());
+    }
+
+    // Diff champ par champ pour l'audit log
+    if let Some(db_path) = events::get_db_path() {
+        if let Ok(conn) = Connection::open(&db_path) {
+            let existing: Option<Product> = conn.query_row(
+                "SELECT sku, mpn, label, brand, category, sub_category, location, item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size FROM products WHERE sku = ?",
+                [&clean_sku],
+                |row| Ok(Product {
+                    sku: row.get(0)?,
+                    mpn: row.get(1)?,
+                    label: row.get(2)?,
+                    brand: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    category: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    sub_category: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    location: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    item_type: row.get(7)?,
+                    min_stock: row.get(8)?,
+                    price: row.get(9)?,
+                    current_stock: row.get(10)?,
+                    attributes: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                    image_path: row.get(12)?,
+                    pdf_path: row.get(13)?,
+                    pack_size: row.get::<_, Option<i64>>(14)?.unwrap_or(1),
+                })
+            ).ok();
+
+            if let Some(old) = existing {
+                // Produit existant -> audit des modifications
+                let diffs: Vec<(&str, String, String)> = vec![
+                    ("Désignation", old.label.clone(), label.trim().to_string()),
+                    ("MPN", old.mpn.clone(), mpn.trim().to_string()),
+                    ("Marque", old.brand.clone(), brand.trim().to_string()),
+                    ("Famille", old.category.clone(), category.trim().to_string()),
+                    ("Sous-famille", old.sub_category.clone(), sub_category.trim().to_string()),
+                    ("Emplacement", old.location.clone(), location.trim().to_string()),
+                    ("Seuil d'alerte", format!("{}", old.min_stock), format!("{}", min_stock)),
+                    ("Prix", format!("{:.2}", old.price), format!("{:.2}", price)),
+                    ("Taille lot", format!("{}", old.pack_size), format!("{}", pack_size)),
+                ];
+
+                for (field_name, old_val, new_val) in diffs {
+                    if old_val != new_val {
+                        let _ = events::write_audit_file(
+                            &network_path, &clean_sku, &trigramme, "UPDATE",
+                            Some(field_name), Some(&old_val), Some(&new_val), None,
+                        );
+                    }
+                }
+
+                // Comparer les VPC dans les attributs
+                let old_vpc = serde_json::from_str::<serde_json::Value>(&old.attributes)
+                    .ok().and_then(|a| a.get("vpc").cloned())
+                    .unwrap_or(json!({})).to_string();
+                let new_vpc = attributes.get("vpc").cloned()
+                    .unwrap_or(json!({})).to_string();
+                if old_vpc != new_vpc {
+                    let _ = events::write_audit_file(
+                        &network_path, &clean_sku, &trigramme, "UPDATE",
+                        Some("Code VPC"), Some(&old_vpc), Some(&new_vpc), None,
+                    );
+                }
+            } else {
+                // Nouveau produit -> audit de création
+                let _ = events::write_audit_file(
+                    &network_path, &clean_sku, &trigramme, "CREATE",
+                    None, None, None, None,
+                );
+            }
+        }
     }
 
     let payload = json!({
@@ -732,6 +816,53 @@ async fn scrape_product_details(vpc_site: String, vpc_code: String, sku: String)
     }).await.map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn search_vpc_domains_via_searxng(query: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config_internal().ok_or("Configuration introuvable")?;
+        let searxng_url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+        
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .build()
+            .map_err(|e| e.to_string())?;
+            
+        let url = format!("{}/search?q={}&format=json", searxng_url.trim_end_matches('/'), urlencoding::encode(&query));
+        let response = client.get(&url).send().map_err(|e| format!("Erreur connexion SearxNG : {}", e))?;
+        
+        if !response.status().is_success() {
+            return Err(format!("SearxNG a retourné une erreur {}", response.status()));
+        }
+        
+        let json: serde_json::Value = response.json().map_err(|e| format!("JSON invalide : {}", e))?;
+        let results = json["results"].as_array().ok_or("Aucun résultat dans la réponse SearxNG")?;
+        
+        let mut domains = std::collections::HashSet::new();
+        for r in results {
+            if let Some(link) = r["url"].as_str() {
+                if let Ok(parsed) = reqwest::Url::parse(link) {
+                    if let Some(host) = parsed.host_str() {
+                        let cleaned = host.trim_start_matches("www.");
+                        if !cleaned.is_empty() {
+                            domains.insert(cleaned.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        
+        let mut list: Vec<String> = domains.into_iter().collect();
+        list.sort();
+        Ok(list)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -764,7 +895,10 @@ pub fn run() {
             scrape_pdf,
             scrape_images,
             ensure_directory,
-            scrape_product_details
+            scrape_product_details,
+            get_product_audit_log,
+            search_vpc_domains_via_searxng,
+            get_app_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

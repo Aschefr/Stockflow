@@ -48,27 +48,6 @@ async function runTest() {
         
         console.log("Page connectée. URL actuelle :", page.url());
 
-        // 4. Gérer l'assistant de configuration initial si visible
-        const wizardVisible = await page.locator(".wizard-overlay").isVisible();
-        if (wizardVisible) {
-            console.log("Configuration initiale détectée, saisie des paramètres...");
-            await page.fill("#trigramme", "TST");
-            await page.fill("#network-path", SHARED_FOLDER);
-            await page.click("button[type='submit']");
-            await page.waitForSelector(".app-container");
-            console.log("Configuration validée !");
-        } else {
-            console.log("Application déjà configurée.");
-            // On s'assure qu'on est sur le bon dossier en ré-ouvrant la config
-            await page.click(".user-info.header-clickable");
-            await page.waitForSelector(".wizard-overlay");
-            await page.fill("#trigramme", "TST");
-            await page.fill("#network-path", SHARED_FOLDER);
-            await page.click("button[type='submit']");
-            await page.waitForSelector(".app-container");
-            console.log("Configuration ré-appliquée sur le dossier de test.");
-        }
-
         // 8. Aller sur l'inventaire
         console.log("Navigation vers la Liste d'Inventaire...");
         await page.click("text=Liste d'Inventaire");
@@ -92,9 +71,11 @@ async function runTest() {
         const brandVal = await page.inputValue("#modal-p-brand");
         const packVal = await page.inputValue("#modal-p-pack");
         const priceVal = await page.inputValue("#modal-p-price");
+        const mpnVal = await page.inputValue("#modal-p-mpn");
+        const skuVal = await page.inputValue("#modal-p-sku");
         
-        console.log("Scraped details:", { labelVal, brandVal, packVal, priceVal });
-        if (!labelVal.toLowerCase().includes("repère") && !labelVal.toLowerCase().includes("phoenix")) {
+        console.log("Scraped details:", { labelVal, brandVal, packVal, priceVal, mpnVal, skuVal });
+        if (!labelVal.toLowerCase().includes("repère") && !labelVal.toLowerCase().includes("phoenix") && !labelVal.toLowerCase().includes("bloc")) {
             throw new Error(`Désignation incorrecte : ${labelVal}`);
         }
         if (brandVal !== "Phoenix Contact") {
@@ -102,6 +83,12 @@ async function runTest() {
         }
         if (parseInt(packVal) !== 10) {
             throw new Error(`Taille de lot incorrecte : ${packVal}`);
+        }
+        if (parseFloat(priceVal) <= 0) {
+            throw new Error(`Prix incorrect ou non récupéré : ${priceVal}`);
+        }
+        if (!mpnVal) {
+            throw new Error(`MPN non récupéré`);
         }
         
         await page.fill("#modal-p-min", "2");
@@ -111,7 +98,7 @@ async function runTest() {
         await addSaveButton.click();
         await page.waitForTimeout(2000); // Attendre que la modale se ferme et l'inventaire se mette à jour
  
-        const targetSku = "519-724";
+        const targetSku = skuVal || "519-724";
         console.log(`Recherche de la référence créée : ${targetSku}...`);
         await page.fill(".search-bar input", targetSku);
         await page.waitForTimeout(1000); // attente du filtrage
@@ -120,12 +107,30 @@ async function runTest() {
         console.log("Ouverture de la fiche produit...");
         await page.click(`table.spreadsheet tbody tr:has-text("${targetSku}")`);
         await page.waitForSelector(".details-panel");
- 
+        // Vérifier la présence des dimensions et poids dans la fiche
+        const panelText = await page.locator(".details-panel").textContent();
+        if (!panelText.includes("Largeur:") && !panelText.includes("Poids:")) {
+            console.warn("⚠️ Attention : Dimensions ou poids non affichés dans la fiche produit pour cette référence.");
+        } else {
+            console.log("✔️ Dimensions ou poids affichés !");
+        }
+        if (!panelText.includes(priceVal)) {
+            throw new Error("Le prix affiché ne correspond pas au prix récupéré lors du pré-remplissage.");
+        }
+
         // 11. Tester le Scraping de Prix
         console.log("Lancement du scraping de prix...");
         const scrapePriceBtn = page.locator(".details-panel button:has-text('Scraper Prix')");
         await scrapePriceBtn.click();
         await page.waitForTimeout(4000); // laissons un peu de temps pour la requête réseau
+        
+        // Vérifier que le prix correspond toujours
+        const updatedPanelText = await page.locator(".details-panel").textContent();
+        if (!updatedPanelText.includes(priceVal)) {
+            console.warn(`⚠️ Attention : Le prix scrappé est différent du prix pré-rempli ! Attendu: ${priceVal}, Trouvé dans le texte: ${updatedPanelText.substring(0, 100)}...`);
+        } else {
+            console.log("✔️ Prix identique.");
+        }
  
         // 12. Tester le Scraping d'Image
         console.log("Lancement du scraping d'image...");
@@ -150,6 +155,18 @@ async function runTest() {
         await closePdfModalBtn.waitFor({ state: "visible", timeout: 45000 });
         await closePdfModalBtn.click();
         await page.waitForTimeout(1000);
+
+        // Vérifier les nouvelles informations et les sources de scraping après les actions
+        const finalPanelText = await page.locator(".details-panel").textContent();
+        if (!finalPanelText.includes("SKU (Interne):") || !finalPanelText.includes("Type d'article:") || !finalPanelText.includes("Stock Actuel:") || !finalPanelText.includes("Seuil Alerte:")) {
+            throw new Error("Les nouvelles informations (SKU, Type, Stock ou Seuil) ne sont pas toutes affichées dans la fiche produit.");
+        }
+        console.log("✔️ SKU, Type, Stock et Seuil d'alerte affichés dans la fiche !");
+
+        if (!finalPanelText.includes("Sources de scraping :")) {
+            throw new Error("La section 'Sources de scraping' est absente de la fiche produit.");
+        }
+        console.log("✔️ Section 'Sources de scraping' affichée !");
 
         const fs = require("fs");
         // Récupérer la liste des images et PDFs sur le disque

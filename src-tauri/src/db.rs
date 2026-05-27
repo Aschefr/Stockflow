@@ -1,5 +1,4 @@
 use rusqlite::{Connection, Result};
-use std::path::Path;
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -30,8 +29,16 @@ pub struct ProductHistoryItem {
     pub note: String,
 }
 
-pub fn get_db_connection<P: AsRef<Path>>(path: P) -> Result<Connection> {
-    Connection::open(path)
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AuditLogItem {
+    pub audit_id: String,
+    pub timestamp: String,
+    pub trigramme: String,
+    pub action: String,
+    pub field: Option<String>,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub source_url: Option<String>,
 }
 
 pub fn init_db(conn: &Connection) -> Result<()> {
@@ -88,6 +95,32 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             event_type TEXT NOT NULL,
             qty REAL NOT NULL,
             note TEXT
+        )",
+        [],
+    )?;
+
+    // 4. Table du journal d'audit (modifications champ par champ)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS product_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id TEXT NOT NULL UNIQUE,
+            sku TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            trigramme TEXT NOT NULL,
+            action TEXT NOT NULL,
+            field TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            source_url TEXT
+        )",
+        [],
+    )?;
+
+    // 5. Table de déduplication des fichiers audit déjà appliqués
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS applied_audits (
+            filename TEXT PRIMARY KEY,
+            processed_at TEXT NOT NULL
         )",
         [],
     )?;
@@ -156,7 +189,7 @@ pub fn get_history(conn: &Connection, sku: &str) -> Result<Vec<ProductHistoryIte
     let mut stmt = conn.prepare(
         "SELECT timestamp, trigramme, event_type, qty, note 
          FROM product_history 
-         WHERE sku = ? 
+         WHERE sku = ? AND event_type IN ('STOCK_IN', 'STOCK_OUT')
          ORDER BY timestamp DESC",
     )?;
 
@@ -173,6 +206,34 @@ pub fn get_history(conn: &Connection, sku: &str) -> Result<Vec<ProductHistoryIte
     let mut list = Vec::new();
     for h in history_iter {
         list.push(h?);
+    }
+    Ok(list)
+}
+
+pub fn get_audit_log(conn: &Connection, sku: &str) -> Result<Vec<AuditLogItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT audit_id, timestamp, trigramme, action, field, old_value, new_value, source_url
+         FROM product_audit_log
+         WHERE sku = ?
+         ORDER BY timestamp DESC",
+    )?;
+
+    let audit_iter = stmt.query_map([sku], |row| {
+        Ok(AuditLogItem {
+            audit_id: row.get(0)?,
+            timestamp: row.get(1)?,
+            trigramme: row.get(2)?,
+            action: row.get(3)?,
+            field: row.get(4)?,
+            old_value: row.get(5)?,
+            new_value: row.get(6)?,
+            source_url: row.get(7)?,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for a in audit_iter {
+        list.push(a?);
     }
     Ok(list)
 }

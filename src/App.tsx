@@ -13,6 +13,8 @@ interface AppConfig {
   pdf_rename_convention?: string;
   image_rename_convention?: string;
   pdf_size_threshold?: number;
+  vpc_api_keys?: Record<string, string>;
+  vpc_urls?: Record<string, string>;
 }
 
 interface Product {
@@ -95,6 +97,17 @@ interface ProductHistoryItem {
   note: string;
 }
 
+interface AuditLogItem {
+  audit_id: string;
+  timestamp: string;
+  trigramme: string;
+  action: string;
+  field: string | null;
+  old_value: string | null;
+  new_value: string | null;
+  source_url: string | null;
+}
+
 interface DashboardStats {
   total_references: number;
   total_value: number;
@@ -127,6 +140,14 @@ function App() {
     }
     return DEFAULT_COLUMNS;
   });
+
+  const [appVersion, setAppVersion] = useState("1.3.0");
+
+  useEffect(() => {
+    invoke<string>("get_app_version")
+      .then((ver) => setAppVersion(ver))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     localStorage.setItem("sf_inventory_columns", JSON.stringify(columns));
@@ -162,6 +183,8 @@ function App() {
   const [networkPathInput, setNetworkPathInput] = useState("");
   const [searxngUrlInput, setSearxngUrlInput] = useState("");
   const [vpcSitesInput, setVpcSitesInput] = useState<string[]>([]);
+  const [vpcKeysInput, setVpcKeysInput] = useState<Record<string, string>>({});
+  const [vpcUrlsInput, setVpcUrlsInput] = useState<Record<string, string>>({});
   const [newVpcSiteInput, setNewVpcSiteInput] = useState("");
   const [pdfRenameInput, setPdfRenameInput] = useState("");
   const [imageRenameInput, setImageRenameInput] = useState("");
@@ -170,12 +193,24 @@ function App() {
   const [newPdfName, setNewPdfName] = useState("");
   const [configError, setConfigError] = useState("");
   const [isEditingConfig, setIsEditingConfig] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
+  function showToast(message: string, type: "success" | "error" | "info" = "success") {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  }
 
   // Navigation & View States
   const [activeTab, setActiveTab] = useState<"dashboard" | "inventory" | "add_product" | "migration" | "settings">("dashboard");
   const [products, setProducts] = useState<Product[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [productHistory, setProductHistory] = useState<ProductHistoryItem[]>([]);
+  const [productAuditLog, setProductAuditLog] = useState<AuditLogItem[]>([]);
+
+  // States for custom VPC URL Search via SearXNG
+  const [activeSearchSite, setActiveSearchSite] = useState<string | null>(null);
+  const [searchSiteResults, setSearchSiteResults] = useState<string[]>([]);
+  const [isSearchingSite, setIsSearchingSite] = useState(false);
+  const [searchSiteError, setSearchSiteError] = useState<string | null>(null);
   
   // Dashboard statistics
   const [stats, setStats] = useState<DashboardStats>({
@@ -203,6 +238,7 @@ function App() {
     min_stock: 0,
     price: 0,
     pack_size: 1,
+    attributes: "{}"
   });
   const [duplicateWarning, setDuplicateWarning] = useState("");
   const [createSuccess, setCreateSuccess] = useState("");
@@ -288,7 +324,6 @@ function App() {
   const [scrapeModalTitle, setScrapeModalTitle] = useState("");
   const [scrapeSteps, setScrapeSteps] = useState<ScrapeProgressStep[]>([]);
   const [scrapeError, setScrapeError] = useState<string | null>(null);
-  const [settingsSaveState, setSettingsSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
   interface ConfirmModalConfig {
     title: string;
@@ -327,8 +362,80 @@ function App() {
     }
     return name;
   }
+  async function executeScrapePriceForSku(sku: string): Promise<number> {
+    if (!config) throw new Error("Configuration manquante");
+    const prod = products.find(p => p.sku === sku);
+    if (!prod) throw new Error(`Produit introuvable : ${sku}`);
+    const price: number = await invoke("scrape_price", {
+      sku: prod.sku,
+      provider: "rs",
+      networkPath: config.network_path,
+      trigramme: config.trigramme
+    });
+    await invoke("create_product", {
+      networkPath: config.network_path,
+      trigramme: config.trigramme,
+      sku: prod.sku,
+      mpn: prod.mpn,
+      label: prod.label,
+      brand: prod.brand,
+      category: prod.category,
+      subCategory: prod.sub_category,
+      location: prod.location,
+      itemType: prod.item_type,
+      minStock: prod.min_stock,
+      price: price,
+      imagePath: prod.image_path,
+      pdfPath: prod.pdf_path,
+      attributes: typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes,
+      packSize: prod.pack_size
+    });
+    return price;
+  }
 
-  async function runBatchScraping(mediaType: "images" | "pdf") {
+  async function executeScrapePdfForSku(sku: string): Promise<string> {
+    if (!config) throw new Error("Configuration manquante");
+    const prod = products.find(p => p.sku === sku);
+    if (!prod) throw new Error(`Produit introuvable : ${sku}`);
+    let vpcCode = "";
+    try {
+      const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+      if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
+        vpcCode = attrs.codeRS.trim();
+      } else if (attrs && attrs.vpc) {
+        const keys = Object.keys(attrs.vpc);
+        if (keys.length > 0) {
+          vpcCode = attrs.vpc[keys[0]].toString().trim();
+        }
+      }
+    } catch (e) {}
+    const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
+    const query = `${prod.brand || ""} ${prod.mpn || prod.sku} ${cleanVpc} datasheet pdf`.trim();
+    return await invoke<string>("scrape_pdf", { sku, query, networkPath: config.network_path });
+  }
+
+  async function executeScrapeImageForSku(sku: string): Promise<string[]> {
+    if (!config) throw new Error("Configuration manquante");
+    const prod = products.find(p => p.sku === sku);
+    if (!prod) throw new Error(`Produit introuvable : ${sku}`);
+    let vpcCode = "";
+    try {
+      const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+      if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
+        vpcCode = attrs.codeRS.trim();
+      } else if (attrs && attrs.vpc) {
+        const keys = Object.keys(attrs.vpc);
+        if (keys.length > 0) {
+          vpcCode = attrs.vpc[keys[0]].toString().trim();
+        }
+      }
+    } catch (e) {}
+    const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
+    const query = `${prod.brand || ""} ${prod.mpn || prod.sku} ${cleanVpc} image product`.trim();
+    return await invoke<string[]>("scrape_images", { sku, query, networkPath: config.network_path });
+  }
+
+  async function runBatchScraping(mediaType: "images" | "pdf" | "price") {
     if (selectedSkus.length === 0 || !config) return;
     setIsBatchRunning(true);
     setBatchTotal(selectedSkus.length);
@@ -341,30 +448,15 @@ function App() {
 
     for (let i = 0; i < randomized.length; i++) {
       const sku = randomized[i];
-      const prod = products.find(p => p.sku === sku);
-      if (!prod) continue;
-      let vpcCode = "";
-      try {
-        const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
-        if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
-          vpcCode = attrs.codeRS.trim();
-        } else if (attrs && attrs.vpc) {
-          const keys = Object.keys(attrs.vpc);
-          if (keys.length > 0) {
-            vpcCode = attrs.vpc[keys[0]].toString().trim();
-          }
-        }
-      } catch (e) {}
-
-      const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
-      const query = `${prod.brand || ""} ${prod.mpn || prod.sku} ${cleanVpc} ${mediaType === "pdf" ? "datasheet pdf" : "image product"}`.trim();
       setBatchStatus(`Scraping de ${sku} en cours (${i + 1}/${randomized.length})...`);
       
       try {
         if (mediaType === "pdf") {
-          await invoke("scrape_pdf", { sku, query, networkPath: config.network_path });
-        } else {
-          await invoke("scrape_images", { sku, query, networkPath: config.network_path });
+          await executeScrapePdfForSku(sku);
+        } else if (mediaType === "images") {
+          await executeScrapeImageForSku(sku);
+        } else if (mediaType === "price") {
+          await executeScrapePriceForSku(sku);
         }
         setBatchSuccessCount(prev => prev + 1);
       } catch (err) {
@@ -387,32 +479,10 @@ function App() {
     setMovementError("");
     setMovementSuccess("");
     try {
-      const price: number = await invoke("scrape_price", {
-        sku: selectedProduct.sku,
-        provider: "rs",
-        networkPath: config.network_path,
-        trigramme: config.trigramme
-      });
-      await invoke("create_product", {
-        networkPath: config.network_path,
-        trigramme: config.trigramme,
-        sku: selectedProduct.sku,
-        mpn: selectedProduct.mpn,
-        label: selectedProduct.label,
-        brand: selectedProduct.brand,
-        category: selectedProduct.category,
-        subCategory: selectedProduct.sub_category,
-        location: selectedProduct.location,
-        itemType: selectedProduct.item_type,
-        minStock: selectedProduct.min_stock,
-        price: price,
-        imagePath: selectedProduct.image_path,
-        pdfPath: selectedProduct.pdf_path,
-        attributes: typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes,
-        packSize: selectedProduct.pack_size
-      });
+      const price = await executeScrapePriceForSku(selectedProduct.sku);
       setMovementSuccess(`Prix mis à jour : ${price.toFixed(2)} €`);
       syncAndFetch(config);
+      await refreshSelectedProduct(selectedProduct.sku);
     } catch (err: any) {
       setMovementError(err.toString());
     } finally {
@@ -461,21 +531,7 @@ function App() {
       });
       unlistens.push(unlistenDedup);
 
-      let vpcCode = "";
-      try {
-        const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
-        if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
-          vpcCode = attrs.codeRS.trim();
-        } else if (attrs && attrs.vpc) {
-          const keys = Object.keys(attrs.vpc);
-          if (keys.length > 0) {
-            vpcCode = attrs.vpc[keys[0]].toString().trim();
-          }
-        }
-      } catch (e) {}
-      const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
-      const query = `${selectedProduct.brand || ""} ${selectedProduct.mpn || selectedProduct.sku} ${cleanVpc} datasheet pdf`.trim();
-      const relativePath: string = await invoke("scrape_pdf", { sku: selectedProduct.sku, query, networkPath: config.network_path });
+      const relativePath = await executeScrapePdfForSku(selectedProduct.sku);
 
       setScrapeSteps(prev => {
         const next = [...prev];
@@ -488,6 +544,7 @@ function App() {
       });
       setMovementSuccess("PDF récupéré avec succès.");
       syncAndFetch(config);
+      await refreshSelectedProduct(selectedProduct.sku);
     } catch (err: any) {
       const errMsg = err.toString();
       setScrapeError(errMsg);
@@ -543,22 +600,8 @@ function App() {
     };
     stepTimer = setTimeout(updateSimulatedSteps, 500);
 
-    let vpcCode = "";
     try {
-      const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
-      if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
-        vpcCode = attrs.codeRS.trim();
-      } else if (attrs && attrs.vpc) {
-        const keys = Object.keys(attrs.vpc);
-        if (keys.length > 0) {
-          vpcCode = attrs.vpc[keys[0]].toString().trim();
-        }
-      }
-    } catch (e) {}
-    const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
-    const query = `${selectedProduct.brand || ""} ${selectedProduct.mpn || selectedProduct.sku} ${cleanVpc} image product`.trim();
-    try {
-      const urls: string[] = await invoke("scrape_images", { sku: selectedProduct.sku, query, networkPath: config.network_path });
+      const urls = await executeScrapeImageForSku(selectedProduct.sku);
       clearTimeout(stepTimer);
       setScrapeSteps([
         { label: "Recherche SearxNG pour images", status: "success" },
@@ -568,6 +611,7 @@ function App() {
       ]);
       setMovementSuccess("Images récupérées avec succès.");
       syncAndFetch(config);
+      await refreshSelectedProduct(selectedProduct.sku);
     } catch (err: any) {
       clearTimeout(stepTimer);
       const errMsg = err.toString();
@@ -597,6 +641,8 @@ function App() {
           setNetworkPathInput(loaded.network_path);
           setSearxngUrlInput(loaded.searxng_url || "");
           setVpcSitesInput(loaded.vpc_sites || []);
+          setVpcKeysInput(loaded.vpc_api_keys || {});
+          setVpcUrlsInput(loaded.vpc_urls || {});
           setPdfRenameInput(loaded.pdf_rename_convention || "");
           setImageRenameInput(loaded.image_rename_convention || "");
           setPdfSizeThresholdInput(loaded.pdf_size_threshold ?? 5);
@@ -679,6 +725,8 @@ function App() {
       pdfRenameConvention: pdfConv || null,
       imageRenameConvention: imgConv || null,
       pdfSizeThreshold: pdfThreshold,
+      vpcApiKeys: vpcKeysInput,
+      vpcUrls: vpcUrlsInput,
     });
     
     const newConfig: AppConfig = {
@@ -689,9 +737,77 @@ function App() {
       pdf_rename_convention: pdfConv || undefined,
       image_rename_convention: imgConv || undefined,
       pdf_size_threshold: pdfThreshold,
+      vpc_api_keys: vpcKeysInput,
+      vpc_urls: vpcUrlsInput,
     };
     setConfig(newConfig);
     syncAndFetch(newConfig);
+  }
+
+  async function triggerAutoSave(updatedFields?: Partial<AppConfig>) {
+    try {
+      const tri = updatedFields?.hasOwnProperty("trigramme") ? updatedFields.trigramme! : trigrammeInput;
+      const net = updatedFields?.hasOwnProperty("network_path") ? updatedFields.network_path! : networkPathInput;
+      const searx = updatedFields?.hasOwnProperty("searxng_url") ? updatedFields.searxng_url! : searxngUrlInput;
+      const sites = updatedFields?.hasOwnProperty("vpc_sites") ? updatedFields.vpc_sites! : vpcSitesInput;
+      const pdfConv = updatedFields?.hasOwnProperty("pdf_rename_convention") ? updatedFields.pdf_rename_convention! : pdfRenameInput;
+      const imgConv = updatedFields?.hasOwnProperty("image_rename_convention") ? updatedFields.image_rename_convention! : imageRenameInput;
+      const pdfThreshold = updatedFields?.hasOwnProperty("pdf_size_threshold") ? updatedFields.pdf_size_threshold! : pdfSizeThresholdInput;
+      const apiKeys = updatedFields?.hasOwnProperty("vpc_api_keys") ? updatedFields.vpc_api_keys! : vpcKeysInput;
+      const urls = updatedFields?.hasOwnProperty("vpc_urls") ? updatedFields.vpc_urls! : vpcUrlsInput;
+
+      if (tri.trim().length !== 3) {
+        return;
+      }
+
+      await invoke("save_config", {
+        trigramme: tri,
+        networkPath: net,
+        searxngUrl: searx || null,
+        vpcSites: sites,
+        pdfRenameConvention: pdfConv || null,
+        imageRenameConvention: imgConv || null,
+        pdfSizeThreshold: pdfThreshold,
+        vpcApiKeys: apiKeys,
+        vpcUrls: urls,
+      });
+
+      const newConfig: AppConfig = {
+        trigramme: tri.toUpperCase(),
+        network_path: net,
+        searxng_url: searx || undefined,
+        vpc_sites: sites,
+        pdf_rename_convention: pdfConv || undefined,
+        image_rename_convention: imgConv || undefined,
+        pdf_size_threshold: pdfThreshold,
+        vpc_api_keys: apiKeys,
+        vpc_urls: urls,
+      };
+      setConfig(newConfig);
+      syncAndFetch(newConfig);
+      showToast("Paramètres auto-enregistrés", "success");
+    } catch (err: any) {
+      showToast("Auto-enregistrement échoué : " + err.toString(), "error");
+    }
+  }
+
+  async function searchVpcUrls(site: string) {
+    setActiveSearchSite(site);
+    setIsSearchingSite(true);
+    setSearchSiteError(null);
+    setSearchSiteResults([]);
+    try {
+      const domains: string[] = await invoke("search_vpc_domains_via_searxng", { query: site });
+      const filtered = domains.filter(d => {
+        const dLower = d.toLowerCase();
+        return !dLower.includes("searx") && !dLower.includes("google") && !dLower.includes("wikipedia") && !dLower.includes("youtube") && !dLower.includes("pinterest") && !dLower.includes("github") && !dLower.includes("facebook") && !dLower.includes("twitter") && !dLower.includes("linkedin") && !dLower.includes("instagram") && !dLower.includes("reddit");
+      });
+      setSearchSiteResults(filtered);
+    } catch (err: any) {
+      setSearchSiteError(err.toString());
+    } finally {
+      setIsSearchingSite(false);
+    }
   }
 
   // Handle configuration setup wizard submission
@@ -720,6 +836,7 @@ function App() {
       const path: string | null = await invoke("select_network_directory");
       if (path) {
         setNetworkPathInput(path);
+        triggerAutoSave({ network_path: path });
       }
     } catch (err) {
       console.error(err);
@@ -773,6 +890,11 @@ function App() {
       const history: ProductHistoryItem[] = await invoke("get_product_history", { sku: prod.sku });
       setProductHistory(history);
       
+      try {
+        const audit: AuditLogItem[] = await invoke("get_product_audit_log", { sku: prod.sku });
+        setProductAuditLog(audit);
+      } catch { setProductAuditLog([]); }
+      
       if (config) {
         const imgs: string[] = await invoke("list_sku_images", { networkPath: config.network_path, sku: prod.sku });
         setProductImages(imgs);
@@ -781,6 +903,18 @@ function App() {
       }
     } catch (err) {
       console.error(err);
+    }
+  }
+
+  async function refreshSelectedProduct(sku: string) {
+    try {
+      const latestProducts: Product[] = await invoke("get_products");
+      const found = latestProducts.find(p => p.sku === sku);
+      if (found) {
+        await handleSelectProduct(found);
+      }
+    } catch (e) {
+      console.error(e);
     }
   }
 
@@ -808,7 +942,12 @@ function App() {
     setCreateSuccess("");
     setCreateError("");
 
-    const attributesObj: any = {};
+    let attributesObj: any = {};
+    if (newProduct.attributes) {
+      try {
+        attributesObj = JSON.parse(newProduct.attributes);
+      } catch (e) {}
+    }
     if (newVpcSite && newVpcCode) {
       attributesObj.vpc = { [newVpcSite]: newVpcCode };
     }
@@ -847,6 +986,7 @@ function App() {
         min_stock: 0,
         price: 0,
         pack_size: 1,
+        attributes: "{}"
       });
       setShowAddModal(false);
       syncAndFetch(config);
@@ -978,9 +1118,7 @@ function App() {
       setMovementQty(1);
       setMovementNote("");
       syncAndFetch(config);
-      // Reload history
-      const history: ProductHistoryItem[] = await invoke("get_product_history", { sku: selectedProduct.sku });
-      setProductHistory(history);
+      await refreshSelectedProduct(selectedProduct.sku);
     } catch (err: any) {
       setMovementError(err.toString());
     }
@@ -1290,7 +1428,7 @@ function App() {
           <img src={logoImg} alt="StockFlow" className="header-logo-img" />
           <div style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
             <span className="header-logo" style={{ lineHeight: 1.1 }}>StockFlow</span>
-            <span className="version-badge" style={{ fontSize: "9px", alignSelf: "flex-start", backgroundColor: "var(--bg-tertiary)", color: "var(--text-secondary)", padding: "1px 5px", borderRadius: "4px", fontWeight: "bold", border: "1px solid var(--border-color)", marginTop: "2px", lineHeight: 1 }}>v1.2.0</span>
+            <span className="version-badge" style={{ fontSize: "9px", alignSelf: "flex-start", backgroundColor: "var(--bg-tertiary)", color: "var(--text-secondary)", padding: "1px 5px", borderRadius: "4px", fontWeight: "bold", border: "1px solid var(--border-color)", marginTop: "2px", lineHeight: 1 }}>v{appVersion}</span>
           </div>
           <span className="text-muted">|</span>
           <span className={`status-badge ${isOnline ? "status-online" : "status-offline"}`}>
@@ -1440,6 +1578,15 @@ function App() {
                     </button>
                     <button
                       type="button"
+                      className="btn"
+                      style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
+                      onClick={() => runBatchScraping("price")}
+                      disabled={isBatchRunning}
+                    >
+                      💰 Scraper Prix
+                    </button>
+                    <button
+                      type="button"
                       className="btn btn-secondary"
                       style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
                       onClick={() => setSelectedSkus([])}
@@ -1500,6 +1647,7 @@ function App() {
                       min_stock: 0,
                       price: 0,
                       pack_size: 1,
+                      attributes: "{}"
                     });
                     setShowAddModal(true);
                   }}
@@ -2050,29 +2198,11 @@ function App() {
 
           {/* TAB 5: SETTINGS */}
           {activeTab === "settings" && (
-            <div style={{ padding: "2rem", overflowY: "auto", maxWidth: "600px", margin: "0 auto", width: "100%" }}>
-              <h2 style={{ fontFamily: "var(--font-title)", marginBottom: "1.5rem" }}>Paramètres StockFlow</h2>
+            <div style={{ padding: "2rem", overflowY: "auto", width: "100%", height: "100%" }}>
+              <div style={{ maxWidth: "600px", margin: "0 auto", width: "100%" }}>
+                <h2 style={{ fontFamily: "var(--font-title)", marginBottom: "1.5rem" }}>Paramètres StockFlow</h2>
               
-              <form onSubmit={async (e) => {
-                e.preventDefault();
-                setSettingsSaveState("saving");
-                try {
-                  await handleSaveSettings(
-                    trigrammeInput,
-                    networkPathInput,
-                    searxngUrlInput,
-                    vpcSitesInput,
-                    pdfRenameInput,
-                    imageRenameInput,
-                    pdfSizeThresholdInput
-                  );
-                  setSettingsSaveState("saved");
-                  setTimeout(() => setSettingsSaveState("idle"), 3000);
-                } catch (err: any) {
-                  setSettingsSaveState("error");
-                  setTimeout(() => setSettingsSaveState("idle"), 5000);
-                }
-              }} style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
+              <form onSubmit={(e) => e.preventDefault()} style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
                 <div className="form-group">
                   <label htmlFor="settings-tri">Trigramme Utilisateur (3 caractères)</label>
                   <input
@@ -2083,6 +2213,7 @@ function App() {
                     style={{ textTransform: "uppercase" }}
                     value={trigrammeInput}
                     onChange={(e) => setTrigrammeInput(e.target.value)}
+                    onBlur={() => triggerAutoSave()}
                   />
                 </div>
                 
@@ -2095,6 +2226,7 @@ function App() {
                       required
                       value={networkPathInput}
                       onChange={(e) => setNetworkPathInput(e.target.value)}
+                      onBlur={() => triggerAutoSave()}
                     />
                     <button type="button" className="btn btn-secondary" onClick={pickNetworkDir}>Parcourir</button>
                   </div>
@@ -2108,12 +2240,13 @@ function App() {
                     placeholder="ex: http://localhost:8080"
                     value={searxngUrlInput}
                     onChange={(e) => setSearxngUrlInput(e.target.value)}
+                    onBlur={() => triggerAutoSave()}
                   />
                 </div>
 
                 <div className="form-group">
                   <label>Sites de VPC / Fournisseurs</label>
-                  <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                  <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
                     <input
                       type="text"
                       placeholder="Ajouter un site (ex: Farnell)"
@@ -2126,26 +2259,278 @@ function App() {
                       onClick={() => {
                         const s = newVpcSiteInput.trim();
                         if (s && !vpcSitesInput.includes(s)) {
-                          setVpcSitesInput([...vpcSitesInput, s]);
+                          const updated = [...vpcSitesInput, s];
+                          setVpcSitesInput(updated);
                           setNewVpcSiteInput("");
+                          triggerAutoSave({ vpc_sites: updated });
                         }
                       }}
                     >
                       Ajouter
                     </button>
                   </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                     {vpcSitesInput.map((site, i) => (
-                      <span key={i} className="trigramme-tag" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", padding: "0.2rem 0.5rem", textTransform: "none" }}>
-                        {site}
-                        <span
-                          style={{ cursor: "pointer", fontWeight: "bold" }}
-                          onClick={() => setVpcSitesInput(vpcSitesInput.filter(s => s !== site))}
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: "0.5rem", background: "rgba(255, 255, 255, 0.03)", padding: "0.4rem 0.6rem", borderRadius: "4px", border: "1px solid rgba(255, 255, 255, 0.05)" }}>
+                        <span style={{ fontWeight: "bold", minWidth: "80px", fontSize: "12px" }}>{site}</span>
+                        <select
+                          value={(() => {
+                            const val = vpcUrlsInput[site] || "";
+                            const presetsKey = Object.keys({
+                              rs: ["fr.rs-online.com", "ma.rsdelivers.com", "ie.rsdelivers.com", "uk.rs-online.com"],
+                              mouser: ["www.mouser.fr", "www.mouser.com"],
+                              farnell: ["fr.farnell.com", "uk.farnell.com"],
+                              conrad: ["www.conrad.fr", "www.conrad.com"]
+                            }).find(k => site.toLowerCase().includes(k));
+
+                            const presets = presetsKey ? ({
+                              rs: ["fr.rs-online.com", "ma.rsdelivers.com", "ie.rsdelivers.com", "uk.rs-online.com"],
+                              mouser: ["www.mouser.fr", "www.mouser.com"],
+                              farnell: ["fr.farnell.com", "uk.farnell.com"],
+                              conrad: ["www.conrad.fr", "www.conrad.com"]
+                            } as Record<string, string[]>)[presetsKey] : [];
+
+                            if (val === "") return "";
+                            if (presets.includes(val)) return val;
+                            return "custom";
+                          })()}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val !== "custom") {
+                              const updatedUrls = { ...vpcUrlsInput, [site]: val };
+                              setVpcUrlsInput(updatedUrls);
+                              triggerAutoSave({ vpc_urls: updatedUrls });
+                            }
+                          }}
+                          style={{ width: "120px", padding: "0.2rem", fontSize: "11px", background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "3px", color: "#fff", height: "24px" }}
+                        >
+                          <option value="">URL par défaut</option>
+                          {site.toLowerCase().includes("rs") && (
+                            <>
+                              <option value="fr.rs-online.com">fr.rs-online.com (FR)</option>
+                              <option value="ma.rsdelivers.com">ma.rsdelivers.com (MA)</option>
+                              <option value="ie.rsdelivers.com">ie.rsdelivers.com (IE)</option>
+                              <option value="uk.rs-online.com">uk.rs-online.com (UK)</option>
+                            </>
+                          )}
+                          {site.toLowerCase().includes("mouser") && (
+                            <>
+                              <option value="www.mouser.fr">www.mouser.fr (FR)</option>
+                              <option value="www.mouser.com">www.mouser.com (US)</option>
+                            </>
+                          )}
+                          {site.toLowerCase().includes("farnell") && (
+                            <>
+                              <option value="fr.farnell.com">fr.farnell.com (FR)</option>
+                              <option value="uk.farnell.com">uk.farnell.com (UK)</option>
+                            </>
+                          )}
+                          {site.toLowerCase().includes("conrad") && (
+                            <>
+                              <option value="www.conrad.fr">www.conrad.fr (FR)</option>
+                              <option value="www.conrad.com">www.conrad.com (Intl)</option>
+                            </>
+                          )}
+                          <option value="custom">Autre / Personnalisé</option>
+                        </select>
+
+                        <div style={{ display: "flex", gap: "0.25rem", flex: 1, maxWidth: "160px", position: "relative" }}>
+                          <input
+                            type="text"
+                            placeholder="URL / Domaine (ex: fr.rs-online.com)"
+                            value={vpcUrlsInput[site] || ""}
+                            onChange={(e) => {
+                              const updatedUrls = { ...vpcUrlsInput, [site]: e.target.value };
+                              setVpcUrlsInput(updatedUrls);
+                              triggerAutoSave({ vpc_urls: updatedUrls });
+                            }}
+                            style={{ flex: 1, padding: "0.2rem 0.4rem", fontSize: "11px", background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "3px", color: "#fff", height: "24px" }}
+                          />
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ padding: "0 0.4rem", height: "24px", minWidth: "24px", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--accent)" }}
+                            title="Rechercher des domaines avec SearXNG"
+                            onClick={() => {
+                              if (activeSearchSite === site) {
+                                setActiveSearchSite(null);
+                              } else {
+                                setActiveSearchSite(site);
+                                setSearchSiteResults([]);
+                                setSearchSiteError(null);
+                              }
+                            }}
+                          >
+                            🔍
+                          </button>
+                          
+                          {activeSearchSite === site && (() => {
+                            const presetsKey = Object.keys({
+                              rs: ["fr.rs-online.com", "ma.rsdelivers.com", "ie.rsdelivers.com", "uk.rs-online.com"],
+                              mouser: ["www.mouser.fr", "www.mouser.com"],
+                              farnell: ["fr.farnell.com", "uk.farnell.com"],
+                              conrad: ["www.conrad.fr", "www.conrad.com"]
+                            }).find(k => site.toLowerCase().includes(k));
+
+                            const presets = presetsKey ? ({
+                              rs: ["fr.rs-online.com", "ma.rsdelivers.com", "ie.rsdelivers.com", "uk.rs-online.com"],
+                              mouser: ["www.mouser.fr", "www.mouser.com"],
+                              farnell: ["fr.farnell.com", "uk.farnell.com"],
+                              conrad: ["www.conrad.fr", "www.conrad.com"]
+                            } as Record<string, string[]>)[presetsKey] : [];
+
+                            return (
+                              <div style={{
+                                position: "absolute",
+                                top: "26px",
+                                left: 0,
+                                right: 0,
+                                background: "var(--bg-tertiary)",
+                                border: "1px solid var(--border-color)",
+                                borderRadius: "4px",
+                                zIndex: 1000,
+                                maxHeight: "200px",
+                                overflowY: "auto",
+                                boxShadow: "var(--shadow-lg)",
+                                padding: "0.4rem"
+                              }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border-color)", paddingBottom: "0.2rem", marginBottom: "0.2rem" }}>
+                                  <span style={{ fontSize: "9px", fontWeight: "bold", color: "var(--text-muted)", textTransform: "uppercase" }}>Options {site}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setActiveSearchSite(null)}
+                                    style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "10px" }}
+                                  >
+                                    Fermer
+                                  </button>
+                                </div>
+
+                                <div
+                                  style={{
+                                    padding: "0.2rem 0.4rem",
+                                    cursor: "pointer",
+                                    borderRadius: "2px",
+                                    fontSize: "11px",
+                                    color: "var(--text-secondary)",
+                                    transition: "background 0.15s"
+                                  }}
+                                  className="search-domain-item"
+                                  onClick={() => {
+                                    const updatedUrls = { ...vpcUrlsInput, [site]: "" };
+                                    setVpcUrlsInput(updatedUrls);
+                                    triggerAutoSave({ vpc_urls: updatedUrls });
+                                    setActiveSearchSite(null);
+                                  }}
+                                >
+                                  ❌ URL par défaut
+                                </div>
+
+                                {presets.length > 0 && (
+                                  <>
+                                    <div style={{ fontSize: "9px", color: "var(--text-muted)", padding: "0.2rem 0.4rem", fontWeight: "bold", borderTop: "1px solid rgba(255,255,255,0.05)", marginTop: "0.2rem" }}>💡 Suggestions locales :</div>
+                                    {presets.map(p => (
+                                      <div
+                                        key={p}
+                                        style={{
+                                          padding: "0.2rem 0.4rem",
+                                          cursor: "pointer",
+                                          borderRadius: "2px",
+                                          fontSize: "11px",
+                                          transition: "background 0.15s"
+                                        }}
+                                        className="search-domain-item"
+                                        onClick={() => {
+                                          const updatedUrls = { ...vpcUrlsInput, [site]: p };
+                                          setVpcUrlsInput(updatedUrls);
+                                          triggerAutoSave({ vpc_urls: updatedUrls });
+                                          setActiveSearchSite(null);
+                                        }}
+                                      >
+                                        🌐 {p}
+                                      </div>
+                                    ))}
+                                  </>
+                                )}
+
+                                <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)", marginTop: "0.2rem", paddingTop: "0.2rem" }}>
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={() => searchVpcUrls(site)}
+                                    style={{ width: "100%", fontSize: "10px", padding: "0.2rem" }}
+                                    disabled={isSearchingSite}
+                                  >
+                                    {isSearchingSite ? "Recherche SearXNG..." : "🔍 Lancer recherche SearXNG"}
+                                  </button>
+                                </div>
+
+                                {isSearchingSite && (
+                                  <div style={{ fontSize: "10px", color: "var(--text-muted)", padding: "0.4rem", textAlign: "center" }}>Recherche active...</div>
+                                )}
+                                {searchSiteError && (
+                                  <div style={{ fontSize: "9px", color: "var(--danger)", padding: "0.4rem" }}>Erreur : {searchSiteError}</div>
+                                )}
+                                {searchSiteResults.length > 0 && (
+                                  <>
+                                    <div style={{ fontSize: "9px", color: "var(--text-muted)", padding: "0.2rem 0.4rem", fontWeight: "bold" }}>🌍 Trouvé en ligne :</div>
+                                    {searchSiteResults.map(r => (
+                                      <div
+                                        key={r}
+                                        style={{
+                                          padding: "0.2rem 0.4rem",
+                                          cursor: "pointer",
+                                          borderRadius: "2px",
+                                          fontSize: "11px",
+                                          transition: "background 0.15s"
+                                        }}
+                                        className="search-domain-item"
+                                        onClick={() => {
+                                          const updatedUrls = { ...vpcUrlsInput, [site]: r };
+                                          setVpcUrlsInput(updatedUrls);
+                                          triggerAutoSave({ vpc_urls: updatedUrls });
+                                          setActiveSearchSite(null);
+                                        }}
+                                      >
+                                        🌐 {r}
+                                      </div>
+                                    ))}
+                                  </>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                        <input
+                          type="text"
+                          placeholder="Clé API (Optionnelle)"
+                          value={vpcKeysInput[site] || ""}
+                          onChange={(e) => setVpcKeysInput({ ...vpcKeysInput, [site]: e.target.value })}
+                          onBlur={() => triggerAutoSave()}
+                          style={{ flex: 1, padding: "0.2rem 0.5rem", fontSize: "11px", background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "3px", color: "#fff", height: "24px" }}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ padding: "0 0.4rem", height: "24px", minWidth: "24px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                          onClick={() => {
+                            const updatedSites = vpcSitesInput.filter(s => s !== site);
+                            setVpcSitesInput(updatedSites);
+                            const updatedKeys = { ...vpcKeysInput };
+                            delete updatedKeys[site];
+                            setVpcKeysInput(updatedKeys);
+                            const updatedUrls = { ...vpcUrlsInput };
+                            delete updatedUrls[site];
+                            setVpcUrlsInput(updatedUrls);
+                            triggerAutoSave({ vpc_sites: updatedSites, vpc_api_keys: updatedKeys, vpc_urls: updatedUrls });
+                          }}
                         >
                           ×
-                        </span>
-                      </span>
+                        </button>
+                      </div>
                     ))}
+                  </div>
+                  <div style={{ fontSize: "10px", color: "var(--text-muted)", marginTop: "0.5rem", fontStyle: "italic" }}>
+                    ℹ️ Sans clé API, la récupération directe du site VPC est limitée ou simulée, avec fallback automatique sur SearxNG.
                   </div>
                 </div>
 
@@ -2162,14 +2547,26 @@ function App() {
                           const needsSeparator = current.length > 0 && !current.endsWith("_") && !current.endsWith("-");
                           const newVal = current + (needsSeparator ? "_" : "") + badge;
                           setPdfRenameInput(newVal);
+                          triggerAutoSave({ pdf_rename_convention: newVal });
                         }}
                       >
                         {badge}
                       </button>
                     ))}
-                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => setPdfRenameInput(pdfRenameInput + "_")}>_</button>
-                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => setPdfRenameInput(pdfRenameInput + "-")}>-</button>
-                    <button type="button" className="badge-btn badge-btn-clear" onClick={() => setPdfRenameInput("")}>Effacer</button>
+                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => {
+                      const newVal = pdfRenameInput + "_";
+                      setPdfRenameInput(newVal);
+                      triggerAutoSave({ pdf_rename_convention: newVal });
+                    }}>_</button>
+                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => {
+                      const newVal = pdfRenameInput + "-";
+                      setPdfRenameInput(newVal);
+                      triggerAutoSave({ pdf_rename_convention: newVal });
+                    }}>-</button>
+                    <button type="button" className="badge-btn badge-btn-clear" onClick={() => {
+                      setPdfRenameInput("");
+                      triggerAutoSave({ pdf_rename_convention: "" });
+                    }}>Effacer</button>
                   </div>
                   <input
                     id="settings-pdf-rename"
@@ -2177,6 +2574,7 @@ function App() {
                     placeholder="ex: {SKU}_datasheet.pdf"
                     value={pdfRenameInput}
                     onChange={(e) => setPdfRenameInput(e.target.value)}
+                    onBlur={() => triggerAutoSave()}
                   />
                   <div className="filename-preview">
                     <span>Aperçu :</span>
@@ -2197,14 +2595,26 @@ function App() {
                           const needsSeparator = current.length > 0 && !current.endsWith("_") && !current.endsWith("-");
                           const newVal = current + (needsSeparator ? "_" : "") + badge;
                           setImageRenameInput(newVal);
+                          triggerAutoSave({ image_rename_convention: newVal });
                         }}
                       >
                         {badge}
                       </button>
                     ))}
-                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => setImageRenameInput(imageRenameInput + "_")}>_</button>
-                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => setImageRenameInput(imageRenameInput + "-")}>-</button>
-                    <button type="button" className="badge-btn badge-btn-clear" onClick={() => setImageRenameInput("")}>Effacer</button>
+                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => {
+                      const newVal = imageRenameInput + "_";
+                      setImageRenameInput(newVal);
+                      triggerAutoSave({ image_rename_convention: newVal });
+                    }}>_</button>
+                    <button type="button" className="badge-btn badge-btn-sep" onClick={() => {
+                      const newVal = imageRenameInput + "-";
+                      setImageRenameInput(newVal);
+                      triggerAutoSave({ image_rename_convention: newVal });
+                    }}>-</button>
+                    <button type="button" className="badge-btn badge-btn-clear" onClick={() => {
+                      setImageRenameInput("");
+                      triggerAutoSave({ image_rename_convention: "" });
+                    }}>Effacer</button>
                   </div>
                   <input
                     id="settings-img-rename"
@@ -2212,6 +2622,7 @@ function App() {
                     placeholder="ex: {SKU}_{Index}.jpg"
                     value={imageRenameInput}
                     onChange={(e) => setImageRenameInput(e.target.value)}
+                    onBlur={() => triggerAutoSave()}
                   />
                   <div className="filename-preview">
                     <span>Aperçu :</span>
@@ -2229,22 +2640,16 @@ function App() {
                     step={1}
                     value={pdfSizeThresholdInput}
                     onChange={(e) => setPdfSizeThresholdInput(Number(e.target.value) || 0)}
+                    onBlur={() => triggerAutoSave()}
                   />
                   <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>Seuil en pourcentage pour considérer deux PDF comme doublons (valeur par défaut : 5%).</span>
                 </div>
 
-                <button 
-                  type="submit" 
-                  className={`btn btn-save-settings ${settingsSaveState}`} 
-                  disabled={settingsSaveState === "saving"}
-                  style={{ marginTop: "1rem" }}
-                >
-                  {settingsSaveState === "idle" && "Enregistrer les paramètres"}
-                  {settingsSaveState === "saving" && "Enregistrement..."}
-                  {settingsSaveState === "saved" && "Enregistré avec succès ! ✔️"}
-                  {settingsSaveState === "error" && "Erreur lors de la sauvegarde ❌"}
-                </button>
+                <div style={{ fontSize: "12px", color: "var(--success)", display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "1rem", fontWeight: 500 }}>
+                  <span>✔️ Les modifications sont enregistrées automatiquement.</span>
+                </div>
               </form>
+            </div>
             </div>
           )}
 
@@ -2340,9 +2745,13 @@ function App() {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", fontSize: "12px" }}>
                   <div>Marque: <strong>{selectedProduct.brand || "Inconnue"}</strong></div>
                   <div>MPN: <strong>{selectedProduct.mpn}</strong></div>
+                  <div>SKU (Interne): <strong>{selectedProduct.sku}</strong></div>
+                  <div>Type d'article: <strong>{selectedProduct.item_type === "consumable" ? "Consommable" : "Standard"}</strong></div>
                   <div>Famille: <strong>{selectedProduct.category || "-"}</strong></div>
                   <div>Sous-Famille: <strong>{selectedProduct.sub_category || "-"}</strong></div>
                   <div>Emplacement: <strong>{selectedProduct.location || "Non assigné"}</strong></div>
+                  <div>Stock Actuel: <strong>{selectedProduct.current_stock} u</strong></div>
+                  <div>Seuil Alerte: <strong>{selectedProduct.min_stock} u</strong></div>
                   {(() => {
                     const vpcCodeFull = getVpcCode(selectedProduct);
                     if (vpcCodeFull) {
@@ -2423,6 +2832,62 @@ function App() {
                     </>
                   )}
                   <div>Valeur totale stock: <strong>{((selectedProduct.current_stock / (selectedProduct.pack_size || 1)) * selectedProduct.price).toFixed(2)} €</strong></div>
+                  
+                  {(() => {
+                    const priceUrl = getAttribute(selectedProduct, "scrape_price_url");
+                    const imageUrl = getAttribute(selectedProduct, "scrape_image_url");
+                    const docUrl = getAttribute(selectedProduct, "scrape_doc_url");
+                    
+                    if (priceUrl || imageUrl || docUrl) {
+                      return (
+                        <div style={{ gridColumn: "span 2", borderTop: "1px solid var(--border-color)", paddingTop: "0.4rem", marginTop: "0.4rem" }}>
+                          <div style={{ fontWeight: "600", marginBottom: "0.3rem", fontSize: "11px", color: "var(--text-secondary)" }}>Sources de scraping :</div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "11px" }}>
+                            {priceUrl && (
+                              <div>
+                                💸 Prix :{" "}
+                                <button
+                                  type="button"
+                                  className="btn-link"
+                                  style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
+                                  onClick={() => openPath(priceUrl)}
+                                >
+                                  Lien source
+                                </button>
+                              </div>
+                            )}
+                            {imageUrl && (
+                              <div>
+                                🖼️ Image :{" "}
+                                <button
+                                  type="button"
+                                  className="btn-link"
+                                  style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
+                                  onClick={() => openPath(imageUrl)}
+                                >
+                                  Lien source
+                                </button>
+                              </div>
+                            )}
+                            {docUrl && (
+                              <div>
+                                📄 Notice :{" "}
+                                <button
+                                  type="button"
+                                  className="btn-link"
+                                  style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
+                                  onClick={() => openPath(docUrl)}
+                                >
+                                  Lien source
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
                 </div>
 
                 <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
@@ -2433,7 +2898,7 @@ function App() {
                     disabled={isScrapingPrice}
                     onClick={handleScrapePrice}
                   >
-                    {isScrapingPrice ? "Recherche prix..." : "🔍 Scraper Prix (RS)"}
+                    {isScrapingPrice ? "Recherche prix..." : "🔍 Scraper Prix"}
                   </button>
                   <button
                     type="button"
@@ -2777,6 +3242,98 @@ function App() {
                   )}
                 </div>
               </div>
+
+              {/* Audit Log */}
+              <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "1rem" }}>
+                <h4 style={{ fontFamily: "var(--font-title)", marginBottom: "0.8rem" }}>📋 Journal des Modifications</h4>
+                <div className="history-list">
+                  {productAuditLog.length === 0 ? (
+                    <div style={{ padding: "0.8rem", color: "var(--text-muted)", fontSize: "11px" }}>
+                      Aucune modification enregistrée.
+                    </div>
+                  ) : (
+                    productAuditLog.map((item) => {
+                      const date = new Date(item.timestamp);
+                      const dateStr = date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "2-digit" });
+                      const timeStr = date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+
+                      let badge = "🔵";
+                      let badgeClass = "audit-badge-update";
+                      let content: React.ReactNode = "";
+
+                      if (item.action === "CREATE") {
+                        badge = "🟢";
+                        badgeClass = "audit-badge-create";
+                        content = <span>Création de la référence</span>;
+                      } else if (item.action === "UPDATE") {
+                        badge = "🔵";
+                        badgeClass = "audit-badge-update";
+                        content = (
+                          <span>
+                            <strong>{item.field}</strong> : <span className="audit-old-value">{item.old_value || "—"}</span> → <span className="audit-new-value">{item.new_value || "—"}</span>
+                          </span>
+                        );
+                      } else if (item.action === "SCRAPE_PRICE") {
+                        badge = "🟠";
+                        badgeClass = "audit-badge-scrape";
+                        content = (
+                          <span>
+                            Prix scrappé : <strong>{item.new_value} €</strong>
+                            {item.source_url && (
+                              <> {" "}
+                                <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
+                                  🔗 source
+                                </a>
+                              </>
+                            )}
+                          </span>
+                        );
+                      } else if (item.action === "SCRAPE_PDF") {
+                        badge = "📄";
+                        badgeClass = "audit-badge-scrape";
+                        content = (
+                          <span>
+                            Notice téléchargée{item.field ? ` (${item.field})` : ""}
+                            {item.source_url && (
+                              <> {" "}
+                                <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
+                                  🔗 source
+                                </a>
+                              </>
+                            )}
+                          </span>
+                        );
+                      } else if (item.action === "SCRAPE_IMAGE") {
+                        badge = "🖼️";
+                        badgeClass = "audit-badge-scrape";
+                        content = (
+                          <span>
+                            Image téléchargée
+                            {item.source_url && (
+                              <> {" "}
+                                <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
+                                  🔗 source
+                                </a>
+                              </>
+                            )}
+                          </span>
+                        );
+                      }
+
+                      return (
+                        <div key={item.audit_id} className={`audit-item ${badgeClass}`}>
+                          <div className="audit-meta">
+                            <span className="audit-badge">{badge}</span>
+                            <span className="audit-date">{dateStr} {timeStr}</span>
+                            <span className="audit-trigramme">{item.trigramme}</span>
+                          </div>
+                          <div className="audit-content">{content}</div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
             </div>
           </aside>
         )}
@@ -2820,10 +3377,20 @@ function App() {
                         });
                         setNewProduct(prev => ({
                           ...prev,
-                          label: details.label,
-                          brand: details.brand,
-                          price: details.price,
-                          pack_size: details.pack_size
+                          label: details.label || prev.label,
+                          brand: details.brand || prev.brand,
+                          price: details.price > 0 ? details.price : prev.price,
+                          pack_size: details.pack_size > 0 ? details.pack_size : prev.pack_size,
+                          mpn: details.mpn || prev.mpn,
+                          sku: details.sku || prev.sku,
+                          // dimensions and weight are transiently kept or added to attributes
+                          attributes: JSON.stringify({
+                            ...JSON.parse(typeof prev.attributes === 'string' ? prev.attributes : "{}"),
+                            largeur: details.dimensions ? details.dimensions.split('x')[0] : undefined,
+                            hauteur: details.dimensions ? details.dimensions.split('x')[1] : undefined,
+                            profondeur: details.dimensions ? details.dimensions.split('x')[2] : undefined,
+                            poids: details.weight
+                          })
                         }));
                         setCreateSuccess("Champs pré-remplis avec succès !");
                       } catch (err: any) {
@@ -3299,6 +3866,33 @@ function App() {
           style={{ top: hoverPosition.y, left: hoverPosition.x }}
         >
           <img src={hoveredImage} alt="Preview" />
+        </div>
+      )}
+
+      {/* Floating Toast Notification */}
+      {toast && (
+        <div 
+          className={`toast toast-${toast.type}`} 
+          style={{
+            position: "fixed",
+            bottom: "24px",
+            right: "24px",
+            backgroundColor: toast.type === "success" ? "var(--success)" : toast.type === "error" ? "var(--danger)" : "var(--accent)",
+            color: "#fff",
+            padding: "0.8rem 1.5rem",
+            borderRadius: "8px",
+            boxShadow: "var(--shadow-lg)",
+            zIndex: 9999,
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            fontFamily: "var(--font-title)",
+            fontWeight: 500,
+            animation: "slideUp 0.3s ease-out",
+            border: "1px solid rgba(255,255,255,0.1)"
+          }}
+        >
+          {toast.type === "success" ? "✔️" : toast.type === "error" ? "❌" : "ℹ️"} {toast.message}
         </div>
       )}
     </div>

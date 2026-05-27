@@ -132,7 +132,7 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 - **Progression aléatoire :** La file d'attente traite la sélection dans un ordre aléatoire (randomisé) pour éviter les requêtes successives trop prévisibles sur les mêmes serveurs/marques.
 - **Indicateur de progression :** Barre de progression globale avec statistiques de réussite/échec de la tâche de lot.
 
-#### [TODO] P2.6 — Pré-remplissage Intelligent à la Création
+#### [DONE] P2.6 — Pré-remplissage Intelligent à la Création
 - **Recherche Instantanée :** À partir de la seule saisie du code VPC ou du SKU dans le formulaire de création, l'utilisateur peut cliquer sur un bouton "🔍 Pré-remplir".
 - **Scraping en Arrière-plan :** Requête rapide vers le fournisseur configuré (ex: RS) pour extraire dynamiquement : la désignation (label), la marque (brand), le prix, la taille du lot (pack size), et éventuellement lancer en tâche de fond le scraping d'images et de PDF.
 - **Remplissage Automatique :** Renseigne automatiquement tous les champs du modal d'ajout pour faire gagner un temps précieux à l'utilisateur lors des saisies manuelles.

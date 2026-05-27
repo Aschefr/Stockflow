@@ -223,6 +223,7 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
     match event.event_type.as_str() {
         "PRODUCT_CREATE" | "PRODUCT_UPDATE" => {
             let p = event.payload.clone();
+            let sku = p["sku"].as_str().unwrap_or("");
             let initial_stock = p["initial_stock"].as_f64().unwrap_or(0.0);
             conn.execute(
                 "INSERT OR REPLACE INTO products (
@@ -230,7 +231,7 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
                     item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), ?), ?, ?, ?, ?)",
                 (
-                    p["sku"].as_str().unwrap_or(""),
+                    sku,
                     p["mpn"].as_str().unwrap_or(""),
                     p["label"].as_str().unwrap_or(""),
                     p["brand"].as_str().or(None),
@@ -240,13 +241,18 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
                     p["type"].as_str().unwrap_or("QUANTITATIVE"),
                     p["minStock"].as_f64().unwrap_or(0.0),
                     p["price"].as_f64().unwrap_or(0.0),
-                    p["sku"].as_str().unwrap_or(""), // pour COALESCE
+                    sku, // pour COALESCE
                     initial_stock, // fallback pour COALESCE
                     p["attributes"].to_string(),
                     p["image_path"].as_str().or(None),
                     p["pdf_path"].as_str().or(None),
                     p["packSize"].as_i64().unwrap_or(1),
                 )
+            ).map_err(|e| e.to_string())?;
+
+            conn.execute(
+                "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
+                (sku, &event.timestamp, &event.trigramme, event.event_type.as_str(), initial_stock, ""),
             ).map_err(|e| e.to_string())?;
         }
         "PRODUCT_DELETE" => {
@@ -294,6 +300,7 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
     match event.event_type.as_str() {
         "PRODUCT_CREATE" | "PRODUCT_UPDATE" => {
             let p = event.payload.clone();
+            let sku = p["sku"].as_str().unwrap_or("");
             let initial_stock = p["initial_stock"].as_f64().unwrap_or(0.0);
             tx.execute(
                 "INSERT OR REPLACE INTO products (
@@ -301,7 +308,7 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
                     item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT current_stock FROM products WHERE sku = ?), ?), ?, ?, ?, ?)",
                 (
-                    p["sku"].as_str().unwrap_or(""),
+                    sku,
                     p["mpn"].as_str().unwrap_or(""),
                     p["label"].as_str().unwrap_or(""),
                     p["brand"].as_str().or(None),
@@ -311,13 +318,18 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
                     p["type"].as_str().unwrap_or("QUANTITATIVE"),
                     p["minStock"].as_f64().unwrap_or(0.0),
                     p["price"].as_f64().unwrap_or(0.0),
-                    p["sku"].as_str().unwrap_or(""), // pour COALESCE
+                    sku, // pour COALESCE
                     initial_stock, // fallback pour COALESCE
                     p["attributes"].to_string(),
                     p["image_path"].as_str().or(None),
                     p["pdf_path"].as_str().or(None),
                     p["packSize"].as_i64().unwrap_or(1),
                 )
+            ).map_err(|e| e.to_string())?;
+
+            tx.execute(
+                "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
+                (sku, &event.timestamp, &event.trigramme, event.event_type.as_str(), initial_stock, ""),
             ).map_err(|e| e.to_string())?;
         }
         "PRODUCT_DELETE" => {
@@ -358,4 +370,151 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
         _ => {}
     }
     Ok(())
+}
+
+// ==================== AUDIT LOG (fichiers JSON réseau dans audit/) ====================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AuditEntry {
+    pub audit_id: String,
+    pub sku: String,
+    pub timestamp: String,
+    pub trigramme: String,
+    pub action: String,
+    pub field: Option<String>,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub source_url: Option<String>,
+}
+
+pub fn write_audit_file(
+    network_path: &str,
+    sku: &str,
+    trigramme: &str,
+    action: &str,
+    field: Option<&str>,
+    old_value: Option<&str>,
+    new_value: Option<&str>,
+    source_url: Option<&str>,
+) -> Result<(), String> {
+    let audit_id = Uuid::new_v4().to_string();
+    let timestamp = Utc::now().to_rfc3339();
+
+    let entry = AuditEntry {
+        audit_id: audit_id.clone(),
+        sku: sku.to_uppercase(),
+        timestamp: timestamp.clone(),
+        trigramme: trigramme.to_uppercase(),
+        action: action.to_string(),
+        field: field.map(|s| s.to_string()),
+        old_value: old_value.map(|s| s.to_string()),
+        new_value: new_value.map(|s| s.to_string()),
+        source_url: source_url.map(|s| s.to_string()),
+    };
+
+    let filename = format!(
+        "{}_{}_{}_AUDIT_{}_{}.json",
+        Utc::now().format("%Y%m%dT%H%M%SZ"),
+        entry.trigramme,
+        action,
+        sku.to_uppercase(),
+        &audit_id[..4]
+    );
+
+    let audit_dir = PathBuf::from(network_path).join("audit");
+    if !audit_dir.exists() {
+        fs::create_dir_all(&audit_dir).map_err(|e| format!("Erreur création dossier audit : {}", e))?;
+    }
+
+    let file_path = audit_dir.join(&filename);
+    let data = serde_json::to_string_pretty(&entry)
+        .map_err(|e| format!("Erreur sérialisation audit : {}", e))?;
+    fs::write(&file_path, data)
+        .map_err(|e| format!("Erreur écriture audit réseau : {}", e))?;
+
+    // Appliquer directement en local pour réactivité immédiate
+    if let Some(db_path) = get_db_path() {
+        if let Ok(conn) = Connection::open(db_path) {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO product_audit_log (audit_id, sku, timestamp, trigramme, action, field, old_value, new_value, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    &entry.audit_id,
+                    &entry.sku,
+                    &entry.timestamp,
+                    &entry.trigramme,
+                    &entry.action,
+                    &entry.field,
+                    &entry.old_value,
+                    &entry.new_value,
+                    &entry.source_url,
+                ),
+            );
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO applied_audits (filename, processed_at) VALUES (?, ?)",
+                [&filename, &Utc::now().to_rfc3339()],
+            );
+        }
+    }
+
+    Ok(())
+}
+
+pub fn sync_audit_files(network_path: &str) -> Result<usize, String> {
+    let db_path = get_db_path().ok_or("Base de données cache introuvable")?;
+    let conn = Connection::open(db_path).map_err(|e| format!("Erreur SQLite : {}", e))?;
+
+    // S'assurer que les tables existent
+    let _ = super::db::init_db(&conn);
+
+    let audit_dir = PathBuf::from(network_path).join("audit");
+    if !audit_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut entries: Vec<String> = fs::read_dir(&audit_dir)
+        .map_err(|e| format!("Impossible de lire le dossier audit : {}", e))?
+        .filter_map(|res| res.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".json"))
+        .collect();
+
+    entries.sort();
+
+    let mut sync_count = 0;
+
+    for filename in entries {
+        let already_applied: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM applied_audits WHERE filename = ?)",
+            [&filename],
+            |row| row.get(0),
+        ).unwrap_or(false);
+
+        if !already_applied {
+            let file_path = audit_dir.join(&filename);
+            let content = fs::read_to_string(&file_path).unwrap_or_default();
+            if let Ok(entry) = serde_json::from_str::<AuditEntry>(&content) {
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO product_audit_log (audit_id, sku, timestamp, trigramme, action, field, old_value, new_value, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        &entry.audit_id,
+                        &entry.sku,
+                        &entry.timestamp,
+                        &entry.trigramme,
+                        &entry.action,
+                        &entry.field,
+                        &entry.old_value,
+                        &entry.new_value,
+                        &entry.source_url,
+                    ),
+                );
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO applied_audits (filename, processed_at) VALUES (?, ?)",
+                    [&filename, &Utc::now().to_rfc3339()],
+                );
+                sync_count += 1;
+            }
+        }
+    }
+
+    Ok(sync_count)
 }

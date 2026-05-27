@@ -187,6 +187,11 @@ textarea {
   font-family: var(--font-sans);
 }
 
+select option {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
 input[type="text"]:focus,
 input[type="number"]:focus,
 select:focus,
@@ -674,6 +679,56 @@ table.spreadsheet tr.batch-selected {
   margin-bottom: 0.2rem;
 }
 
+/* Audit log styles */
+.audit-item {
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 11px;
+  border-left: 3px solid transparent;
+  transition: background-color 0.15s;
+}
+.audit-item:hover { background-color: rgba(255,255,255,0.03); }
+.audit-item:last-child { border-bottom: none; }
+
+.audit-badge-create { border-left-color: #10b981; }
+.audit-badge-update { border-left-color: #3b82f6; }
+.audit-badge-scrape { border-left-color: #f59e0b; }
+
+.audit-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-muted);
+  margin-bottom: 0.15rem;
+  font-size: 10px;
+}
+.audit-badge { font-size: 12px; }
+.audit-date { flex: 1; }
+.audit-trigramme {
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.audit-content { font-size: 11px; line-height: 1.4; }
+.audit-old-value {
+  text-decoration: line-through;
+  opacity: 0.6;
+  color: #ef4444;
+}
+.audit-new-value {
+  font-weight: 600;
+  color: #10b981;
+}
+.audit-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 10px;
+  opacity: 0.8;
+  transition: opacity 0.15s;
+}
+.audit-link:hover { opacity: 1; text-decoration: underline; }
+
 /* Dashboard screen */
 .dashboard-grid {
   display: grid;
@@ -950,5 +1005,27 @@ table.spreadsheet tr.batch-selected {
   to { transform: rotate(360deg); }
 }
 
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
 
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
 
+::-webkit-scrollbar-thumb {
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  border: 1px solid var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.search-domain-item:hover {
+  background-color: var(--bg-hover) !important;
+  color: var(--accent) !important;
+}

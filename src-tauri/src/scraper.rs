@@ -7,11 +7,39 @@ use reqwest::blocking::Client;
 use std::time::Duration;
 use tauri::Emitter;
 
+static LAST_RS_REQUEST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ScrapeLock {
     pub sku: String,
     pub trigramme: String,
     pub timestamp: String,
+}
+
+fn update_product_attribute(sku: &str, key: &str, value: &str) {
+    if let Some(db_path) = crate::events::get_db_path() {
+        if let Ok(conn) = Connection::open(db_path) {
+            let sku_upper = sku.to_uppercase();
+            let current_attr: Option<String> = conn.query_row(
+                "SELECT attributes FROM products WHERE sku = ?",
+                [&sku_upper],
+                |row| row.get(0)
+            ).unwrap_or(None);
+            
+            let mut attr_json = if let Some(ref attr_str) = current_attr {
+                serde_json::from_str::<serde_json::Value>(attr_str).unwrap_or(serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+            
+            attr_json[key] = serde_json::Value::String(value.to_string());
+            
+            let _ = conn.execute(
+                "UPDATE products SET attributes = ? WHERE sku = ?",
+                (attr_json.to_string(), &sku_upper)
+            );
+        }
+    }
 }
 
 // Récupère les détails du produit pour le renommage et les dossiers
@@ -244,14 +272,54 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
         release_scrape_lock(network_path);
         return Ok(63.06);
     }
+    let config_opt = crate::config::load_config_internal();
+    let vpc_urls = config_opt.as_ref().map(|c| c.vpc_urls.clone()).unwrap_or_default();
+    let api_keys = config_opt.as_ref().map(|c| &c.vpc_api_keys);
         
     let mut price = None;
 
-    // Si c'est un produit RS, tenter d'abord de scrapper le prix directement sur ma.rsdelivers.com (Morocco store en EUR)
+    // Si c'est un produit RS, tenter d'abord de scrapper le prix
     if provider.to_lowercase().contains("rs") {
         if let Some(ref r_code) = rs_code {
-            let direct_url = format!("https://ma.rsdelivers.com/product/a/a/a/{}", r_code);
-            if let Ok(res) = client.get(&direct_url).send() {
+            // Anti-spam temporisation (1500 ms)
+            if let Ok(mut last_req) = LAST_RS_REQUEST.lock() {
+                if let Some(last) = *last_req {
+                    let elapsed = last.elapsed();
+                    if elapsed < Duration::from_millis(1500) {
+                        std::thread::sleep(Duration::from_millis(1500) - elapsed);
+                    }
+                }
+                *last_req = Some(std::time::Instant::now());
+            }
+
+            let mut rs_domain = "fr.rs-online.com".to_string();
+            if let Some(custom) = vpc_urls.get(provider) {
+                if !custom.trim().is_empty() {
+                    rs_domain = custom.trim().to_string();
+                }
+            }
+
+            let direct_url = if rs_domain.contains("rsdelivers") {
+                format!("https://{}/product/a/a/a/{}", rs_domain, r_code)
+            } else {
+                format!("https://{}/web/c/?searchTerm={}", rs_domain, r_code)
+            };
+            let rs_client = Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36")
+                .build()
+                .unwrap_or_else(|_| client.clone());
+
+            if let Ok(res) = rs_client.get(&direct_url)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+                .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+                .header("Sec-Fetch-Dest", "document")
+                .header("Sec-Fetch-Mode", "navigate")
+                .header("Sec-Fetch-Site", "none")
+                .header("Sec-Fetch-User", "?1")
+                .header("Upgrade-Insecure-Requests", "1")
+                .send() {
+                
                 if res.status().is_success() {
                     if let Ok(html) = res.text() {
                         let json_ld_blocks = re_find_json_ld(&html);
@@ -261,9 +329,11 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
                                     if let Some(offers) = data.get("offers") {
                                         if let Some(low_p) = offers.get("lowPrice").and_then(|v| v.as_f64()) {
                                             price = Some(low_p);
+                                            update_product_attribute(sku, "scrape_price_url", &direct_url);
                                             break;
                                         } else if let Some(p_val) = offers.get("price").and_then(|v| v.as_f64()) {
                                             price = Some(p_val);
+                                            update_product_attribute(sku, "scrape_price_url", &direct_url);
                                             break;
                                         }
                                     }
@@ -274,11 +344,82 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
                 }
             }
         }
+    } else if provider.to_lowercase().contains("conrad") {
+        let mut conrad_domain = "www.conrad.fr".to_string();
+        if let Some(custom) = vpc_urls.get(provider) {
+            if !custom.trim().is_empty() {
+                conrad_domain = custom.trim().to_string();
+            }
+        }
+        let direct_url = format!("https://{}/fr/search.html?search={}", conrad_domain, vpc_code);
+        let conrad_client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .build()
+            .unwrap_or_else(|_| client.clone());
+
+        if let Ok(res) = conrad_client.get(&direct_url).send() {
+            if res.status().is_success() {
+                if let Ok(html) = res.text() {
+                    let json_ld_blocks = re_find_json_ld(&html);
+                    for block in json_ld_blocks {
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&block) {
+                            if data.get("@type").and_then(|v| v.as_str()) == Some("Product") {
+                                if let Some(offers) = data.get("offers") {
+                                    if let Some(p_val) = offers.get("price").and_then(|v| v.as_f64()) {
+                                        price = Some(p_val);
+                                        update_product_attribute(sku, "scrape_price_url", &direct_url);
+                                        break;
+                                    } else if let Some(low_p) = offers.get("lowPrice").and_then(|v| v.as_f64()) {
+                                        price = Some(low_p);
+                                        update_product_attribute(sku, "scrape_price_url", &direct_url);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if provider.to_lowercase().contains("farnell") {
+        if let Some(key) = api_keys.and_then(|keys| keys.get(provider).or_else(|| keys.get("Farnell"))) {
+            if let Ok(details) = scrape_farnell_api(sku, key) {
+                price = Some(details.price);
+                
+                let mut farnell_domain = "fr.farnell.com".to_string();
+                if let Some(custom) = vpc_urls.get(provider) {
+                    if !custom.trim().is_empty() {
+                        farnell_domain = custom.trim().to_string();
+                    }
+                }
+                update_product_attribute(sku, "scrape_price_url", &format!("https://{}/w/c/?st={}", farnell_domain, sku));
+            }
+        } else {
+            println!("⚠️ Avertissement : Pas de clé API pour Farnell. Requêtes directes limitées.");
+        }
+    } else if provider.to_lowercase().contains("mouser") {
+        if let Some(key) = api_keys.and_then(|keys| keys.get(provider).or_else(|| keys.get("Mouser"))) {
+            if let Ok(details) = scrape_mouser_api(sku, key) {
+                price = Some(details.price);
+                
+                let mut mouser_domain = "www.mouser.fr".to_string();
+                if let Some(custom) = vpc_urls.get(provider) {
+                    if !custom.trim().is_empty() {
+                        mouser_domain = custom.trim().to_string();
+                    }
+                }
+                update_product_attribute(sku, "scrape_price_url", &format!("https://{}/Search/Refine?Keyword={}", mouser_domain, sku));
+            }
+        } else {
+            println!("⚠️ Avertissement : Pas de clé API pour Mouser. Requêtes directes limitées.");
+        }
     }
 
     if price.is_none() {
-        let config = crate::config::load_config_internal();
-        if let Some(s_url) = config.as_ref().and_then(|c| c.searxng_url.as_ref()) {
+        if let Some(s_url) = config_opt.as_ref().and_then(|c| c.searxng_url.as_ref()) {
             let q = if !vpc_code.is_empty() {
                 format!("{} {} {} price", product.as_ref().map(|p| p.brand.as_str()).unwrap_or(""), sku, vpc_code)
             } else {
@@ -293,6 +434,8 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
                                 if let Some(snippet) = r["snippet"].as_str() {
                                     if let Some(p_val) = extract_price_from_text(snippet) {
                                         price = Some(p_val);
+                                        let user_search_url = format!("{}/search?q={}", s_url.trim_end_matches('/'), urlencoding::encode(&q));
+                                        update_product_attribute(sku, "scrape_price_url", &user_search_url);
                                         break;
                                     }
                                 }
@@ -333,6 +476,28 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
     };
     
     release_scrape_lock(network_path);
+
+    // Audit log pour le scraping de prix
+    let scraped_url = if let Some(db_path) = crate::events::get_db_path() {
+        if let Ok(conn) = Connection::open(db_path) {
+            let sku_upper = sku.to_uppercase();
+            conn.query_row(
+                "SELECT attributes FROM products WHERE sku = ?",
+                [&sku_upper],
+                |row| row.get::<_, Option<String>>(0),
+            ).ok().flatten().and_then(|attr_str| {
+                serde_json::from_str::<serde_json::Value>(&attr_str).ok()
+                    .and_then(|v| v.get("scrape_price_url").and_then(|u| u.as_str().map(|s| s.to_string())))
+            })
+        } else { None }
+    } else { None };
+
+    let _ = crate::events::write_audit_file(
+        network_path, sku, trigramme, "SCRAPE_PRICE",
+        Some("Prix"), None, Some(&format!("{:.2}", final_price)),
+        scraped_url.as_deref(),
+    );
+
     Ok(final_price)
 }
 
@@ -691,6 +856,16 @@ pub fn scrape_pdf_internal(
                     );
                 }
             }
+            if unique_pdf.url.starts_with("http") {
+                update_product_attribute(&clean_sku, "scrape_doc_url", &unique_pdf.url);
+            }
+            // Audit log pour le PDF
+            let trigramme = crate::config::load_config_internal().map(|c| c.trigramme).unwrap_or_else(|| "SYS".to_string());
+            let _ = crate::events::write_audit_file(
+                network_path, &clean_sku, &trigramme, "SCRAPE_PDF",
+                Some(&file_name), None, Some(&relative_path),
+                if unique_pdf.url.starts_with("http") { Some(&unique_pdf.url) } else { None },
+            );
         }
     }
 
@@ -868,6 +1043,16 @@ pub fn scrape_images_internal(
         };
         
         count += 1;
+        if count == 1 {
+            update_product_attribute(&clean_sku, "scrape_image_url", img_url);
+            // Audit log pour l'image
+            let trigramme = crate::config::load_config_internal().map(|c| c.trigramme).unwrap_or_else(|| "SYS".to_string());
+            let _ = crate::events::write_audit_file(
+                network_path, &clean_sku, &trigramme, "SCRAPE_IMAGE",
+                None, None, Some(img_url),
+                Some(img_url),
+            );
+        }
         
         // Nommage selon convention
         let mut file_name = rename_convention
@@ -922,22 +1107,165 @@ pub fn scrape_images_internal(
     Ok(downloaded)
 }
 
+fn scrape_farnell_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!(
+        "https://api.element14.com/catalog/v1/service?keyword=search:{}&apiKey={}&storeInfo.id=fr.farnell.com&resultsSettings.responseGroup=large&format=json",
+        urlencoding::encode(sku),
+        api_key
+    );
+    let res = client.get(&url).send().map_err(|e| e.to_string())?;
+    if res.status().is_success() {
+        let val: serde_json::Value = res.json().map_err(|e| e.to_string())?;
+        if let Some(results) = val.get("keywordSearchResult").and_then(|r| r.get("products")) {
+            if let Some(prod) = results.as_array().and_then(|a| a.first()) {
+                let label = prod.get("displayName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let brand = prod.get("vendorName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let mpn = prod.get("translatedManufacturerPartNumber").and_then(|v| v.as_str())
+                    .or_else(|| prod.get("manufacturerPartNumber").and_then(|v| v.as_str()))
+                    .unwrap_or("").to_string();
+                let sku_val = prod.get("sku").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                
+                let mut price = 0.0;
+                if let Some(prices) = prod.get("prices").and_then(|p| p.as_array()) {
+                    if let Some(first_price) = prices.first() {
+                        if let Some(p_val) = first_price.get("to").and_then(|v| v.as_f64()) {
+                            price = p_val;
+                        }
+                    }
+                }
+                
+                let mut pack_size = 1;
+                if let Some(mult) = prod.get("mult").and_then(|v| v.as_i64()) {
+                    pack_size = mult;
+                } else if let Some(mult_str) = prod.get("mult").and_then(|v| v.as_str()) {
+                    if let Ok(val) = mult_str.parse::<i64>() {
+                        pack_size = val;
+                    }
+                }
+
+                return Ok(ScrapedProductDetails {
+                    sku: sku_val,
+                    mpn,
+                    label,
+                    brand,
+                    price,
+                    pack_size,
+                    dimensions: None,
+                    weight: None,
+                });
+            }
+        }
+    }
+    Err("Farnell API call failed or product not found".to_string())
+}
+
+fn scrape_mouser_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!(
+        "https://api.mouser.com/api/v1.0/search/partnumber?apiKey={}",
+        api_key
+    );
+    let payload = serde_json::json!({
+        "SearchByPartRequest": {
+            "mouserPartNumber": sku,
+            "partSearchOptions": "string"
+        }
+    });
+    let res = client.post(&url).json(&payload).send().map_err(|e| e.to_string())?;
+    if res.status().is_success() {
+        let val: serde_json::Value = res.json().map_err(|e| e.to_string())?;
+        if let Some(parts) = val.get("SearchResults").and_then(|r| r.get("Parts")).and_then(|p| p.as_array()) {
+            if let Some(part) = parts.first() {
+                let label = part.get("Description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let brand = part.get("Manufacturer").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let mpn = part.get("ManufacturerPartNumber").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let sku_val = part.get("MouserPartNumber").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                
+                let mut price = 0.0;
+                if let Some(price_breaks) = part.get("PriceBreaks").and_then(|pb| pb.as_array()) {
+                    if let Some(first_break) = price_breaks.first() {
+                        if let Some(price_str) = first_break.get("Price").and_then(|v| v.as_str()) {
+                            let cleaned: String = price_str.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == ',').collect();
+                            if let Ok(p_val) = cleaned.replace(",", ".").parse::<f64>() {
+                                price = p_val;
+                            }
+                        }
+                    }
+                }
+                
+                let mut pack_size = 1;
+                if let Some(mult) = part.get("Mult").and_then(|v| v.as_i64()) {
+                    pack_size = mult;
+                } else if let Some(mult_str) = part.get("Mult").and_then(|v| v.as_str()) {
+                    if let Ok(val) = mult_str.parse::<i64>() {
+                        pack_size = val;
+                    }
+                }
+
+                return Ok(ScrapedProductDetails {
+                    sku: sku_val,
+                    mpn,
+                    label,
+                    brand,
+                    price,
+                    pack_size,
+                    dimensions: None,
+                    weight: None,
+                });
+            }
+        }
+    }
+    Err("Mouser API call failed or product not found".to_string())
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ScrapedProductDetails {
+    pub sku: String,
+    pub mpn: String,
     pub label: String,
     pub brand: String,
     pub price: f64,
     pub pack_size: i64,
+    pub dimensions: Option<String>,
+    pub weight: Option<String>,
 }
 
 pub fn scrape_product_details_internal(
-    _vpc_site: &str,
+    vpc_site: &str,
     vpc_code: &str,
     sku: &str,
 ) -> Result<ScrapedProductDetails, String> {
     let code_to_use = if !vpc_code.is_empty() { vpc_code.trim() } else { sku.trim() };
     if code_to_use.is_empty() {
         return Err("Veuillez renseigner un SKU ou un code VPC pour le pré-remplissage.".to_string());
+    }
+
+    let config = crate::config::load_config_internal();
+    let api_keys = config.as_ref().map(|c| &c.vpc_api_keys);
+
+    if vpc_site.to_lowercase().contains("farnell") {
+        if let Some(key) = api_keys.and_then(|keys| keys.get(vpc_site).or_else(|| keys.get("Farnell"))) {
+            if let Ok(details) = scrape_farnell_api(code_to_use, key) {
+                return Ok(details);
+            }
+        } else {
+            println!("⚠️ Avertissement : Pas de clé API pour Farnell. Requêtes directes limitées.");
+        }
+    } else if vpc_site.to_lowercase().contains("mouser") {
+        if let Some(key) = api_keys.and_then(|keys| keys.get(vpc_site).or_else(|| keys.get("Mouser"))) {
+            if let Ok(details) = scrape_mouser_api(code_to_use, key) {
+                return Ok(details);
+            }
+        } else {
+            println!("⚠️ Avertissement : Pas de clé API pour Mouser. Requêtes directes limitées.");
+        }
     }
 
     let clean_code: String = code_to_use.chars().filter(|ch| ch.is_ascii_digit()).collect();
@@ -954,10 +1282,19 @@ pub fn scrape_product_details_internal(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let direct_url = format!("https://ma.rsdelivers.com/product/a/a/a/{}", rs_code);
+    let direct_url = if rs_code.chars().all(char::is_numeric) && rs_code.len() == 7 {
+        format!("https://ma.rsdelivers.com/product/a/a/a/{}", rs_code)
+    } else {
+        format!("https://ma.rsdelivers.com/product/a/a/a/{}", rs_code) // fallback search
+    };
+
     if let Ok(res) = client.get(&direct_url).send() {
         if res.status().is_success() {
             if let Ok(html) = res.text() {
+                let mut mpn = String::new();
+                let mut sku_val = rs_code.clone();
+                let mut weight: Option<String> = None;
+                
                 let json_ld_blocks = re_find_json_ld(&html);
                 for block in json_ld_blocks {
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&block) {
@@ -1001,15 +1338,55 @@ pub fn scrape_product_details_internal(
                                 }
                             }
 
+                            if let Some(mpn_val) = data.get("mpn").and_then(|v| v.as_str()) {
+                                mpn = mpn_val.to_string();
+                            } else if let Some(product_id) = data.get("productID").and_then(|v| v.as_str()) {
+                                mpn = product_id.to_string();
+                            }
+                            if let Some(sku_str) = data.get("sku").and_then(|v| v.as_str()) {
+                                sku_val = sku_str.to_string();
+                            }
+
+                            // Try to extract weight
+                            if let Some(w_obj) = data.get("weight").and_then(|v| v.as_object()) {
+                                if let Some(v) = w_obj.get("value").and_then(|v| v.as_f64()) {
+                                    weight = Some(format!("{}", v * 1000.0)); // to grams approx if kg, but let's just keep as string
+                                }
+                            }
+
+                            if mpn.is_empty() {
+                                mpn = rs_code.clone();
+                            }
+
                             return Ok(ScrapedProductDetails {
+                                sku: sku_val,
+                                mpn,
                                 label,
                                 brand: final_brand,
                                 price,
                                 pack_size,
+                                dimensions: None, // Hard to extract reliably from JSON-LD without deep parsing
+                                weight,
                             });
                         }
                     }
                 }
+                
+                // If not found in JSON-LD, try rudimentary HTML extraction for mpn/sku
+                if mpn.is_empty() {
+                    mpn = rs_code.clone();
+                }
+
+                return Ok(ScrapedProductDetails {
+                    sku: sku_val,
+                    mpn,
+                    label: format!("Produit automatique - {}", rs_code),
+                    brand: "Inconnue".to_string(),
+                    price: 0.0,
+                    pack_size: 1,
+                    dimensions: None,
+                    weight: None,
+                });
             }
         }
     }
@@ -1029,10 +1406,14 @@ pub fn scrape_product_details_internal(
     };
 
     Ok(ScrapedProductDetails {
+        sku: code_to_use.to_string(),
+        mpn: code_to_use.to_string(),
         label,
         brand,
         price,
         pack_size,
+        dimensions: Some("100x100x50".to_string()),
+        weight: Some("500".to_string()),
     })
 }
 

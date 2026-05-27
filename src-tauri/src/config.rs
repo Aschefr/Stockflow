@@ -32,6 +32,10 @@ pub struct AppConfig {
     pub image_rename_convention: Option<String>,
     #[serde(default = "default_pdf_size_threshold")]
     pub pdf_size_threshold: Option<f64>,
+    #[serde(default)]
+    pub vpc_api_keys: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub vpc_urls: std::collections::HashMap<String, String>,
 }
 
 pub fn get_config_dir() -> Option<PathBuf> {

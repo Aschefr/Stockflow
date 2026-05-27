@@ -1,4 +1,4 @@
-# 📈 StockFlow (v1.1.0)
+# 📈 StockFlow (v1.3.0)
 
 **StockFlow** est un système intelligent de gestion d'inventaire industriel conçu pour fonctionner dans un environnement d'entreprise Windows hautement restreint. 
 
@@ -74,6 +74,16 @@ Pour éviter les corruptions de base de données (comme SQLite ou Access) induit
 - [x] **Scraping et standardisation d'images :** Téléchargement d'illustrations produits, création de miniatures rapides locales, et déduplication automatique par comparaison d'octets.
 - [x] **Scraping par lot :** Files d'attente randomisées pour le traitement par lot d'images et de PDF sur plusieurs références sélectionnées.
 - [x] **Suppression en cascade :** Le retrait d'un produit supprime physiquement ses fiches techniques PDF et ses images stockées sur le réseau partagé.
+
+---
+
+## 📋 Fonctionnalités de la Phase 3 (Audit Log, Anti-Spam & Flexibilité)
+
+- [x] **Anti-Spam & Scraper RS France / Conrad :** Ajout d'une file d'attente avec temporisation de 1500 ms anti-blocage d'IP, scraping en euro réel sur `fr.rs-online.com`, et support complet de Conrad.
+- [x] **Double sélecteur d'URL VPC :** Liste déroulante d'origine des adresses connues (FR, MA, UK, US, etc.) couplée à un champ texte libre et une recherche en ligne assistée par SearXNG pour ajouter des domaines personnalisés.
+- [x] **Journal d'Audit Partagé (Audit Log) :** Fichiers JSON d'audit individuels stockés dans un dossier immuable `audit/` sur le réseau partagé (indépendant de la compaction) répliqués en local pour suivre toutes les créations, modifications de champs (avant/après en vert/rouge) et téléchargements de médias.
+- [x] **Rafraîchissement dynamique et temps réel :** Rafraîchissement automatique de la sidebar après toute action (scraping, mouvements, édition) pour voir le résultat immédiatement sans rechargement (sans F5).
+- [x] **Filtrage de l'historique physique :** Filtrage propre de la vue historique pour n'afficher que les vrais mouvements d'entrées et de sorties physiques (`STOCK_IN`/`STOCK_OUT`).
 
 ---
 

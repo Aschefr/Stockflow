@@ -1,6 +1,7 @@
 # Journal des Modifications - StockFlow
 
 Ce document répertorie l'historique des modifications apportées au codebase de StockFlow étape par étape.
+Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
@@ -165,4 +166,40 @@ Ce document répertorie l'historique des modifications apportées au codebase de
   - **Uniformisation de la Cascade de Dossiers (Sanitisation) :** Ajout de fonctions de sanitisation dans `App.tsx` (`sanitizeFolderName` et `sanitizeSku`) répliquant à l'identique la logique Rust (remplacement des caractères spéciaux et majuscules pour le SKU), résolvant le problème où le bouton "Ouvrir dossier" ouvrait un dossier vide en raison d'une différence de casse ou de format de dossier.
   - **Nettoyage des Avertissements :** Correction d'avertissements de compilation Rust (suppression de variables inutilisées ou de liaisons `mut` superflues).
 
+---
 
+## [2026-05-27] Scraping RS France, Choix d'URL VPC, Support Conrad & Journal d'Audit
+
+- **Anti-Spam & Scraping RS France :**
+  - Remplacement de l'URL cible du scraper RS de `ma.rsdelivers.com` (site marocain, prix export) par `fr.rs-online.com` (site français, prix réels).
+  - Ajout d'un système de file d'attente anti-spam : variable globale `LAST_RS_REQUEST` (Mutex + Instant) avec temporisation de 1500 ms entre chaque requête, inspiré de la macro Excel originale.
+  - Ajout d'en-têtes HTTP complets (Accept, Accept-Language, Sec-Fetch-*) simulant un navigateur Chrome pour contourner les premiers filtres Akamai.
+
+- **Choix de l'URL par Fournisseur VPC :**
+  - Ajout du champ `vpc_urls: HashMap<String, String>` dans `AppConfig` (`config.rs`) et `save_config` (`lib.rs`).
+  - Modification de `scrape_price_internal` dans `scraper.rs` pour lire l'URL personnalisée par fournisseur depuis la configuration (avec détection automatique du format d'URL `rsdelivers` vs `rs-online`).
+  - Mise à jour de l'interface des paramètres dans `App.tsx` : ajout d'un menu déroulant par fournisseur VPC proposant les domaines disponibles (FR, MA, UK, US, Intl) avec auto-save.
+
+- **Support Fournisseur Conrad :**
+  - Ajout d'un bloc de scraping dédié à Conrad dans `scraper.rs` avec parsing HTML JSON-LD (même logique que RS).
+  - Ajout des options d'URL `www.conrad.fr` et `www.conrad.com` dans la liste déroulante de l'interface.
+
+- **Journal d'Audit des Modifications (Audit Log) :**
+  - **Architecture réseau :** Les entrées d'audit sont stockées en fichiers JSON individuels dans un dossier `audit/` sur le lecteur réseau partagé, séparé du dossier `events/`. Ce dossier n'est **jamais touché** par la compaction ni le nettoyage réseau.
+  - **Base de données locale (`db.rs`) :** Ajout des tables `product_audit_log` (avec champs `audit_id`, `sku`, `timestamp`, `trigramme`, `action`, `field`, `old_value`, `new_value`, `source_url`) et `applied_audits` (déduplication).
+  - **Écriture des audits (`events.rs`) :** Fonctions `write_audit_file` (écriture JSON réseau + application locale immédiate) et `sync_audit_files` (synchronisation des fichiers audit distants dans le cache SQLite local).
+  - **Diff champ par champ (`lib.rs`) :** Modification de `create_product` pour comparer l'état existant du produit avec les nouvelles valeurs. Pour chaque champ modifié (désignation, MPN, marque, famille, sous-famille, emplacement, prix, seuil d'alerte, taille lot, code VPC), un fichier audit est généré avec les valeurs avant/après.
+  - **Audit des scrapes (`scraper.rs`) :** Chaque scrape réussi (prix, PDF, image) génère un fichier audit avec l'URL source cliquable.
+  - **Interface utilisateur (`App.tsx`) :** Section "📋 Journal des Modifications" dans le panneau de détails produit, affichant :
+    - 🟢 Créations de référence
+    - 🔵 Modifications de champs (avant → après, avec l'ancien barré en rouge et le nouveau en vert)
+    - 🟠 Scrapes de prix avec lien cliquable vers la source
+    - 📄 Notices PDF téléchargées avec lien source
+    - 🖼️ Images téléchargées avec lien source
+  - **Styles CSS (`App.css`) :** Bordure latérale colorée par type d'action, badges, liens de source stylisés, et personnalisation des balises `select option` pour un contraste et une intégration parfaite dans le thème sombre (suppression du fond gris clair/argenté par défaut).
+  - **Synchronisation :** Les fichiers audit sont synchronisés automatiquement avec les événements lors du polling régulier.
+
+- **Améliorations de l'Ergonomie et de l'Historique (Correctifs Finaux) :**
+  - **Double sélecteur d'URL VPC :** Restauration de la liste déroulante d'origine des URLs pré-enregistrées de base, positionnée côte à côte avec le champ de saisie libre et l'assistance de recherche SearXNG pour une flexibilité maximale.
+  - **Filtrage de l'historique physique :** Correction d'un bug qui affichait à tort les créations/mises à jour de métadonnées comme des mouvements de stock de "0 unités". La table SQLite locale ne filtre plus que les véritables événements physiques (`STOCK_IN` et `STOCK_OUT`).
+  - **Rafraîchissement dynamique immédiat (sans F5) :** Ajout de la fonction front-end `refreshSelectedProduct` qui réinterroge immédiatement la base de données et met à jour instantanément la sidebar (prix, stocks, historique, et audits) après chaque opération d'édition, de mouvement ou de scraping réussie.
