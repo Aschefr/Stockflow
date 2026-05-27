@@ -331,11 +331,19 @@ fn list_sku_pdfs(network_path: String, sku: String) -> Result<Vec<String>, Strin
     let db_path = events::get_db_path().ok_or("Base de données cache introuvable")?;
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     
-    let pdf_path_opt: Option<String> = conn.query_row(
-        "SELECT pdf_path FROM products WHERE sku = ?",
-        [&sku],
-        |row| row.get(0)
-    ).unwrap_or(None);
+    let sku_upper = sku.to_uppercase();
+    let (pdf_path_opt, brand, category, sub_category) = conn.query_row(
+        "SELECT pdf_path, brand, category, sub_category FROM products WHERE sku = ?",
+        [&sku_upper],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            ))
+        }
+    ).unwrap_or((None, String::new(), String::new(), String::new()));
 
     let pdfs_dir = if let Some(ref path) = pdf_path_opt {
         let full_path = std::path::Path::new(&network_path).join(path);
@@ -345,7 +353,16 @@ fn list_sku_pdfs(network_path: String, sku: String) -> Result<Vec<String>, Strin
             full_path
         }
     } else {
-        std::path::Path::new(&network_path).join("documents").join(&sku)
+        let clean_brand = csv_importer::sanitize_folder_name(&brand, "INCONNU");
+        let clean_category = csv_importer::sanitize_folder_name(&category, "INCONNU");
+        let clean_subcategory = csv_importer::sanitize_folder_name(&sub_category, "INCONNU");
+        let clean_sku = db::sanitize_sku(&sku);
+        std::path::Path::new(&network_path)
+            .join("documents")
+            .join(&clean_brand)
+            .join(&clean_category)
+            .join(&clean_subcategory)
+            .join(&clean_sku)
     };
 
     if !pdfs_dir.exists() {
@@ -576,7 +593,9 @@ fn delete_media(
                 
                 if let Some(ref cp) = current_pdf {
                     if cp.replace("\\", "/") == path_str {
-                        let _ = conn.execute("UPDATE products SET pdf_path = NULL WHERE sku = ?", [&sku_upper]);
+                        let remaining_pdfs = list_sku_pdfs(network_path.clone(), sku.clone()).unwrap_or_default();
+                        let next_pdf = remaining_pdfs.first().cloned();
+                        let _ = conn.execute("UPDATE products SET pdf_path = ? WHERE sku = ?", (next_pdf, &sku_upper));
                     }
                 }
             } else if media_type == "image" {

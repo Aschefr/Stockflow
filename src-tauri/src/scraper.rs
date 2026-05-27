@@ -90,6 +90,59 @@ pub fn force_release_lock(network_path: &str) {
     release_scrape_lock(network_path);
 }
 
+fn clean_vpc_code_for_query(raw: &str) -> String {
+    let s = raw.to_lowercase()
+        .replace("rs", "")
+        .replace("farnell", "")
+        .replace("mouser", "")
+        .replace("(", "")
+        .replace(")", "")
+        .replace(":", "")
+        .trim()
+        .to_string();
+    s
+}
+
+fn get_rs_stock_code(attributes_str: &str) -> Option<String> {
+    if let Ok(attrs) = serde_json::from_str::<serde_json::Value>(attributes_str) {
+        let code = if let Some(code_rs) = attrs["codeRS"].as_str() {
+            Some(code_rs.to_string())
+        } else if let Some(vpc_map) = attrs["vpc"].as_object() {
+            vpc_map.get("RS")
+                .or_else(|| vpc_map.get("rs"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+        
+        if let Some(c) = code {
+            let cleaned: String = c.chars().filter(|ch| ch.is_ascii_digit()).collect();
+            if !cleaned.is_empty() {
+                return Some(format!("{:0>7}", cleaned));
+            }
+        }
+    }
+    None
+}
+
+fn re_find_json_ld(html: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let marker = r#"type="application/ld+json">"#;
+    let mut pos = 0;
+    while let Some(start_idx) = html[pos..].find(marker) {
+        let abs_start = pos + start_idx + marker.len();
+        if let Some(end_idx) = html[abs_start..].find("</script>") {
+            let abs_end = abs_start + end_idx;
+            blocks.push(html[abs_start..abs_end].trim().to_string());
+            pos = abs_end + 9;
+        } else {
+            break;
+        }
+    }
+    blocks
+}
+
 fn extract_price_from_text(text: &str) -> Option<f64> {
     let mut matches = Vec::new();
     let chars: Vec<char> = text.chars().collect();
@@ -106,11 +159,12 @@ fn extract_price_from_text(text: &str) -> Option<f64> {
                 let cleaned = chunk.replace(',', ".");
                 if let Ok(val) = cleaned.parse::<f64>() {
                     let text_len = text.len();
-                    let start_sub = start.saturating_sub(10);
-                    let end_sub = std::cmp::min(text_len, i + 10);
-                    let has_ht = text[start_sub..start].to_lowercase().contains("ht")
-                        || text[i..end_sub].to_lowercase().contains("ht");
-                    matches.push((val, has_ht));
+                    let start_sub = start.saturating_sub(25);
+                    let end_sub = std::cmp::min(text_len, i + 25);
+                    let context_str = text[start_sub..end_sub].to_lowercase();
+                    let has_ht = context_str.contains("ht");
+                    let has_unit = context_str.contains("unit") || context_str.contains("unitaire") || context_str.contains("unité") || context_str.contains("unité*");
+                    matches.push((val, has_ht, has_unit));
                 }
             }
         } else {
@@ -118,12 +172,32 @@ fn extract_price_from_text(text: &str) -> Option<f64> {
         }
     }
     
-    if let Some(&(val, _)) = matches.iter().find(|&&(_, has_ht)| has_ht) {
+    if let Some(&(val, _, _)) = matches.iter().find(|&&(_, has_ht, has_unit)| has_ht && has_unit) {
         return Some(val);
     }
-    matches.iter()
-        .map(|&(val, _)| val)
-        .find(|&val| val >= 5.0 && val <= 10000.0)
+    if let Some(&(val, _, _)) = matches.iter().find(|&&(_, has_ht, _)| has_ht) {
+        return Some(val);
+    }
+    let unit_matches: Vec<f64> = matches.iter()
+        .filter(|&&(_, _, has_unit)| has_unit)
+        .map(|&(val, _, _)| val)
+        .filter(|&val| val >= 0.1 && val <= 10000.0)
+        .collect();
+    if !unit_matches.is_empty() {
+        let mut sorted = unit_matches.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        return Some(sorted[0]);
+    }
+    let all_valid: Vec<f64> = matches.iter()
+        .map(|&(val, _, _)| val)
+        .filter(|&val| val >= 0.1 && val <= 10000.0)
+        .collect();
+    if !all_valid.is_empty() {
+        let mut sorted = all_valid.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        return Some(sorted[0]);
+    }
+    None
 }
 
 pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trigramme: &str) -> Result<f64, String> {
@@ -136,18 +210,20 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
         .map_err(|e| e.to_string())?;
 
     let product = get_product_details(sku).ok();
-    let mut vpc_code = String::new();
+    let mut raw_vpc = String::new();
+    let mut attributes_str = String::new();
     if let Some(ref p) = product {
+        attributes_str = p.attributes.clone();
         if let Ok(attrs) = serde_json::from_str::<serde_json::Value>(&p.attributes) {
             if let Some(code_rs) = attrs["codeRS"].as_str() {
                 if !code_rs.is_empty() {
-                    vpc_code = code_rs.trim().to_string();
+                    raw_vpc = code_rs.trim().to_string();
                 }
             } else if let Some(vpc_map) = attrs["vpc"].as_object() {
                 for (_, val) in vpc_map {
                     if let Some(s) = val.as_str() {
                         if !s.is_empty() {
-                            vpc_code = s.trim().to_string();
+                            raw_vpc = s.trim().to_string();
                             break;
                         }
                     }
@@ -155,6 +231,9 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
             }
         }
     }
+
+    let vpc_code = clean_vpc_code_for_query(&raw_vpc);
+    let rs_code = get_rs_stock_code(&attributes_str);
 
     // Spécifique Eaton / RS 103-8444 fallback
     let is_eaton_switch = sku.to_uppercase().contains("091079P1")
@@ -167,23 +246,55 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
     }
         
     let mut price = None;
-    let config = crate::config::load_config_internal();
-    if let Some(s_url) = config.as_ref().and_then(|c| c.searxng_url.as_ref()) {
-        let q = if !vpc_code.is_empty() {
-            format!("{} {} {} price", product.as_ref().map(|p| p.brand.as_str()).unwrap_or(""), sku, vpc_code)
-        } else {
-            format!("{} {} price", product.as_ref().map(|p| p.brand.as_str()).unwrap_or(""), sku)
-        };
-        let search_url = format!("{}/search?q={}&format=json", s_url.trim_end_matches('/'), urlencoding::encode(&q));
-        if let Ok(res) = client.get(&search_url).send() {
-            if res.status().is_success() {
-                if let Ok(json) = res.json::<serde_json::Value>() {
-                    if let Some(results) = json["results"].as_array() {
-                        for r in results {
-                            if let Some(snippet) = r["snippet"].as_str() {
-                                if let Some(p_val) = extract_price_from_text(snippet) {
-                                    price = Some(p_val);
-                                    break;
+
+    // Si c'est un produit RS, tenter d'abord de scrapper le prix directement sur ma.rsdelivers.com (Morocco store en EUR)
+    if provider.to_lowercase().contains("rs") {
+        if let Some(ref r_code) = rs_code {
+            let direct_url = format!("https://ma.rsdelivers.com/product/a/a/a/{}", r_code);
+            if let Ok(res) = client.get(&direct_url).send() {
+                if res.status().is_success() {
+                    if let Ok(html) = res.text() {
+                        let json_ld_blocks = re_find_json_ld(&html);
+                        for block in json_ld_blocks {
+                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&block) {
+                                if data.get("@type").and_then(|v| v.as_str()) == Some("Product") {
+                                    if let Some(offers) = data.get("offers") {
+                                        if let Some(low_p) = offers.get("lowPrice").and_then(|v| v.as_f64()) {
+                                            price = Some(low_p);
+                                            break;
+                                        } else if let Some(p_val) = offers.get("price").and_then(|v| v.as_f64()) {
+                                            price = Some(p_val);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if price.is_none() {
+        let config = crate::config::load_config_internal();
+        if let Some(s_url) = config.as_ref().and_then(|c| c.searxng_url.as_ref()) {
+            let q = if !vpc_code.is_empty() {
+                format!("{} {} {} price", product.as_ref().map(|p| p.brand.as_str()).unwrap_or(""), sku, vpc_code)
+            } else {
+                format!("{} {} price", product.as_ref().map(|p| p.brand.as_str()).unwrap_or(""), sku)
+            };
+            let search_url = format!("{}/search?q={}&format=json", s_url.trim_end_matches('/'), urlencoding::encode(&q));
+            if let Ok(res) = client.get(&search_url).send() {
+                if res.status().is_success() {
+                    if let Ok(json) = res.json::<serde_json::Value>() {
+                        if let Some(results) = json["results"].as_array() {
+                            for r in results {
+                                if let Some(snippet) = r["snippet"].as_str() {
+                                    if let Some(p_val) = extract_price_from_text(snippet) {
+                                        price = Some(p_val);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -360,8 +471,14 @@ pub fn scrape_pdf_internal(
     if let Some(domain) = get_vpc_prioritized_domain(&p.attributes) {
         let domain_lower = domain.to_lowercase();
         candidate_links.sort_by(|a, b| {
-            let a_has = a.to_lowercase().contains(&domain_lower);
-            let b_has = b.to_lowercase().contains(&domain_lower);
+            let a_lower = a.to_lowercase();
+            let b_lower = b.to_lowercase();
+            
+            let a_has = a_lower.contains(&domain_lower) 
+                || (domain_lower.contains("rs-online") && (a_lower.contains("rsdelivers.com") || a_lower.contains("rswww.com") || a_lower.contains("cloudinary.com")));
+            let b_has = b_lower.contains(&domain_lower)
+                || (domain_lower.contains("rs-online") && (b_lower.contains("rsdelivers.com") || b_lower.contains("rswww.com") || b_lower.contains("cloudinary.com")));
+                
             match (a_has, b_has) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
@@ -600,35 +717,7 @@ pub fn scrape_images_internal(
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .build()
         .map_err(|e| e.to_string())?;
-        
-    // Requêter SearxNG pour images
-    let url = format!(
-        "{}/search?q={}&categories=images&format=json",
-        searxng_url.trim_end_matches('/'),
-        urlencoding::encode(query)
-    );
-    
-    let response = client.get(&url).send().map_err(|e| format!("Erreur SearxNG images : {}", e))?;
-    let json: serde_json::Value = response.json().map_err(|e| e.to_string())?;
-    let results = json["results"].as_array().ok_or("Aucune image trouvée")?;
-    
-    let mut candidate_results: Vec<serde_json::Value> = results.clone();
-    if let Some(domain) = get_vpc_prioritized_domain(&p.attributes) {
-        let domain_lower = domain.to_lowercase();
-        candidate_results.sort_by(|a, b| {
-            let a_url = a["img_src"].as_str().unwrap_or("").to_lowercase();
-            let b_url = b["img_src"].as_str().unwrap_or("").to_lowercase();
-            let a_has = a_url.contains(&domain_lower);
-            let b_has = b_url.contains(&domain_lower);
-            match (a_has, b_has) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            }
-        });
-    }
 
-    let mut downloaded = Vec::new();
     let clean_sku = crate::db::sanitize_sku(&p.sku);
     let clean_brand = sanitize_folder_name(&p.brand);
     let images_dir = Path::new(network_path).join("images");
@@ -652,18 +741,113 @@ pub fn scrape_images_internal(
             }
         }
     }
-    
-    // Prendre les 3 premières images maximum
-    let mut count = 0;
-    for r in &candidate_results {
-        if count >= 3 {
-            break;
+
+    let mut candidate_urls = Vec::new();
+    let rs_code = get_rs_stock_code(&p.attributes);
+
+    // 1. Si c'est RS, tenter d'extraire les URLs Cloudinary directement depuis la page produit de ma.rsdelivers.com
+    if let Some(ref r_code) = rs_code {
+        let direct_url = format!("https://ma.rsdelivers.com/product/a/a/a/{}", r_code);
+        if let Ok(res) = client.get(&direct_url).send() {
+            if res.status().is_success() {
+                if let Ok(html) = res.text() {
+                    let prefix = "https://res.cloudinary.com/rsc/image/upload/";
+                    let mut pos = 0;
+                    while let Some(start_idx) = html[pos..].find(prefix) {
+                        let abs_start = pos + start_idx;
+                        let mut end_idx = abs_start;
+                        let bytes = html.as_bytes();
+                        while end_idx < bytes.len() {
+                            let c = bytes[end_idx] as char;
+                            if c == '"' || c == '\'' || c == ' ' || c == '<' || c == '>' || c == '\\' || c == '}' || c == ']' {
+                                break;
+                            }
+                            end_idx += 1;
+                        }
+                        let mut url_str = html[abs_start..end_idx].to_string();
+                        url_str = url_str.replace("\\", "");
+                        if url_str.contains(r_code) {
+                            if !url_str.to_lowercase().ends_with(".jpg") && !url_str.to_lowercase().ends_with(".jpeg") && !url_str.to_lowercase().ends_with(".png") {
+                                url_str.push_str(".jpg");
+                            }
+                            if !candidate_urls.contains(&url_str) {
+                                candidate_urls.push(url_str);
+                            }
+                        }
+                        pos = end_idx;
+                    }
+                }
+            }
         }
         
-        let img_url = match r["img_src"].as_str() {
-            Some(link) => link,
-            None => continue,
-        };
+        // Ajouter aussi les URLs générées comme candidats pour être sûr de couvrir les index 1 à 5 en Y et F
+        for idx in 1..=5 {
+            let y_url = format!(
+                "https://res.cloudinary.com/rsc/image/upload/b_rgb:FFFFFF,c_pad,dpr_1.0,f_auto,q_auto,w_700/c_pad,w_700/Y{}-{:02}.jpg",
+                r_code, idx
+            );
+            if !candidate_urls.contains(&y_url) {
+                candidate_urls.push(y_url);
+            }
+            let f_url = format!(
+                "https://res.cloudinary.com/rsc/image/upload/b_rgb:FFFFFF,c_pad,dpr_1.0,f_auto,q_auto,w_700/c_pad,w_700/F{}-{:02}.jpg",
+                r_code, idx
+            );
+            if !candidate_urls.contains(&f_url) {
+                candidate_urls.push(f_url);
+            }
+        }
+    }
+        
+    // 2. Requêter SearxNG pour images seulement si aucun candidat direct
+    if candidate_urls.is_empty() {
+        let url = format!(
+            "{}/search?q={}&categories=images&format=json",
+            searxng_url.trim_end_matches('/'),
+            urlencoding::encode(query)
+        );
+        
+        if let Ok(response) = client.get(&url).send() {
+            if response.status().is_success() {
+                if let Ok(json) = response.json::<serde_json::Value>() {
+                    if let Some(results) = json["results"].as_array() {
+                        let mut candidate_results: Vec<serde_json::Value> = results.clone();
+                        if let Some(domain) = get_vpc_prioritized_domain(&p.attributes) {
+                            let domain_lower = domain.to_lowercase();
+                            candidate_results.sort_by(|a, b| {
+                                let a_url = a["img_src"].as_str().unwrap_or("").to_lowercase();
+                                let b_url = b["img_src"].as_str().unwrap_or("").to_lowercase();
+                                let a_has = a_url.contains(&domain_lower);
+                                let b_has = b_url.contains(&domain_lower);
+                                match (a_has, b_has) {
+                                    (true, false) => std::cmp::Ordering::Less,
+                                    (false, true) => std::cmp::Ordering::Greater,
+                                    _ => std::cmp::Ordering::Equal,
+                                }
+                            });
+                        }
+                        for r in &candidate_results {
+                            if let Some(link) = r["img_src"].as_str() {
+                                let link_str = link.to_string();
+                                if !candidate_urls.contains(&link_str) {
+                                    candidate_urls.push(link_str);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut downloaded = Vec::new();
+    
+    // Télécharger jusqu'à 5 images uniques
+    let mut count = 0;
+    for img_url in &candidate_urls {
+        if count >= 5 {
+            break;
+        }
         
         // Télécharger
         let img_bytes = match client.get(img_url).send().and_then(|res| res.bytes()) {
@@ -747,7 +931,7 @@ pub struct ScrapedProductDetails {
 }
 
 pub fn scrape_product_details_internal(
-    vpc_site: &str,
+    _vpc_site: &str,
     vpc_code: &str,
     sku: &str,
 ) -> Result<ScrapedProductDetails, String> {
@@ -756,6 +940,81 @@ pub fn scrape_product_details_internal(
         return Err("Veuillez renseigner un SKU ou un code VPC pour le pré-remplissage.".to_string());
     }
 
+    let clean_code: String = code_to_use.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    let rs_code = if !clean_code.is_empty() {
+        format!("{:0>7}", clean_code)
+    } else {
+        code_to_use.to_string()
+    };
+
+    // Tenter de scrapper en direct
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let direct_url = format!("https://ma.rsdelivers.com/product/a/a/a/{}", rs_code);
+    if let Ok(res) = client.get(&direct_url).send() {
+        if res.status().is_success() {
+            if let Ok(html) = res.text() {
+                let json_ld_blocks = re_find_json_ld(&html);
+                for block in json_ld_blocks {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&block) {
+                        if data.get("@type").and_then(|v| v.as_str()) == Some("Product") {
+                            let label = data.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let brand = data.get("brand").and_then(|v| {
+                                v.get("name").and_then(|n| n.as_str())
+                                 .or_else(|| v.as_str())
+                            }).unwrap_or("").to_string();
+                            let manufacturer = data.get("manufacturer").and_then(|v| v.as_str()).unwrap_or("");
+                            let final_brand = if brand.is_empty() { manufacturer.to_string() } else { brand };
+                            
+                            let mut price = 0.0;
+                            if let Some(offers) = data.get("offers") {
+                                if let Some(low_p) = offers.get("lowPrice").and_then(|v| v.as_f64()) {
+                                    price = low_p;
+                                } else if let Some(p_val) = offers.get("price").and_then(|v| v.as_f64()) {
+                                    price = p_val;
+                                }
+                            }
+                            
+                            let mut pack_size = 1;
+                            let html_lower = html.to_lowercase();
+                            if let Some(pos) = html_lower.find("paquet de ") {
+                                let sub = &html_lower[pos + 10 ..];
+                                let num_str: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
+                                if let Ok(val) = num_str.parse::<i64>() {
+                                    pack_size = val;
+                                }
+                            } else if let Some(pos) = html_lower.find("pack of ") {
+                                let sub = &html_lower[pos + 8 ..];
+                                let num_str: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
+                                if let Ok(val) = num_str.parse::<i64>() {
+                                    pack_size = val;
+                                }
+                            } else if let Some(pos) = html_lower.find("lot de ") {
+                                let sub = &html_lower[pos + 7 ..];
+                                let num_str: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
+                                if let Ok(val) = num_str.parse::<i64>() {
+                                    pack_size = val;
+                                }
+                            }
+
+                            return Ok(ScrapedProductDetails {
+                                label,
+                                brand: final_brand,
+                                price,
+                                pack_size,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Repli de secours mocké
     let (label, brand, price, pack_size) = if code_to_use == "746-5347" || code_to_use == "7465347" {
         ("Connecteur RJ45 FastConnect 180 Siemens".to_string(), "Siemens".to_string(), 15.50, 1)
     } else if code_to_use == "6ES7511-1AK02-0AB0" {

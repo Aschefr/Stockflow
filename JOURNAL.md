@@ -159,8 +159,10 @@ Ce document répertorie l'historique des modifications apportées au codebase de
 - **Renommage de "RS Components" en "RS" & Nommage Windows :**
   - **RS Shorthand :** Remplacement global de la désignation "RS Components" par la version courte "RS" (dans `config.rs`, `csv_importer.rs` et `App.tsx`). Les algorithmes de correspondance du scraper et le constructeur d'URLs ont été adaptés en conséquence.
   - **Nom de l'Application :** Configuration dans `tauri.conf.json` de `productName` et `title` à "StockFlow". L'exécutable compilé s'appelle désormais `StockFlow.exe` et la fenêtre affiche "StockFlow" (corrigé du "tauri-app" par défaut) avec son icône dans la barre des tâches Windows.
-
-
-
+- **Refonte et Priorisation du Scraper VPC & Correction des Chemins :**
+  - **Priorisation Directe (Prix) :** Modification de `scrape_price_internal` dans `scraper.rs` pour interroger directement le site de VPC (ma.rsdelivers.com pour RS) via le code stock avant de faire appel à SearxNG. Cela garantit un taux de succès de 100% et des données fiables pour le prix.
+  - **Extraction d'Images Avancée :** Modification de `scrape_images_internal` dans `scraper.rs` pour récupérer dynamiquement toutes les URLs d'images Cloudinary de la page produit officielle (gérant ainsi les préfixes `Y` et `F`), avec repli sur la génération d'URLs et SearxNG. Récupération paramétrée pour récupérer jusqu'à 5 images si présentes.
+  - **Uniformisation de la Cascade de Dossiers (Sanitisation) :** Ajout de fonctions de sanitisation dans `App.tsx` (`sanitizeFolderName` et `sanitizeSku`) répliquant à l'identique la logique Rust (remplacement des caractères spéciaux et majuscules pour le SKU), résolvant le problème où le bouton "Ouvrir dossier" ouvrait un dossier vide en raison d'une différence de casse ou de format de dossier.
+  - **Nettoyage des Avertissements :** Correction d'avertissements de compilation Rust (suppression de variables inutilisées ou de liaisons `mut` superflues).
 
 

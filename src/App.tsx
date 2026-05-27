@@ -356,7 +356,8 @@ function App() {
         }
       } catch (e) {}
 
-      const query = `${prod.brand || ""} ${prod.mpn || prod.sku} ${vpcCode} ${mediaType === "pdf" ? "datasheet pdf" : "image product"}`.trim();
+      const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
+      const query = `${prod.brand || ""} ${prod.mpn || prod.sku} ${cleanVpc} ${mediaType === "pdf" ? "datasheet pdf" : "image product"}`.trim();
       setBatchStatus(`Scraping de ${sku} en cours (${i + 1}/${randomized.length})...`);
       
       try {
@@ -472,7 +473,8 @@ function App() {
           }
         }
       } catch (e) {}
-      const query = `${selectedProduct.brand || ""} ${selectedProduct.mpn || selectedProduct.sku} ${vpcCode} datasheet pdf`.trim();
+      const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
+      const query = `${selectedProduct.brand || ""} ${selectedProduct.mpn || selectedProduct.sku} ${cleanVpc} datasheet pdf`.trim();
       const relativePath: string = await invoke("scrape_pdf", { sku: selectedProduct.sku, query, networkPath: config.network_path });
 
       setScrapeSteps(prev => {
@@ -553,7 +555,8 @@ function App() {
         }
       }
     } catch (e) {}
-    const query = `${selectedProduct.brand || ""} ${selectedProduct.mpn || selectedProduct.sku} ${vpcCode} image product`.trim();
+    const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
+    const query = `${selectedProduct.brand || ""} ${selectedProduct.mpn || selectedProduct.sku} ${cleanVpc} image product`.trim();
     try {
       const urls: string[] = await invoke("scrape_images", { sku: selectedProduct.sku, query, networkPath: config.network_path });
       clearTimeout(stepTimer);
@@ -1287,7 +1290,7 @@ function App() {
           <img src={logoImg} alt="StockFlow" className="header-logo-img" />
           <div style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
             <span className="header-logo" style={{ lineHeight: 1.1 }}>StockFlow</span>
-            <span className="version-badge" style={{ fontSize: "9px", alignSelf: "flex-start", backgroundColor: "var(--bg-tertiary)", color: "var(--text-secondary)", padding: "1px 5px", borderRadius: "4px", fontWeight: "bold", border: "1px solid var(--border-color)", marginTop: "2px", lineHeight: 1 }}>v1.4.0</span>
+            <span className="version-badge" style={{ fontSize: "9px", alignSelf: "flex-start", backgroundColor: "var(--bg-tertiary)", color: "var(--text-secondary)", padding: "1px 5px", borderRadius: "4px", fontWeight: "bold", border: "1px solid var(--border-color)", marginTop: "2px", lineHeight: 1 }}>v1.2.0</span>
           </div>
           <span className="text-muted">|</span>
           <span className={`status-badge ${isOnline ? "status-online" : "status-offline"}`}>
@@ -2549,10 +2552,37 @@ function App() {
                     style={{ padding: "0.25rem 0.5rem", fontSize: "10px" }}
                     onClick={async () => {
                       if (!config || !selectedProduct) return;
-                      const brand = selectedProduct.brand.trim() || "INCONNU";
-                      const cat = selectedProduct.category.trim() || "INCONNU";
-                      const sub = selectedProduct.sub_category.trim() || "INCONNU";
-                      const sku = selectedProduct.sku;
+                      const sanitizeFolderName = (name: string): string => {
+                        const clean = (name || "").trim()
+                          .replace(/\//g, "-")
+                          .replace(/\\/g, "-")
+                          .replace(/:/g, "-")
+                          .replace(/\*/g, "-")
+                          .replace(/\?/g, "-")
+                          .replace(/"/g, "-")
+                          .replace(/</g, "-")
+                          .replace(/>/g, "-")
+                          .replace(/\|/g, "-");
+                        return clean || "INCONNU";
+                      };
+                      const sanitizeSku = (sku: string): string => {
+                        return (sku || "").trim()
+                          .replace(/\s+/g, "")
+                          .replace(/\//g, "-")
+                          .replace(/\\/g, "-")
+                          .replace(/:/g, "-")
+                          .replace(/\*/g, "-")
+                          .replace(/\?/g, "-")
+                          .replace(/"/g, "-")
+                          .replace(/</g, "-")
+                          .replace(/>/g, "-")
+                          .replace(/\|/g, "-")
+                          .toUpperCase();
+                      };
+                      const brand = sanitizeFolderName(selectedProduct.brand);
+                      const cat = sanitizeFolderName(selectedProduct.category);
+                      const sub = sanitizeFolderName(selectedProduct.sub_category);
+                      const sku = sanitizeSku(selectedProduct.sku);
                       const path = `${config.network_path}/documents/${brand}/${cat}/${sub}/${sku}`.replace(/\//g, "\\");
                       try {
                         await invoke("ensure_directory", { path });
