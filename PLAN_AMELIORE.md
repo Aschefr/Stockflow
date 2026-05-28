@@ -1,4 +1,4 @@
-# StockFlow - Plan de Projet (v1.4.0)
+# StockFlow - Plan de Projet (v1.4.1)
 
 **StockFlow** est un système intelligent de gestion d'inventaire industriel conçu pour fonctionner dans un environnement Windows restreint (sans installation, sans droits administrateur, sans ports réseau ouverts). Il repose sur une architecture "Serverless" utilisant un lecteur réseau partagé comme unique vecteur de communication.
 
@@ -9,7 +9,7 @@
 | Propriété | Valeur |
 |---|---|
 | **Nom** | StockFlow |
-| **Version** | 1.4.0 |
+| **Version** | 1.4.1 |
 | **Description** | Système de gestion d'inventaire industriel portable fonctionnant exclusivement sur dossier réseau partagé, basé sur l'Event-Sourcing. Sans gestion de compte. |
 | **Architecture cible** | App Windows Portable (.exe standalone via Tauri ou Go/React) / Base de données par Event-Sourcing (fichiers JSON) sur Lecteur Réseau / Stockage direct (PDF/Images) sur lecteur réseau |
 
@@ -181,6 +181,16 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 - **Sans internet :** Le remplacement manuel du `.exe` par la nouvelle version suffit. Puisque toutes les données vivent sur le lecteur réseau et que la configuration locale est dans un fichier `config.json` séparé, aucune migration n'est nécessaire.
 
 ---
+
+
+#### Évolutions Récentes de l'UI et Scraping (Mai 2026)
+- **Confirmations Inline :** Toutes les actions de suppression (PDF, Images, Produit) abandonnent les modales globales au profit de micro-composants React *inline* de confirmation (état `inlineConfirm`), conservant le focus utilisateur.
+- **Saisie Rapide des Stocks :** La cellule "Stock Actuel" du tableau (Ag-Grid / DataGrid) est désormais éditable au double-clic avec calcul asynchrone du mouvement différentiel vers le backend SQLite.
+- **Scraping PDF Avancé :** 
+  - *Coupe-circuit :* Le moteur Rust stoppe la recherche s'il trouve les documents chez le fournisseur VPC (évitant l'appel massif à SearxNG).
+  - *Nommage Contextuel :* Extraction manuelle du texte contenu dans la balise HTML `<a>` du PDF par le scraper pour nommer automatiquement les fichiers avec le libellé officiel du fournisseur (ex: "Notice de montage").
+  - *Anti-Duplication :* Limite maximale absolue de 3 documents par SKU, avec déduplication agressive par "doc_type".
+  - *Recherche Multi-Requêtes progressive :* Boucle intelligente dans le backend testant le code VPC, le MPN un-quoted et la marque sur SearxNG avec remplacement du domaine mobile `ma.rsdelivers.com` par `rs-online.com` pour trouver les fiches techniques réelles.
 
 ## 5. Compilation & Automatisation
 

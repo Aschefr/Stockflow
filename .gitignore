@@ -24,3 +24,4 @@ dist-ssr
 *.sw?
 exemple_data/*
 scratch/
+corrections/

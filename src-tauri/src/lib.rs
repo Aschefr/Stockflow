@@ -3,6 +3,7 @@ mod db;
 mod events;
 mod csv_importer;
 mod scraper;
+mod backup;
 
 use config::{AppConfig, load_config_internal, save_config_internal};
 use db::{Product, ProductHistoryItem, AuditLogItem};
@@ -23,6 +24,7 @@ fn save_config(
     pdf_rename_convention: Option<String>,
     image_rename_convention: Option<String>,
     pdf_size_threshold: Option<f64>,
+    price_tax_type: Option<String>,
     vpc_api_keys: std::collections::HashMap<String, String>,
     vpc_urls: std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
@@ -43,6 +45,7 @@ fn save_config(
         pdf_rename_convention: pdf_rename_convention.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         image_rename_convention: image_rename_convention.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         pdf_size_threshold,
+        price_tax_type,
         vpc_api_keys,
         vpc_urls,
     };
@@ -155,6 +158,11 @@ fn create_product(
         return Err("Le SKU/Référence interne ne peut pas être vide.".to_string());
     }
 
+    let mut final_attributes = attributes.clone();
+    let mut final_scrape_price_url = attributes.get("scrape_price_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let mut final_scrape_image_url = attributes.get("scrape_image_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let mut final_scrape_doc_url = attributes.get("scrape_doc_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+
     // Diff champ par champ pour l'audit log
     if let Some(db_path) = events::get_db_path() {
         if let Ok(conn) = Connection::open(&db_path) {
@@ -180,7 +188,43 @@ fn create_product(
                 })
             ).ok();
 
-            if let Some(old) = existing {
+            if let Some(ref old) = existing {
+                if let Ok(old_attrs) = serde_json::from_str::<serde_json::Value>(&old.attributes) {
+                    if final_scrape_price_url.is_none() {
+                        final_scrape_price_url = old_attrs.get("scrape_price_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    }
+                    if final_scrape_image_url.is_none() {
+                        final_scrape_image_url = old_attrs.get("scrape_image_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    }
+                    if final_scrape_doc_url.is_none() {
+                        final_scrape_doc_url = old_attrs.get("scrape_doc_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    }
+                }
+            }
+
+            if let Some(ref url) = final_scrape_price_url {
+                if final_attributes.get("scrape_price_url").is_none() {
+                    if let Some(obj) = final_attributes.as_object_mut() {
+                        obj.insert("scrape_price_url".to_string(), serde_json::Value::String(url.clone()));
+                    }
+                }
+            }
+            if let Some(ref url) = final_scrape_image_url {
+                if final_attributes.get("scrape_image_url").is_none() {
+                    if let Some(obj) = final_attributes.as_object_mut() {
+                        obj.insert("scrape_image_url".to_string(), serde_json::Value::String(url.clone()));
+                    }
+                }
+            }
+            if let Some(ref url) = final_scrape_doc_url {
+                if final_attributes.get("scrape_doc_url").is_none() {
+                    if let Some(obj) = final_attributes.as_object_mut() {
+                        obj.insert("scrape_doc_url".to_string(), serde_json::Value::String(url.clone()));
+                    }
+                }
+            }
+
+            if let Some(ref old) = existing {
                 // Produit existant -> audit des modifications
                 let diffs: Vec<(&str, String, String)> = vec![
                     ("Désignation", old.label.clone(), label.trim().to_string()),
@@ -198,7 +242,7 @@ fn create_product(
                     if old_val != new_val {
                         let _ = events::write_audit_file(
                             &network_path, &clean_sku, &trigramme, "UPDATE",
-                            Some(field_name), Some(&old_val), Some(&new_val), None,
+                            Some(field_name), Some(&old_val), Some(&new_val), final_scrape_price_url.as_deref(),
                         );
                     }
                 }
@@ -207,19 +251,19 @@ fn create_product(
                 let old_vpc = serde_json::from_str::<serde_json::Value>(&old.attributes)
                     .ok().and_then(|a| a.get("vpc").cloned())
                     .unwrap_or(json!({})).to_string();
-                let new_vpc = attributes.get("vpc").cloned()
+                let new_vpc = final_attributes.get("vpc").cloned()
                     .unwrap_or(json!({})).to_string();
                 if old_vpc != new_vpc {
                     let _ = events::write_audit_file(
                         &network_path, &clean_sku, &trigramme, "UPDATE",
-                        Some("Code VPC"), Some(&old_vpc), Some(&new_vpc), None,
+                        Some("Code VPC"), Some(&old_vpc), Some(&new_vpc), final_scrape_price_url.as_deref(),
                     );
                 }
             } else {
                 // Nouveau produit -> audit de création
                 let _ = events::write_audit_file(
                     &network_path, &clean_sku, &trigramme, "CREATE",
-                    None, None, None, None,
+                    None, None, None, final_scrape_price_url.as_deref(),
                 );
             }
         }
@@ -238,7 +282,7 @@ fn create_product(
         "price": price,
         "image_path": image_path,
         "pdf_path": pdf_path,
-        "attributes": attributes,
+        "attributes": final_attributes,
         "packSize": pack_size,
     });
 
@@ -498,10 +542,11 @@ fn get_dashboard_stats() -> Result<serde_json::Value, String> {
         |row| row.get(0)
     ).unwrap_or(0);
 
-    // Récupérer les 5 derniers mouvements
+    // Récupérer les 5 derniers mouvements (uniquement les flux physiques STOCK_IN et STOCK_OUT)
     let mut stmt = conn.prepare(
         "SELECT sku, timestamp, trigramme, event_type, qty, note 
          FROM product_history 
+         WHERE event_type IN ('STOCK_IN', 'STOCK_OUT')
          ORDER BY timestamp DESC LIMIT 5"
     ).map_err(|e| e.to_string())?;
 
@@ -788,31 +833,45 @@ async fn scrape_price(sku: String, provider: String, network_path: String, trigr
 }
 
 #[tauri::command]
-async fn scrape_pdf(window: tauri::Window, sku: String, query: String, network_path: String) -> Result<String, String> {
+async fn scrape_pdf(window: tauri::Window, sku: String, query: String, network_path: String, brand: Option<String>, label: Option<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let config = load_config_internal().ok_or("Configuration introuvable")?;
         let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
         let conv = config.pdf_rename_convention.clone().unwrap_or_else(|| "{SKU}_datasheet.pdf".to_string());
-        
-        scraper::scrape_pdf_internal(&window, &sku, &url, &query, &conv, &network_path)
+        let brand_str = brand.as_deref().unwrap_or("");
+        let label_str = label.as_deref().unwrap_or("");
+        scraper::scrape_pdf_internal(&window, &sku, &url, &query, &conv, &network_path, brand_str, label_str)
     }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn scrape_images(sku: String, query: String, network_path: String) -> Result<Vec<String>, String> {
+async fn scrape_images(window: tauri::Window, sku: String, query: String, network_path: String, brand: Option<String>, label: Option<String>) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let config = load_config_internal().ok_or("Configuration introuvable")?;
         let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
         let conv = config.image_rename_convention.clone().unwrap_or_else(|| "{SKU}_{Index}.jpg".to_string());
-        
-        scraper::scrape_images_internal(&sku, &url, &query, &conv, &network_path)
+        let brand_str = brand.as_deref().unwrap_or("");
+        let label_str = label.as_deref().unwrap_or("");
+        scraper::scrape_images_internal(&window, &sku, &url, &query, &conv, &network_path, brand_str, label_str)
     }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn scrape_product_details(vpc_site: String, vpc_code: String, sku: String) -> Result<scraper::ScrapedProductDetails, String> {
+async fn scrape_product_details(
+    vpc_site: String, 
+    vpc_code: String, 
+    sku: String,
+    brand: Option<String>,
+    label: Option<String>,
+) -> Result<scraper::ScrapedProductDetails, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        scraper::scrape_product_details_internal(&vpc_site, &vpc_code, &sku)
+        let mut details = scraper::scrape_product_details_internal(&vpc_site, &vpc_code, &sku, brand.as_deref(), label.as_deref())?;
+        if let Some(config) = load_config_internal() {
+            if config.price_tax_type.as_deref() == Some("TTC") {
+                details.price = details.price * 1.20;
+            }
+        }
+        Ok(details)
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -859,12 +918,36 @@ async fn search_vpc_domains_via_searxng(query: String) -> Result<Vec<String>, St
 }
 
 #[tauri::command]
+fn get_backup_config(network_path: String) -> Result<backup::BackupConfig, String> {
+    Ok(backup::load_backup_config_internal(&network_path))
+}
+
+#[tauri::command]
+fn save_backup_config(network_path: String, config: backup::BackupConfig) -> Result<(), String> {
+    backup::save_backup_config_internal(&network_path, &config)
+}
+
+#[tauri::command]
+fn trigger_manual_backup(network_path: String) -> Result<String, String> {
+    let config = backup::load_backup_config_internal(&network_path);
+    backup::perform_backup(&network_path, &config)
+}
+
+#[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Planificateur de sauvegarde automatique
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            backup::check_and_run_scheduler();
+        }
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -898,7 +981,10 @@ pub fn run() {
             scrape_product_details,
             get_product_audit_log,
             search_vpc_domains_via_searxng,
-            get_app_version
+            get_app_version,
+            get_backup_config,
+            save_backup_config,
+            trigger_manual_backup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

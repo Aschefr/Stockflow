@@ -16,6 +16,7 @@ pub struct Event {
 
 pub fn get_db_path() -> Option<PathBuf> {
     super::config::get_config_dir().map(|mut p| {
+        let _ = fs::create_dir_all(&p);
         p.push("stockflow.db");
         p
     })
@@ -225,6 +226,13 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
             let p = event.payload.clone();
             let sku = p["sku"].as_str().unwrap_or("");
             let initial_stock = p["initial_stock"].as_f64().unwrap_or(0.0);
+            
+            let product_exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM products WHERE sku = ?)",
+                [sku],
+                |row| row.get(0),
+            ).unwrap_or(false);
+
             conn.execute(
                 "INSERT OR REPLACE INTO products (
                     sku, mpn, label, brand, category, sub_category, location, 
@@ -250,10 +258,12 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
                 )
             ).map_err(|e| e.to_string())?;
 
-            conn.execute(
-                "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
-                (sku, &event.timestamp, &event.trigramme, event.event_type.as_str(), initial_stock, ""),
-            ).map_err(|e| e.to_string())?;
+            if !product_exists {
+                conn.execute(
+                    "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
+                    (sku, &event.timestamp, &event.trigramme, "PRODUCT_CREATE", initial_stock, ""),
+                ).map_err(|e| e.to_string())?;
+            }
         }
         "PRODUCT_DELETE" => {
             let sku = event.payload["sku"].as_str().unwrap_or("");
@@ -302,6 +312,13 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
             let p = event.payload.clone();
             let sku = p["sku"].as_str().unwrap_or("");
             let initial_stock = p["initial_stock"].as_f64().unwrap_or(0.0);
+
+            let product_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM products WHERE sku = ?)",
+                [sku],
+                |row| row.get(0),
+            ).unwrap_or(false);
+
             tx.execute(
                 "INSERT OR REPLACE INTO products (
                     sku, mpn, label, brand, category, sub_category, location, 
@@ -327,10 +344,12 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
                 )
             ).map_err(|e| e.to_string())?;
 
-            tx.execute(
-                "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
-                (sku, &event.timestamp, &event.trigramme, event.event_type.as_str(), initial_stock, ""),
-            ).map_err(|e| e.to_string())?;
+            if !product_exists {
+                tx.execute(
+                    "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
+                    (sku, &event.timestamp, &event.trigramme, "PRODUCT_CREATE", initial_stock, ""),
+                ).map_err(|e| e.to_string())?;
+            }
         }
         "PRODUCT_DELETE" => {
             let sku = event.payload["sku"].as_str().unwrap_or("");

@@ -817,7 +817,7 @@ table.spreadsheet tr.batch-selected {
   width: 60vw;
   max-width: 950px;
   min-width: 320px;
-  max-height: 85vh;
+  max-height: 95vh;
   display: flex;
   flex-direction: column;
   box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
@@ -828,16 +828,16 @@ table.spreadsheet tr.batch-selected {
 @media (max-width: 900px) {
   .modal-container {
     width: 92vw;
-    max-height: 90vh;
+    max-height: 95vh;
   }
   .modal-field-row {
     flex-direction: column !important;
-    gap: 0.75rem !important;
+    gap: 0.5rem !important;
   }
 }
 
 .modal-header {
-  padding: 1.25rem 1.5rem;
+  padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--border-color);
   display: flex;
   align-items: center;
@@ -847,7 +847,7 @@ table.spreadsheet tr.batch-selected {
 .modal-header h3 {
   margin: 0;
   font-family: var(--font-title);
-  font-size: 1.25rem;
+  font-size: 1.15rem;
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -855,7 +855,7 @@ table.spreadsheet tr.batch-selected {
 .modal-close {
   background: none;
   border: none;
-  font-size: 1.5rem;
+  font-size: 1.3rem;
   color: var(--text-secondary);
   cursor: pointer;
   padding: 0.25rem;
@@ -874,32 +874,32 @@ table.spreadsheet tr.batch-selected {
 }
 
 .modal-body {
-  padding: 0.75rem;
+  padding: 0.5rem;
   overflow-y: auto;
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
 /* Groupes de champs sémantiques */
 .modal-field-group {
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  padding: 0.5rem 0.75rem;
+  padding: 0.4rem 0.6rem;
   background-color: rgba(255, 255, 255, 0.02);
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.3rem;
 }
 
 .modal-field-group-title {
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   font-weight: 700;
   color: var(--accent-color, #3b82f6);
-  margin-top: -0.2rem;
-  margin-bottom: 0.15rem;
-  padding-bottom: 0.15rem;
+  margin-top: -0.1rem;
+  margin-bottom: 0.1rem;
+  padding-bottom: 0.1rem;
   border-bottom: 1px dashed var(--border-color);
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -908,7 +908,7 @@ table.spreadsheet tr.batch-selected {
 /* Lignes de champs flexibles */
 .modal-field-row {
   display: flex;
-  gap: 0.75rem;
+  gap: 0.5rem;
   align-items: flex-start;
   width: 100%;
 }
@@ -918,14 +918,14 @@ table.spreadsheet tr.batch-selected {
 }
 
 .modal-field-row label {
-  margin-bottom: 0.2rem !important;
-  font-size: 0.75rem !important;
+  margin-bottom: 0.15rem !important;
+  font-size: 0.7rem !important;
 }
 
 .modal-field-row input, .modal-field-row select {
-  height: 32px !important;
-  padding: 0.25rem 0.5rem !important;
-  font-size: 0.8rem !important;
+  height: 28px !important;
+  padding: 0.2rem 0.4rem !important;
+  font-size: 0.75rem !important;
 }
 
 /* Boutons auto-fill par champ et bannière source */

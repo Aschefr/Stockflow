@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
@@ -13,6 +13,7 @@ interface AppConfig {
   pdf_rename_convention?: string;
   image_rename_convention?: string;
   pdf_size_threshold?: number;
+  price_tax_type?: string;
   vpc_api_keys?: Record<string, string>;
   vpc_urls?: Record<string, string>;
 }
@@ -43,11 +44,12 @@ interface ColumnConfig {
 }
 
 const DEFAULT_COLUMNS: ColumnConfig[] = [
-  { id: "image", label: "Image", width: 80, visible: true },
   { id: "sku", label: "SKU (Interne)", width: 140, visible: true },
   { id: "mpn", label: "Ref Fabricant", width: 140, visible: true },
   { id: "vpc_code", label: "Code VPC", width: 120, visible: true },
   { id: "brand", label: "Marque", width: 120, visible: true },
+  { id: "category", label: "Famille", width: 120, visible: true },
+  { id: "sub_category", label: "Sous-famille", width: 120, visible: true },
   { id: "label", label: "Désignation", width: 250, visible: true },
   { id: "location", label: "Emplacement", width: 110, visible: true },
   { id: "current_stock", label: "Stock Actuel", width: 100, visible: true },
@@ -124,6 +126,12 @@ interface DashboardStats {
 }
 
 function App() {
+  // Theme & Configuration States
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    const saved = localStorage.getItem("sf_theme");
+    return (saved === "light" || saved === "dark") ? saved : "dark";
+  });
+
   // Column definitions & settings
   const [columns, setColumns] = useState<ColumnConfig[]>(() => {
     const saved = localStorage.getItem("sf_inventory_columns");
@@ -143,6 +151,17 @@ function App() {
 
   const [appVersion, setAppVersion] = useState("1.3.0");
 
+
+
+  const [autofillType, setAutofillType] = useState<string>("mpn");
+  const [autofillCodeInput, setAutofillCodeInput] = useState<string>("");
+
+  function cleanNumericInput(value: string): string {
+    let cleaned = value.replace(/\./g, ",");
+    cleaned = cleaned.replace(/[^0-9,-]/g, "");
+    return cleaned;
+  }
+
   useEffect(() => {
     invoke<string>("get_app_version")
       .then((ver) => setAppVersion(ver))
@@ -152,6 +171,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem("sf_inventory_columns", JSON.stringify(columns));
   }, [columns]);
+
+  useEffect(() => {
+    localStorage.setItem("sf_theme", theme);
+  }, [theme]);
 
   const [showColumnSettings, setShowColumnSettings] = useState(false);
 
@@ -175,8 +198,6 @@ function App() {
     document.addEventListener("mouseup", handleMouseUp);
   };
 
-  // Theme & Configuration States
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [trigrammeInput, setTrigrammeInput] = useState("");
@@ -189,6 +210,16 @@ function App() {
   const [pdfRenameInput, setPdfRenameInput] = useState("");
   const [imageRenameInput, setImageRenameInput] = useState("");
   const [pdfSizeThresholdInput, setPdfSizeThresholdInput] = useState(5);
+  const [priceTaxTypeInput, setPriceTaxTypeInput] = useState<string>("HT");
+
+  // Backup configuration states
+  const [backupEnabled, setBackupEnabled] = useState<boolean>(false);
+  const [backupScope, setBackupScope] = useState<string>("all");
+  const [backupMaxBackups, setBackupMaxBackups] = useState<number>(5);
+  const [backupDelay, setBackupDelay] = useState<number>(30);
+  const [backupStatus, setBackupStatus] = useState<string>("");
+  const [isBackupRunning, setIsBackupRunning] = useState<boolean>(false);
+
   const [editingPdfPath, setEditingPdfPath] = useState<string | null>(null);
   const [newPdfName, setNewPdfName] = useState("");
   const [configError, setConfigError] = useState("");
@@ -200,9 +231,11 @@ function App() {
   }
 
   // Navigation & View States
-  const [activeTab, setActiveTab] = useState<"dashboard" | "inventory" | "add_product" | "migration" | "settings">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "inventory" | "add_product" | "migration" | "settings" | "backup">("dashboard");
   const [products, setProducts] = useState<Product[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const selectedProductRef = useRef<Product | null>(null);
+  selectedProductRef.current = selectedProduct;
   const [productHistory, setProductHistory] = useState<ProductHistoryItem[]>([]);
   const [productAuditLog, setProductAuditLog] = useState<AuditLogItem[]>([]);
 
@@ -235,14 +268,15 @@ function App() {
     category: "",
     sub_category: "",
     location: "",
-    min_stock: 0,
-    price: 0,
-    pack_size: 1,
+    min_stock: "0",
+    price: "0",
+    pack_size: "1",
     attributes: "{}",
     largeur: "",
     hauteur: "",
     profondeur: "",
-    poids: ""
+    poids: "",
+    initial_stock: "0"
   });
   const [duplicateWarning, setDuplicateWarning] = useState("");
   const [createSuccess, setCreateSuccess] = useState("");
@@ -258,13 +292,13 @@ function App() {
     category: "",
     sub_category: "",
     location: "",
-    min_stock: 0,
-    price: 0,
+    min_stock: "0",
+    price: "0",
     item_type: "QUANTITATIVE",
     image_path: null as string | null,
     pdf_path: null as string | null,
     attributes: "{}",
-    pack_size: 1,
+    pack_size: "1",
     largeur: "",
     hauteur: "",
     profondeur: "",
@@ -280,14 +314,19 @@ function App() {
   // States for transient scraping status
   const [autoFillLoading, setAutoFillLoading] = useState<Record<string, boolean>>({});
   const [autoFillSource, setAutoFillSource] = useState<string | null>(null);
+  const [autoFillFallbackInfo, setAutoFillFallbackInfo] = useState<string | null>(null);
 
   // Helper function to scrape and auto-fill either a specific field or all fields
   async function handleAutoFill(isEdit: boolean, targetField?: string) {
     const vpcSite = isEdit ? editVpcSite : newVpcSite;
     const vpcCode = isEdit ? editVpcCode : newVpcCode;
+    const mpn = isEdit ? editProduct.mpn : newProduct.mpn;
     const sku = isEdit ? editProduct.sku : newProduct.sku;
+    const brand = isEdit ? editProduct.brand : newProduct.brand;
+    const label = isEdit ? editProduct.label : newProduct.label;
 
-    const codeToUse = vpcCode.trim() || sku.trim();
+    const isGeneral = !vpcSite || vpcSite === "mpn";
+    const codeToUse = vpcCode.trim() || (isGeneral ? (mpn || sku) : sku).trim();
     if (!codeToUse) {
       const errorMsg = "Veuillez renseigner un SKU ou un Code VPC pour le remplissage.";
       if (isEdit) setEditError(errorMsg); else setCreateError(errorMsg);
@@ -307,14 +346,17 @@ function App() {
 
     try {
       const details: any = await invoke("scrape_product_details", {
-        vpcSite: vpcSite || "RS",
+        vpcSite: vpcSite || "mpn",
         vpcCode: vpcCode,
-        sku: sku
+        sku: codeToUse,
+        brand: brand || null,
+        label: label || null
       });
 
       if (details.source_url) {
         setAutoFillSource(details.source_url);
       }
+      setAutoFillFallbackInfo(details.fallback_info || null);
 
       const parsedAttrs = (isEdit ? editProduct.largeur || editProduct.hauteur || editProduct.profondeur || editProduct.poids : false) 
         ? {
@@ -330,6 +372,37 @@ function App() {
             poids: details.weight || undefined
           };
 
+      const FIELD_NAMES_FR: Record<string, string> = {
+        label: "désignation",
+        brand: "marque",
+        price: "prix",
+        pack_size: "taille du lot",
+        mpn: "référence fabricant",
+        largeur: "largeur",
+        hauteur: "hauteur",
+        profondeur: "profondeur",
+        poids: "poids"
+      };
+
+      let wasFound = true;
+      if (targetField) {
+        if (targetField === "label") wasFound = !!details.label;
+        else if (targetField === "brand") wasFound = !!details.brand && details.brand !== "Inconnue";
+        else if (targetField === "price") wasFound = details.price > 0;
+        else if (targetField === "pack_size") wasFound = details.pack_size > 0;
+        else if (targetField === "mpn") wasFound = !!details.mpn;
+        else if (targetField === "largeur") wasFound = !!parsedAttrs.largeur;
+        else if (targetField === "hauteur") wasFound = !!parsedAttrs.hauteur;
+        else if (targetField === "profondeur") wasFound = !!parsedAttrs.profondeur;
+        else if (targetField === "poids") wasFound = !!parsedAttrs.poids;
+      }
+
+      if (!wasFound && targetField) {
+        const errMsg = `Propriété '${FIELD_NAMES_FR[targetField] || targetField}' n'a pas pu être trouvée.`;
+        if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
+        return;
+      }
+
       if (isEdit) {
         setEditProduct(prev => {
           const next = { ...prev };
@@ -344,7 +417,7 @@ function App() {
           if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids || prev.poids;
           return next;
         });
-        setEditSuccess(targetField ? `Champ '${targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
+        setEditSuccess(targetField ? `Champ '${FIELD_NAMES_FR[targetField] || targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
       } else {
         setNewProduct(prev => {
           const next = { ...prev };
@@ -359,7 +432,7 @@ function App() {
           if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids || prev.poids;
           return next;
         });
-        setCreateSuccess(targetField ? `Champ '${targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
+        setCreateSuccess(targetField ? `Champ '${FIELD_NAMES_FR[targetField] || targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
       }
     } catch (err: any) {
       const errMsg = `Échec de l'auto-remplissage : ${err.toString()}`;
@@ -369,8 +442,96 @@ function App() {
     }
   }
 
+  async function triggerAutoFillAction(isEdit: boolean) {
+    if (!autofillCodeInput.trim()) {
+      const errorMsg = "Veuillez saisir un code ou une référence pour l'auto-remplissage.";
+      if (isEdit) setEditError(errorMsg); else setCreateError(errorMsg);
+      return;
+    }
+    
+    if (isEdit) {
+      setEditError("");
+      setEditSuccess("");
+    } else {
+      setCreateError("");
+      setCreateSuccess("");
+    }
+    
+    setAutoFillLoading(prev => ({ ...prev, ["ALL"]: true }));
+    
+    try {
+      const vpcSite = autofillType;
+      const vpcCode = autofillType === "mpn" ? "" : autofillCodeInput;
+      const sku = autofillType === "mpn" ? autofillCodeInput : "";
+      const brand = isEdit ? editProduct.brand : newProduct.brand;
+      const label = isEdit ? editProduct.label : newProduct.label;
+      
+      const details: any = await invoke("scrape_product_details", {
+        vpcSite: vpcSite,
+        vpcCode: vpcCode,
+        sku: sku,
+        brand: brand || null,
+        label: label || null
+      });
+
+      if (details.source_url) {
+        setAutoFillSource(details.source_url);
+      }
+      setAutoFillFallbackInfo(details.fallback_info || null);
+
+      const formatNum = (v: any) => {
+        if (v === null || v === undefined) return "";
+        return v.toString().replace(/\./g, ",");
+      };
+
+      if (isEdit) {
+        setEditProduct(prev => ({
+          ...prev,
+          mpn: details.mpn || prev.mpn || autofillCodeInput,
+          label: details.label || prev.label,
+          brand: details.brand || prev.brand,
+          price: details.price > 0 ? formatNum(details.price) : prev.price,
+          pack_size: details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size,
+          largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : prev.largeur,
+          hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : prev.hauteur,
+          profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : prev.profondeur,
+          poids: details.weight ? formatNum(details.weight) : prev.poids,
+        }));
+        if (autofillType !== "mpn") {
+          setEditVpcSite(autofillType);
+          setEditVpcCode(autofillCodeInput);
+        }
+        setEditSuccess("Champs pré-remplis avec succès !");
+      } else {
+        setNewProduct(prev => ({
+          ...prev,
+          sku: prev.sku || details.sku || autofillCodeInput,
+          mpn: details.mpn || prev.mpn || autofillCodeInput,
+          label: details.label || prev.label,
+          brand: details.brand || prev.brand,
+          price: details.price > 0 ? formatNum(details.price) : prev.price,
+          pack_size: details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size,
+          largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : prev.largeur,
+          hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : prev.hauteur,
+          profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : prev.profondeur,
+          poids: details.weight ? formatNum(details.weight) : prev.poids,
+        }));
+        if (autofillType !== "mpn") {
+          setNewVpcSite(autofillType);
+          setNewVpcCode(autofillCodeInput);
+        }
+        setCreateSuccess("Champs pré-remplis avec succès !");
+      }
+    } catch (err: any) {
+      const errMsg = `Échec de l'auto-remplissage : ${err.toString()}`;
+      if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
+    } finally {
+      setAutoFillLoading(prev => ({ ...prev, ["ALL"]: false }));
+    }
+  }
+
   // Inventory movement dialog/state inside detail panel
-  const [movementQty, setMovementQty] = useState(1);
+  const [movementQty, setMovementQty] = useState("1");
   const [movementNote, setMovementNote] = useState("");
   const [movementError, setMovementError] = useState("");
   const [movementSuccess, setMovementSuccess] = useState("");
@@ -438,6 +599,7 @@ function App() {
   }
 
   const [confirmModal, setConfirmModal] = useState<ConfirmModalConfig | null>(null);
+  const [inlineConfirm, setInlineConfirm] = useState<{ id: string, action: () => void } | null>(null);
   const [alertModal, setAlertModal] = useState<AlertModalConfig | null>(null);
 
   function getRenamePreview(convention: string, isPdf: boolean): string {
@@ -466,12 +628,41 @@ function App() {
     if (!config) throw new Error("Configuration manquante");
     const prod = products.find(p => p.sku === sku);
     if (!prod) throw new Error(`Produit introuvable : ${sku}`);
-    const price: number = await invoke("scrape_price", {
-      sku: prod.sku,
-      provider: "rs",
-      networkPath: config.network_path,
-      trigramme: config.trigramme
+
+    // Extrait les infos VPC du produit (même logique que la loupe de prix du modal)
+    let vpcSite = "mpn";
+    let vpcCode = "";
+    let mpnOrSku = prod.mpn || prod.sku;
+    try {
+      const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+      if (attrs && attrs.vpc) {
+        const keys = Object.keys(attrs.vpc);
+        if (keys.length > 0) {
+          vpcSite = keys[0];
+          vpcCode = attrs.vpc[keys[0]]?.toString() || "";
+        }
+      }
+    } catch (e) {}
+
+    // Utilise le même moteur que la loupe de prix du modal (scrape_product_details)
+    const details: any = await invoke("scrape_product_details", {
+      vpcSite: vpcSite,
+      vpcCode: vpcCode,
+      sku: vpcCode || mpnOrSku,
+      brand: prod.brand || null,
+      label: prod.label || null
     });
+
+    const price: number = details.price;
+    if (!price || price <= 0) {
+      throw new Error("Prix introuvable via scrape_product_details");
+    }
+
+    // Sauvegarde le prix mis à jour
+    const currentAttrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+    if (details.source_url) {
+      currentAttrs.scrape_price_url = details.source_url;
+    }
     await invoke("create_product", {
       networkPath: config.network_path,
       trigramme: config.trigramme,
@@ -487,7 +678,7 @@ function App() {
       price: price,
       imagePath: prod.image_path,
       pdfPath: prod.pdf_path,
-      attributes: typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes,
+      attributes: currentAttrs,
       packSize: prod.pack_size
     });
     return price;
@@ -497,42 +688,30 @@ function App() {
     if (!config) throw new Error("Configuration manquante");
     const prod = products.find(p => p.sku === sku);
     if (!prod) throw new Error(`Produit introuvable : ${sku}`);
-    let vpcCode = "";
-    try {
-      const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
-      if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
-        vpcCode = attrs.codeRS.trim();
-      } else if (attrs && attrs.vpc) {
-        const keys = Object.keys(attrs.vpc);
-        if (keys.length > 0) {
-          vpcCode = attrs.vpc[keys[0]].toString().trim();
-        }
-      }
-    } catch (e) {}
-    const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
-    const query = `${prod.brand || ""} ${prod.mpn || prod.sku} ${cleanVpc} datasheet pdf`.trim();
-    return await invoke<string>("scrape_pdf", { sku, query, networkPath: config.network_path });
+    // La query est conservée pour compatibilité mais la logique est construite côté Rust
+    const query = `${prod.brand || ""} ${prod.mpn || prod.sku} datasheet`.trim();
+    return await invoke<string>("scrape_pdf", {
+      sku,
+      query,
+      networkPath: config.network_path,
+      brand: prod.brand || null,
+      label: prod.label || null,
+    });
   }
 
   async function executeScrapeImageForSku(sku: string): Promise<string[]> {
     if (!config) throw new Error("Configuration manquante");
     const prod = products.find(p => p.sku === sku);
     if (!prod) throw new Error(`Produit introuvable : ${sku}`);
-    let vpcCode = "";
-    try {
-      const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
-      if (attrs && attrs.codeRS && attrs.codeRS.trim() !== "") {
-        vpcCode = attrs.codeRS.trim();
-      } else if (attrs && attrs.vpc) {
-        const keys = Object.keys(attrs.vpc);
-        if (keys.length > 0) {
-          vpcCode = attrs.vpc[keys[0]].toString().trim();
-        }
-      }
-    } catch (e) {}
-    const cleanVpc = vpcCode.toLowerCase().replace(/rs/g, "").replace(/farnell/g, "").replace(/mouser/g, "").replace(/\(/g, "").replace(/\)/g, "").replace(/:/g, "").trim();
-    const query = `${prod.brand || ""} ${prod.mpn || prod.sku} ${cleanVpc} image product`.trim();
-    return await invoke<string[]>("scrape_images", { sku, query, networkPath: config.network_path });
+    // La query est conservée pour compatibilité mais la logique est construite côté Rust
+    const query = `${prod.brand || ""} ${prod.mpn || prod.sku} photo`.trim();
+    return await invoke<string[]>("scrape_images", {
+      sku,
+      query,
+      networkPath: config.network_path,
+      brand: prod.brand || null,
+      label: prod.label || null,
+    });
   }
 
   async function runBatchScraping(mediaType: "images" | "pdf" | "price") {
@@ -700,7 +879,18 @@ function App() {
     };
     stepTimer = setTimeout(updateSimulatedSteps, 500);
 
+    const unlistens: (() => void)[] = [];
     try {
+      const unlistenProgress = await listen<any>("image-scrape-progress", (event) => {
+        const payload = event.payload;
+        setScrapeSteps(prev => {
+          const next = [...prev];
+          next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
+          return next;
+        });
+      });
+      unlistens.push(unlistenProgress);
+
       const urls = await executeScrapeImageForSku(selectedProduct.sku);
       clearTimeout(stepTimer);
       setScrapeSteps([
@@ -721,6 +911,7 @@ function App() {
       });
       setMovementError(errMsg);
     } finally {
+      unlistens.forEach(fn => fn());
       setIsScrapingMedia(false);
     }
   }
@@ -734,7 +925,7 @@ function App() {
   useEffect(() => {
     async function loadConfig() {
       try {
-        const loaded: AppConfig | null = await invoke("get_config");
+        const loaded: any = await invoke("get_config");
         if (loaded) {
           setConfig(loaded);
           setTrigrammeInput(loaded.trigramme);
@@ -746,6 +937,24 @@ function App() {
           setPdfRenameInput(loaded.pdf_rename_convention || "");
           setImageRenameInput(loaded.image_rename_convention || "");
           setPdfSizeThresholdInput(loaded.pdf_size_threshold ?? 5);
+          if (loaded.price_tax_type) {
+            setPriceTaxTypeInput(loaded.price_tax_type);
+          }
+          
+          if (loaded.network_path) {
+            try {
+              const bkConfig: any = await invoke("get_backup_config", { networkPath: loaded.network_path });
+              if (bkConfig) {
+                setBackupEnabled(bkConfig.enabled);
+                setBackupScope(bkConfig.scope);
+                setBackupMaxBackups(bkConfig.max_backups);
+                setBackupDelay(bkConfig.delay_minutes);
+              }
+            } catch (e) {
+              console.warn("Failed to load backup config", e);
+            }
+          }
+          
           // Initial sync and load
           syncAndFetch(loaded);
         }
@@ -792,8 +1001,9 @@ function App() {
       setStats(loadedStats);
 
       // Refresh currently selected product details
-      if (selectedProduct) {
-        const updated = loadedProducts.find(p => p.sku === selectedProduct.sku);
+      const currentSelected = selectedProductRef.current;
+      if (currentSelected) {
+        const updated = loadedProducts.find(p => p.sku === currentSelected.sku);
         if (updated) {
           setSelectedProduct(updated);
           // Mettre à jour les médias
@@ -801,6 +1011,15 @@ function App() {
           setProductImages(imgs);
           const pdfs: string[] = await invoke("list_sku_pdfs", { networkPath: appConfig.network_path, sku: updated.sku });
           setProductPdfs(pdfs);
+          // Rafraîchir historique et audit log en temps réel
+          try {
+            const history: ProductHistoryItem[] = await invoke("get_product_history", { sku: updated.sku });
+            setProductHistory(history);
+            const audit: AuditLogItem[] = await invoke("get_product_audit_log", { sku: updated.sku });
+            setProductAuditLog(audit);
+          } catch (e) {
+            console.error("Failed to refresh history/audit", e);
+          }
         }
       }
     } catch (err) {
@@ -815,7 +1034,8 @@ function App() {
     sites: string[],
     pdfConv: string,
     imgConv: string,
-    pdfThreshold: number
+    pdfThreshold: number,
+    taxType: string
   ) {
     await invoke("save_config", {
       trigramme: tri,
@@ -825,6 +1045,7 @@ function App() {
       pdfRenameConvention: pdfConv || null,
       imageRenameConvention: imgConv || null,
       pdfSizeThreshold: pdfThreshold,
+      priceTaxType: taxType || "HT",
       vpcApiKeys: vpcKeysInput,
       vpcUrls: vpcUrlsInput,
     });
@@ -837,6 +1058,7 @@ function App() {
       pdf_rename_convention: pdfConv || undefined,
       image_rename_convention: imgConv || undefined,
       pdf_size_threshold: pdfThreshold,
+      price_tax_type: taxType || "HT",
       vpc_api_keys: vpcKeysInput,
       vpc_urls: vpcUrlsInput,
     };
@@ -853,6 +1075,7 @@ function App() {
       const pdfConv = updatedFields?.hasOwnProperty("pdf_rename_convention") ? updatedFields.pdf_rename_convention! : pdfRenameInput;
       const imgConv = updatedFields?.hasOwnProperty("image_rename_convention") ? updatedFields.image_rename_convention! : imageRenameInput;
       const pdfThreshold = updatedFields?.hasOwnProperty("pdf_size_threshold") ? updatedFields.pdf_size_threshold! : pdfSizeThresholdInput;
+      const taxType = updatedFields?.hasOwnProperty("price_tax_type") ? updatedFields.price_tax_type! : priceTaxTypeInput;
       const apiKeys = updatedFields?.hasOwnProperty("vpc_api_keys") ? updatedFields.vpc_api_keys! : vpcKeysInput;
       const urls = updatedFields?.hasOwnProperty("vpc_urls") ? updatedFields.vpc_urls! : vpcUrlsInput;
 
@@ -868,6 +1091,7 @@ function App() {
         pdfRenameConvention: pdfConv || null,
         imageRenameConvention: imgConv || null,
         pdfSizeThreshold: pdfThreshold,
+        priceTaxType: taxType || "HT",
         vpcApiKeys: apiKeys,
         vpcUrls: urls,
       });
@@ -880,6 +1104,7 @@ function App() {
         pdf_rename_convention: pdfConv || undefined,
         image_rename_convention: imgConv || undefined,
         pdf_size_threshold: pdfThreshold,
+        price_tax_type: taxType || "HT",
         vpc_api_keys: apiKeys,
         vpc_urls: urls,
       };
@@ -922,7 +1147,8 @@ function App() {
         vpcSitesInput,
         pdfRenameInput,
         imageRenameInput,
-        pdfSizeThresholdInput
+        pdfSizeThresholdInput,
+        priceTaxTypeInput
       );
       setIsEditingConfig(false);
     } catch (err: any) {
@@ -1057,6 +1283,7 @@ function App() {
     if (newProduct.hauteur) attributesObj.hauteur = newProduct.hauteur;
     if (newProduct.profondeur) attributesObj.profondeur = newProduct.profondeur;
     if (newProduct.poids) attributesObj.poids = newProduct.poids;
+    if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
 
     try {
       await invoke("create_product", {
@@ -1070,18 +1297,35 @@ function App() {
         subCategory: newProduct.sub_category,
         location: newProduct.location,
         itemType: "QUANTITATIVE",
-        minStock: Number(newProduct.min_stock) || 0,
-        price: Number(newProduct.price) || 0,
+        minStock: Number(newProduct.min_stock.toString().replace(",", ".")) || 0,
+        price: Number(newProduct.price.toString().replace(",", ".")) || 0,
         imagePath: null,
         pdfPath: null,
         attributes: attributesObj,
-        packSize: Number(newProduct.pack_size) || 1
+        packSize: Number(newProduct.pack_size.toString().replace(",", ".")) || 1
       });
 
+      // Si un stock initial est renseigné, créer un mouvement STOCK_IN
+      const initialQty = Number(newProduct.initial_stock?.toString().replace(",", ".")) || 0;
+      if (initialQty > 0) {
+        try {
+          await invoke("add_movement", {
+            networkPath: config.network_path,
+            trigramme: config.trigramme,
+            eventType: "STOCK_IN",
+            sku: newProduct.sku,
+            qty: initialQty,
+            note: "Stock initial à la création",
+          });
+        } catch (e) {
+          console.warn("Stock initial non enregistré :", e);
+        }
+      }
       setCreateSuccess("Produit créé avec succès ! Événement généré.");
       setNewVpcSite("");
       setNewVpcCode("");
       setAutoFillSource(null);
+      setAutoFillFallbackInfo(null);
       setNewProduct({
         sku: "",
         mpn: "",
@@ -1090,14 +1334,15 @@ function App() {
         category: "",
         sub_category: "",
         location: "",
-        min_stock: 0,
-        price: 0,
-        pack_size: 1,
+        min_stock: "0",
+        price: "0",
+        pack_size: "1",
         attributes: "{}",
         largeur: "",
         hauteur: "",
         profondeur: "",
-        poids: ""
+        poids: "",
+        initial_stock: "0"
       });
       setShowAddModal(false);
       syncAndFetch(config);
@@ -1129,6 +1374,7 @@ function App() {
     if (editProduct.hauteur) attributesObj.hauteur = editProduct.hauteur; else delete attributesObj.hauteur;
     if (editProduct.profondeur) attributesObj.profondeur = editProduct.profondeur; else delete attributesObj.profondeur;
     if (editProduct.poids) attributesObj.poids = editProduct.poids; else delete attributesObj.poids;
+    if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
 
     try {
       await invoke("create_product", {
@@ -1142,16 +1388,17 @@ function App() {
         subCategory: editProduct.sub_category,
         location: editProduct.location,
         itemType: editProduct.item_type,
-        minStock: Number(editProduct.min_stock) || 0,
-        price: Number(editProduct.price) || 0,
+        minStock: Number(editProduct.min_stock.toString().replace(",", ".")) || 0,
+        price: Number(editProduct.price.toString().replace(",", ".")) || 0,
         imagePath: editProduct.image_path,
         pdfPath: editProduct.pdf_path,
         attributes: attributesObj,
-        packSize: Number(editProduct.pack_size) || 1
+        packSize: Number(editProduct.pack_size.toString().replace(",", ".")) || 1
       });
 
       setEditSuccess("Produit mis à jour avec succès !");
       setAutoFillSource(null);
+      setAutoFillFallbackInfo(null);
       setShowEditModal(false);
 
       // Update selected product view in real time
@@ -1163,9 +1410,9 @@ function App() {
         category: editProduct.category,
         sub_category: editProduct.sub_category,
         location: editProduct.location,
-        min_stock: Number(editProduct.min_stock) || 0,
-        price: Number(editProduct.price) || 0,
-        pack_size: Number(editProduct.pack_size) || 1,
+        min_stock: Number(editProduct.min_stock.toString().replace(",", ".")) || 0,
+        price: Number(editProduct.price.toString().replace(",", ".")) || 0,
+        pack_size: Number(editProduct.pack_size.toString().replace(",", ".")) || 1,
         attributes: JSON.stringify(attributesObj)
       };
       setSelectedProduct(updated);
@@ -1179,24 +1426,75 @@ function App() {
   // Inline Cell Editing
   function handleCellDoubleClick(sku: string, field: string, value: any) {
     setEditingCell({ sku, field });
-    setEditValue(value.toString());
+    let valStr = value !== null && value !== undefined ? value.toString() : "";
+    if (field === "price" || field === "min_stock" || field === "largeur" || field === "hauteur" || field === "profondeur" || field === "poids" || field === "current_stock") {
+      valStr = valStr.replace(/\./g, ",");
+    }
+    setEditValue(valStr);
   }
 
   async function handleCellSave(product: Product) {
     if (!config || !editingCell) return;
     
-    // Construct the modification based on the field edited
     const updatedProd = { ...product };
-    if (editingCell.field === "location") updatedProd.location = editValue;
-    if (editingCell.field === "price") updatedProd.price = Number(editValue) || 0;
-    if (editingCell.field === "label") updatedProd.label = editValue;
+    let attributesObj = {};
+    try {
+      attributesObj = typeof updatedProd.attributes === "string" ? JSON.parse(updatedProd.attributes || "{}") : updatedProd.attributes;
+    } catch (e) {}
+
+    const cleanVal = editValue.trim();
+
+    if (editingCell.field === "location") {
+      updatedProd.location = cleanVal;
+    } else if (editingCell.field === "price") {
+      updatedProd.price = Number(cleanVal.replace(",", ".")) || 0;
+    } else if (editingCell.field === "label") {
+      updatedProd.label = cleanVal;
+    } else if (editingCell.field === "mpn") {
+      updatedProd.mpn = cleanVal;
+    } else if (editingCell.field === "brand") {
+      updatedProd.brand = cleanVal;
+    } else if (editingCell.field === "category") {
+      updatedProd.category = cleanVal;
+    } else if (editingCell.field === "sub_category") {
+      updatedProd.sub_category = cleanVal;
+    } else if (editingCell.field === "min_stock") {
+      updatedProd.min_stock = Number(cleanVal.replace(",", ".")) || 0;
+    } else if (editingCell.field === "largeur" || editingCell.field === "hauteur" || editingCell.field === "profondeur" || editingCell.field === "poids") {
+      (attributesObj as any)[editingCell.field] = cleanVal;
+      updatedProd.attributes = JSON.stringify(attributesObj);
+    } else if (editingCell.field === "current_stock") {
+      // Saisie directe du stock : calcule la différence et crée un mouvement
+      const targetQty = Number(cleanVal.replace(",", ".")) || 0;
+      const currentQty = product.current_stock || 0;
+      const diff = targetQty - currentQty;
+      if (diff !== 0 && config) {
+        try {
+          await invoke("add_movement", {
+            networkPath: config.network_path,
+            trigramme: config.trigramme,
+            eventType: diff > 0 ? "STOCK_IN" : "STOCK_OUT",
+            sku: product.sku,
+            qty: Math.abs(diff),
+            note: diff > 0 ? "Ajustement stock (entrée)" : "Ajustement stock (sortie)",
+          });
+          setEditingCell(null);
+          syncAndFetch(config);
+        } catch (err) {
+          console.error("Erreur mouvement stock :", err);
+        }
+      } else {
+        setEditingCell(null);
+      }
+      return; // Court-circuit : pas de invoke create_product pour le stock
+    }
 
     try {
       await invoke("create_product", {
         networkPath: config.network_path,
         trigramme: config.trigramme,
         sku: updatedProd.sku,
-        mpn: updatedProd.mpn,
+        mpn: updatedProd.mpn || updatedProd.sku,
         label: updatedProd.label,
         brand: updatedProd.brand,
         category: updatedProd.category,
@@ -1207,7 +1505,7 @@ function App() {
         price: updatedProd.price,
         imagePath: updatedProd.image_path,
         pdfPath: updatedProd.pdf_path,
-        attributes: JSON.parse(updatedProd.attributes || "{}"),
+        attributes: attributesObj,
         packSize: updatedProd.pack_size
       });
       setEditingCell(null);
@@ -1229,12 +1527,12 @@ function App() {
         trigramme: config.trigramme,
         eventType: type,
         sku: selectedProduct.sku,
-        qty: Number(movementQty),
+        qty: Number(movementQty.toString().replace(",", ".")),
         note: movementNote || (type === "STOCK_IN" ? "Entrée manuelle" : "Sortie manuelle"),
       });
 
       setMovementSuccess("Mouvement enregistré !");
-      setMovementQty(1);
+      setMovementQty("1");
       setMovementNote("");
       syncAndFetch(config);
       await refreshSelectedProduct(selectedProduct.sku);
@@ -1599,6 +1897,12 @@ function App() {
             ⚙️ Importation Excel/CSV
           </div>
           <div 
+            className={`nav-item ${activeTab === "backup" ? "active" : ""}`}
+            onClick={() => setActiveTab("backup")}
+          >
+            💾 Sauvegardes
+          </div>
+          <div 
             className={`nav-item ${activeTab === "settings" ? "active" : ""}`}
             onClick={() => setActiveTab("settings")}
           >
@@ -1755,6 +2059,8 @@ function App() {
                     setCreateSuccess("");
                     setCreateError("");
                     setDuplicateWarning("");
+                    setAutoFillSource(null);
+                    setAutoFillFallbackInfo(null);
                     setNewProduct({
                       sku: "",
                       mpn: "",
@@ -1763,15 +2069,18 @@ function App() {
                       category: "",
                       sub_category: "",
                       location: "",
-                      min_stock: 0,
-                      price: 0,
-                      pack_size: 1,
+                      min_stock: "0",
+                      price: "0",
+                      pack_size: "1",
                       attributes: "{}",
                       largeur: "",
                       hauteur: "",
                       profondeur: "",
-                      poids: ""
+                      poids: "",
+                      initial_stock: "0"
                     });
+                    setAutofillCodeInput("");
+                    setAutofillType("mpn");
                     setShowAddModal(true);
                   }}
                 >
@@ -1849,26 +2158,29 @@ function App() {
                           }}
                         />
                       </th>
-                      {columns.map(col => col.visible && (
-                        <th
-                          key={col.id}
-                          style={{
-                            width: col.width,
-                            minWidth: col.width,
-                            maxWidth: col.width,
-                            position: "relative",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap"
-                          }}
-                        >
-                          {col.label}
-                          <div
-                            className="column-resize-handle"
-                            onMouseDown={(e) => handleMouseDown(e, col.id)}
-                          />
-                        </th>
-                      ))}
+                      {columns.map(col => {
+                        if (!col.visible) return null;
+                        return (
+                          <th
+                            key={col.id}
+                            style={{
+                              width: col.width,
+                              minWidth: col.width,
+                              maxWidth: col.width,
+                              position: "relative",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap"
+                            }}
+                          >
+                            {col.label}
+                            <div
+                              className="column-resize-handle"
+                              onMouseDown={(e) => handleMouseDown(e, col.id)}
+                            />
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
@@ -1892,6 +2204,8 @@ function App() {
                             key={prod.sku}
                             className={`${selectedProduct?.sku === prod.sku ? "selected" : ""} ${selectedSkus.includes(prod.sku) ? "batch-selected" : ""}`}
                             onClick={() => handleSelectProduct(prod)}
+                            onMouseMove={(e) => handleImageHover(e, prod.image_path)}
+                            onMouseLeave={() => setHoveredImage(null)}
                           >
                             <td 
                               style={{ width: "40px", minWidth: "40px", maxWidth: "40px", textAlign: "center" }}
@@ -1909,263 +2223,109 @@ function App() {
                                 }}
                               />
                             </td>
-                            {columns.find(c => c.id === "image")?.visible && (
-                              <td 
-                                style={{ 
-                                  textAlign: "center",
-                                  width: columns.find(c => c.id === "image")?.width,
-                                  minWidth: columns.find(c => c.id === "image")?.width,
-                                  maxWidth: columns.find(c => c.id === "image")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                                onMouseMove={(e) => handleImageHover(e, prod.image_path)}
-                                onMouseLeave={() => setHoveredImage(null)}
-                              >
-                                {prod.image_path ? "🖼️ Preview" : "N/A"}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "sku")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "sku")?.width,
-                                  minWidth: columns.find(c => c.id === "sku")?.width,
-                                  maxWidth: columns.find(c => c.id === "sku")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                <strong>{prod.sku}</strong>
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "mpn")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "mpn")?.width,
-                                  minWidth: columns.find(c => c.id === "mpn")?.width,
-                                  maxWidth: columns.find(c => c.id === "mpn")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {prod.mpn}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "vpc_code")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "vpc_code")?.width,
-                                  minWidth: columns.find(c => c.id === "vpc_code")?.width,
-                                  maxWidth: columns.find(c => c.id === "vpc_code")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {getVpcCode(prod)}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "brand")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "brand")?.width,
-                                  minWidth: columns.find(c => c.id === "brand")?.width,
-                                  maxWidth: columns.find(c => c.id === "brand")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {prod.brand}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "label")?.visible && (
-                              <td 
-                                onDoubleClick={() => handleCellDoubleClick(prod.sku, "label", prod.label)}
-                                style={{ 
-                                  cursor: "edit",
-                                  width: columns.find(c => c.id === "label")?.width,
-                                  minWidth: columns.find(c => c.id === "label")?.width,
-                                  maxWidth: columns.find(c => c.id === "label")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {editingCell?.sku === prod.sku && editingCell.field === "label" ? (
-                                  <input
-                                    type="text"
-                                    autoFocus
-                                    value={editValue}
-                                    onChange={(e) => setEditValue(e.target.value)}
-                                    onBlur={() => handleCellSave(prod)}
-                                    onKeyDown={(e) => e.key === "Enter" && handleCellSave(prod)}
-                                  />
-                                ) : (
-                                  prod.label
-                                )}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "location")?.visible && (
-                              <td 
-                                onDoubleClick={() => handleCellDoubleClick(prod.sku, "location", prod.location)}
-                                style={{ 
-                                  cursor: "edit",
-                                  width: columns.find(c => c.id === "location")?.width,
-                                  minWidth: columns.find(c => c.id === "location")?.width,
-                                  maxWidth: columns.find(c => c.id === "location")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {editingCell?.sku === prod.sku && editingCell.field === "location" ? (
-                                  <input
-                                    type="text"
-                                    autoFocus
-                                    value={editValue}
-                                    onChange={(e) => setEditValue(e.target.value)}
-                                    onBlur={() => handleCellSave(prod)}
-                                    onKeyDown={(e) => e.key === "Enter" && handleCellSave(prod)}
-                                  />
-                                ) : (
-                                  prod.location || "-"
-                                )}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "largeur")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "largeur")?.width,
-                                  minWidth: columns.find(c => c.id === "largeur")?.width,
-                                  maxWidth: columns.find(c => c.id === "largeur")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {getAttribute(prod, "largeur") || "-"}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "hauteur")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "hauteur")?.width,
-                                  minWidth: columns.find(c => c.id === "hauteur")?.width,
-                                  maxWidth: columns.find(c => c.id === "hauteur")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {getAttribute(prod, "hauteur") || "-"}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "profondeur")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "profondeur")?.width,
-                                  minWidth: columns.find(c => c.id === "profondeur")?.width,
-                                  maxWidth: columns.find(c => c.id === "profondeur")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {getAttribute(prod, "profondeur") || "-"}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "poids")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "poids")?.width,
-                                  minWidth: columns.find(c => c.id === "poids")?.width,
-                                  maxWidth: columns.find(c => c.id === "poids")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {getAttribute(prod, "poids") || "-"}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "current_stock")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "current_stock")?.width,
-                                  minWidth: columns.find(c => c.id === "current_stock")?.width,
-                                  maxWidth: columns.find(c => c.id === "current_stock")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                <span className={`stock-status-badge ${stockClass}`}>
-                                  {prod.current_stock}
-                                </span>
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "min_stock")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "min_stock")?.width,
-                                  minWidth: columns.find(c => c.id === "min_stock")?.width,
-                                  maxWidth: columns.find(c => c.id === "min_stock")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {prod.min_stock}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "price")?.visible && (
-                              <td 
-                                onDoubleClick={() => handleCellDoubleClick(prod.sku, "price", prod.price)}
-                                style={{ 
-                                  cursor: "edit",
-                                  width: columns.find(c => c.id === "price")?.width,
-                                  minWidth: columns.find(c => c.id === "price")?.width,
-                                  maxWidth: columns.find(c => c.id === "price")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {editingCell?.sku === prod.sku && editingCell.field === "price" ? (
-                                  <input
-                                    type="number"
-                                    autoFocus
-                                    step="0.01"
-                                    value={editValue}
-                                    onChange={(e) => setEditValue(e.target.value)}
-                                    onBlur={() => handleCellSave(prod)}
-                                    onKeyDown={(e) => e.key === "Enter" && handleCellSave(prod)}
-                                  />
-                                ) : (
-                                  prod.pack_size > 1 
-                                     ? `${prod.price.toFixed(2)} € (Lot ${prod.pack_size})` 
-                                     : `${prod.price.toFixed(2)} €`
-                                )}
-                              </td>
-                            )}
-                            {columns.find(c => c.id === "total_value")?.visible && (
-                              <td
-                                style={{ 
-                                  width: columns.find(c => c.id === "total_value")?.width,
-                                  minWidth: columns.find(c => c.id === "total_value")?.width,
-                                  maxWidth: columns.find(c => c.id === "total_value")?.width,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {(prod.price * prod.current_stock).toFixed(2)} €
-                              </td>
-                            )}
+                            {columns.map(col => {
+                              if (!col.visible) return null;
+                              
+                              let displayValue: any = "";
+                              let rawValue: any = "";
+                              let isEditable = false;
+                              
+                              if (col.id === "sku") {
+                                displayValue = <strong>{prod.sku}</strong>;
+                                rawValue = prod.sku;
+                              } else if (col.id === "mpn") {
+                                displayValue = prod.mpn;
+                                rawValue = prod.mpn;
+                                isEditable = true;
+                              } else if (col.id === "vpc_code") {
+                                displayValue = getVpcCode(prod);
+                                rawValue = displayValue;
+                              } else if (col.id === "brand") {
+                                displayValue = prod.brand;
+                                rawValue = prod.brand;
+                                isEditable = true;
+                              } else if (col.id === "category") {
+                                displayValue = prod.category;
+                                rawValue = prod.category;
+                                isEditable = true;
+                              } else if (col.id === "sub_category") {
+                                displayValue = prod.sub_category;
+                                rawValue = prod.sub_category;
+                                isEditable = true;
+                              } else if (col.id === "label") {
+                                displayValue = prod.label;
+                                rawValue = prod.label;
+                                isEditable = true;
+                              } else if (col.id === "location") {
+                                displayValue = prod.location || "-";
+                                rawValue = prod.location;
+                                isEditable = true;
+                              } else if (["largeur", "hauteur", "profondeur", "poids"].includes(col.id)) {
+                                const attrVal = getAttribute(prod, col.id);
+                                displayValue = attrVal || "-";
+                                rawValue = attrVal;
+                                isEditable = true;
+                              } else if (col.id === "current_stock") {
+                                displayValue = (
+                                  <span className={`stock-status-badge ${stockClass}`}>
+                                    {prod.current_stock}
+                                  </span>
+                                );
+                                rawValue = prod.current_stock;
+                                isEditable = true; // Double-clic → saisie directe → mouvement STOCK_IN/OUT
+                              } else if (col.id === "min_stock") {
+                                displayValue = prod.min_stock;
+                                rawValue = prod.min_stock;
+                                isEditable = true;
+                              } else if (col.id === "price") {
+                                displayValue = prod.pack_size > 1 
+                                  ? `${prod.price.toFixed(2).replace(".", ",")} € (Lot ${prod.pack_size})` 
+                                  : `${prod.price.toFixed(2).replace(".", ",")} €`;
+                                rawValue = prod.price;
+                                isEditable = true;
+                              } else if (col.id === "total_value") {
+                                displayValue = `${(prod.price * prod.current_stock).toFixed(2).replace(".", ",")} €`;
+                                rawValue = prod.price * prod.current_stock;
+                              }
+
+                              const isEditing = editingCell?.sku === prod.sku && editingCell.field === col.id;
+                              const isNumericField = ["price", "min_stock", "largeur", "hauteur", "profondeur", "poids"].includes(col.id);
+
+                              return (
+                                <td
+                                  key={col.id}
+                                  onDoubleClick={isEditable ? () => handleCellDoubleClick(prod.sku, col.id, rawValue) : undefined}
+                                  style={{
+                                    cursor: isEditable ? "edit" : "default",
+                                    width: col.width,
+                                    minWidth: col.width,
+                                    maxWidth: col.width,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap"
+                                  }}
+                                >
+                                  {isEditing ? (
+                                    <input
+                                      type="text"
+                                      autoFocus
+                                      value={editValue}
+                                      onChange={(e) => {
+                                        let val = e.target.value;
+                                        if (isNumericField) {
+                                          val = cleanNumericInput(val);
+                                        }
+                                        setEditValue(val);
+                                      }}
+                                      onBlur={() => handleCellSave(prod)}
+                                      onKeyDown={(e) => e.key === "Enter" && handleCellSave(prod)}
+                                    />
+                                  ) : (
+                                    displayValue
+                                  )}
+                                </td>
+                              );
+                            })}
                           </tr>
                         );
                       })
@@ -2394,7 +2554,7 @@ function App() {
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                     {vpcSitesInput.map((site, i) => (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: "0.5rem", background: "rgba(255, 255, 255, 0.03)", padding: "0.4rem 0.6rem", borderRadius: "4px", border: "1px solid rgba(255, 255, 255, 0.05)" }}>
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: "0.5rem", background: "var(--bg-secondary)", padding: "0.4rem 0.6rem", borderRadius: "4px", border: "1px solid var(--border-color)" }}>
                         <span style={{ fontWeight: "bold", minWidth: "80px", fontSize: "12px" }}>{site}</span>
                         <select
                           value={(() => {
@@ -2425,7 +2585,7 @@ function App() {
                               triggerAutoSave({ vpc_urls: updatedUrls });
                             }
                           }}
-                          style={{ width: "120px", padding: "0.2rem", fontSize: "11px", background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "3px", color: "#fff", height: "24px" }}
+                          style={{ width: "120px", padding: "0.2rem", fontSize: "11px", background: "var(--bg-tertiary)", border: "1px solid var(--border-color)", borderRadius: "3px", color: "var(--text-primary)", height: "24px" }}
                         >
                           <option value="">URL par défaut</option>
                           {site.toLowerCase().includes("rs") && (
@@ -2467,7 +2627,7 @@ function App() {
                               setVpcUrlsInput(updatedUrls);
                               triggerAutoSave({ vpc_urls: updatedUrls });
                             }}
-                            style={{ flex: 1, padding: "0.2rem 0.4rem", fontSize: "11px", background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "3px", color: "#fff", height: "24px" }}
+                            style={{ flex: 1, padding: "0.2rem 0.4rem", fontSize: "11px", background: "var(--bg-tertiary)", border: "1px solid var(--border-color)", borderRadius: "3px", color: "var(--text-primary)", height: "24px" }}
                           />
                           <button
                             type="button"
@@ -2629,7 +2789,7 @@ function App() {
                           value={vpcKeysInput[site] || ""}
                           onChange={(e) => setVpcKeysInput({ ...vpcKeysInput, [site]: e.target.value })}
                           onBlur={() => triggerAutoSave()}
-                          style={{ flex: 1, padding: "0.2rem 0.5rem", fontSize: "11px", background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "3px", color: "#fff", height: "24px" }}
+                          style={{ flex: 1, padding: "0.2rem 0.5rem", fontSize: "11px", background: "var(--bg-tertiary)", border: "1px solid var(--border-color)", borderRadius: "3px", color: "var(--text-primary)", height: "24px" }}
                         />
                         <button
                           type="button"
@@ -2768,11 +2928,186 @@ function App() {
                   <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>Seuil en pourcentage pour considérer deux PDF comme doublons (valeur par défaut : 5%).</span>
                 </div>
 
+                <div className="form-group">
+                  <label htmlFor="settings-tax-type">Type de taxe pour les prix scrapés</label>
+                  <select
+                    id="settings-tax-type"
+                    value={priceTaxTypeInput}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setPriceTaxTypeInput(val);
+                      triggerAutoSave({ price_tax_type: val });
+                    }}
+                  >
+                    <option value="HT">Hors Taxe (HT)</option>
+                    <option value="TTC">Toutes Taxes Comprises (TTC - 1.20 TVA)</option>
+                  </select>
+                  <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>Détermine si le prix récupéré sur internet doit être enregistré directement (HT) ou multiplié par 1.20 (TTC).</span>
+                </div>
+
                 <div style={{ fontSize: "12px", color: "var(--success)", display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "1rem", fontWeight: 500 }}>
                   <span>✔️ Les modifications sont enregistrées automatiquement.</span>
                 </div>
               </form>
             </div>
+            </div>
+          )}
+
+          {/* TAB 6: BACKUP */}
+          {activeTab === "backup" && (
+            <div style={{ padding: "2rem", overflowY: "auto", width: "100%", height: "100%" }}>
+              <div style={{ maxWidth: "600px", margin: "0 auto", width: "100%" }}>
+                <h2 style={{ fontFamily: "var(--font-title)", marginBottom: "1.5rem" }}>Sauvegarde Automatique Partagée</h2>
+                <p style={{ color: "var(--text-secondary)", marginBottom: "1.5rem" }}>
+                  Activez et configurez la sauvegarde automatique dans votre dossier réseau partagé. Les paramètres de sauvegarde configurés ici sont stockés de manière partagée et appliqués à l'ensemble des instances StockFlow connectées au même réseau.
+                </p>
+
+                {backupStatus && (
+                  <div className="wizard-error" style={{ color: backupStatus.includes("Erreur") || backupStatus.includes("échec") ? "var(--danger)" : "var(--success)", backgroundColor: backupStatus.includes("Erreur") || backupStatus.includes("échec") ? "var(--danger-light)" : "var(--success-light)", borderColor: backupStatus.includes("Erreur") || backupStatus.includes("échec") ? "rgba(220,38,38,0.2)" : "rgba(16,185,129,0.2)", marginBottom: "1.5rem" }}>
+                    {backupStatus}
+                  </div>
+                )}
+
+                <form onSubmit={(e) => e.preventDefault()} style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+                  <div className="form-group">
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={backupEnabled}
+                        onChange={async (e) => {
+                          const val = e.target.checked;
+                          setBackupEnabled(val);
+                          try {
+                            await invoke("save_backup_config", {
+                              networkPath: config.network_path,
+                              config: { enabled: val, scope: backupScope, max_backups: backupMaxBackups, delay_minutes: backupDelay }
+                            });
+                            showToast(val ? "Sauvegarde automatique activée" : "Sauvegarde automatique désactivée", "success");
+                          } catch (err: any) {
+                            showToast("Erreur modification sauvegarde : " + err.toString(), "error");
+                          }
+                        }}
+                        style={{ width: "18px", height: "18px" }}
+                      />
+                      <span style={{ fontSize: "14px", fontWeight: "600" }}>Activer la sauvegarde automatique globale</span>
+                    </label>
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="backup-scope">Périmètre de la sauvegarde</label>
+                    <select
+                      id="backup-scope"
+                      value={backupScope}
+                      disabled={!backupEnabled}
+                      onChange={async (e) => {
+                        const val = e.target.value;
+                        setBackupScope(val);
+                        try {
+                          await invoke("save_backup_config", {
+                            networkPath: config.network_path,
+                            config: { enabled: backupEnabled, scope: val, max_backups: backupMaxBackups, delay_minutes: backupDelay }
+                          });
+                          showToast("Périmètre de sauvegarde enregistré", "success");
+                        } catch (err: any) {
+                          showToast("Erreur modification sauvegarde : " + err.toString(), "error");
+                        }
+                      }}
+                    >
+                      <option value="all">Tout inclure (Événements, Images, Documents, Audits)</option>
+                      <option value="events">Événements et Audits uniquement (Base de données)</option>
+                    </select>
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="backup-retention">Nombre maximum de sauvegardes à conserver</label>
+                    <input
+                      id="backup-retention"
+                      type="number"
+                      min={1}
+                      max={20}
+                      disabled={!backupEnabled}
+                      value={backupMaxBackups}
+                      onChange={(e) => setBackupMaxBackups(Number(e.target.value) || 5)}
+                      onBlur={async () => {
+                        try {
+                          await invoke("save_backup_config", {
+                            networkPath: config.network_path,
+                            config: { enabled: backupEnabled, scope: backupScope, max_backups: backupMaxBackups, delay_minutes: backupDelay }
+                          });
+                          showToast("Rétention enregistrée", "success");
+                        } catch (err: any) {
+                          showToast("Erreur modification sauvegarde : " + err.toString(), "error");
+                        }
+                      }}
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="backup-delay">Délai d'activité minimum requis au démarrage (minutes)</label>
+                    <input
+                      id="backup-delay"
+                      type="number"
+                      min={0}
+                      max={120}
+                      disabled={!backupEnabled}
+                      value={backupDelay}
+                      onChange={(e) => setBackupDelay(Number(e.target.value) || 30)}
+                      onBlur={async () => {
+                        try {
+                          await invoke("save_backup_config", {
+                            networkPath: config.network_path,
+                            config: { enabled: backupEnabled, scope: backupScope, max_backups: backupMaxBackups, delay_minutes: backupDelay }
+                          });
+                          showToast("Délai d'activité enregistré", "success");
+                        } catch (err: any) {
+                          showToast("Erreur modification sauvegarde : " + err.toString(), "error");
+                        }
+                      }}
+                    />
+                    <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>Délai avant exécution automatique afin d'éviter la surcharge réseau à l'ouverture de l'application (Défaut : 30 minutes).</span>
+                  </div>
+
+                  <div style={{ display: "flex", gap: "1rem", marginTop: "1rem" }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ flex: 1, padding: "0.8rem" }}
+                      disabled={isBackupRunning}
+                      onClick={async () => {
+                        setIsBackupRunning(true);
+                        setBackupStatus("Exécution d'une sauvegarde manuelle immédiate...");
+                        try {
+                          const res: string = await invoke("trigger_manual_backup", { networkPath: config.network_path });
+                          setBackupStatus(res);
+                        } catch (err: any) {
+                          setBackupStatus("Erreur : " + err.toString());
+                        } finally {
+                          setIsBackupRunning(false);
+                        }
+                      }}
+                    >
+                      {isBackupRunning ? "Sauvegarde en cours..." : "💾 Lancer une sauvegarde manuelle immédiate"}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ padding: "0.8rem", color: "var(--danger)", borderColor: "rgba(220,38,38,0.2)" }}
+                      onClick={async () => {
+                        try {
+                          await invoke("force_release_lock", { networkPath: config.network_path });
+                          setBackupStatus("Verrou libéré de force avec succès.");
+                          showToast("Verrou libéré", "success");
+                        } catch (err: any) {
+                          showToast("Erreur : " + err.toString(), "error");
+                        }
+                      }}
+                    >
+                      🔓 Libérer le verrou de sauvegarde
+                    </button>
+                  </div>
+                </form>
+              </div>
             </div>
           )}
 
@@ -2801,37 +3136,44 @@ function App() {
                       alt={selectedProduct.label} 
                       style={{ width: "100%", height: "100%", objectFit: "contain" }}
                     />
-                    <button
-                      className="btn-delete-media"
-                      title="Supprimer cette image"
-                      style={{ position: "absolute", top: "10px", right: "10px", backgroundColor: "rgba(239, 68, 68, 0.8)", border: "none", color: "#fff", borderRadius: "4px", padding: "4px 8px", cursor: "pointer", fontSize: "11px", fontWeight: "bold", zIndex: 10 }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setConfirmModal({
-                          title: "Supprimer l'image",
-                          message: "Êtes-vous sûr de vouloir supprimer définitivement cette image ?",
-                          onConfirm: async () => {
-                            try {
-                              const imgPath = productImages[activeImageIndex];
-                              await invoke("delete_media", {
-                                networkPath: config.network_path,
-                                sku: selectedProduct.sku,
-                                mediaType: "image",
-                                filePath: imgPath
-                              });
-                              const updatedImgs: string[] = await invoke("list_sku_images", { networkPath: config.network_path, sku: selectedProduct.sku });
-                              setProductImages(updatedImgs);
-                              setActiveImageIndex(0);
-                              syncAndFetch(config);
-                            } catch (err: any) {
-                              setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+                    {inlineConfirm?.id === "image-delete" ? (
+                      <div className="inline-confirm" style={{ position: "absolute", top: "10px", right: "10px", backgroundColor: "rgba(239, 68, 68, 0.9)", padding: "4px 6px", borderRadius: "4px", zIndex: 10, display: "flex", gap: "6px", alignItems: "center" }}>
+                        <span style={{ color: "white", fontSize: "11px", fontWeight: "bold" }}>Supprimer ?</span>
+                        <button onClick={(e) => { e.stopPropagation(); inlineConfirm.action(); setInlineConfirm(null); }} style={{ background: "#fff", color: "var(--danger)", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "11px", fontWeight: "bold", padding: "2px 6px" }}>Oui</button>
+                        <button onClick={(e) => { e.stopPropagation(); setInlineConfirm(null); }} style={{ background: "rgba(0,0,0,0.3)", color: "white", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "11px", padding: "2px 6px" }}>Non</button>
+                      </div>
+                    ) : (
+                      <button
+                        className="btn-delete-media"
+                        title="Supprimer cette image"
+                        style={{ position: "absolute", top: "10px", right: "10px", backgroundColor: "rgba(239, 68, 68, 0.8)", border: "none", color: "#fff", borderRadius: "4px", padding: "4px 8px", cursor: "pointer", fontSize: "11px", fontWeight: "bold", zIndex: 10 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setInlineConfirm({
+                            id: "image-delete",
+                            action: async () => {
+                              try {
+                                const imgPath = productImages[activeImageIndex];
+                                await invoke("delete_media", {
+                                  networkPath: config.network_path,
+                                  sku: selectedProduct.sku,
+                                  mediaType: "image",
+                                  filePath: imgPath
+                                });
+                                const updatedImgs: string[] = await invoke("list_sku_images", { networkPath: config.network_path, sku: selectedProduct.sku });
+                                setProductImages(updatedImgs);
+                                setActiveImageIndex(0);
+                                syncAndFetch(config);
+                              } catch (err: any) {
+                                setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+                              }
                             }
-                          }
-                        });
-                      }}
-                    >
-                      🗑️
-                    </button>
+                          });
+                        }}
+                      >
+                        🗑️
+                      </button>
+                    )}
                     {productImages.length > 1 && (
                       <div className="carousel-controls" style={{ position: "absolute", bottom: "10px", left: 0, right: 0, display: "flex", justifyContent: "space-between", padding: "0 10px", alignItems: "center" }}>
                         <button 
@@ -3065,6 +3407,8 @@ function App() {
                     onClick={() => {
                       setEditSuccess("");
                       setEditError("");
+                      setAutoFillSource(null);
+                      setAutoFillFallbackInfo(null);
                       
                       let site = "";
                       let code = "";
@@ -3082,6 +3426,11 @@ function App() {
                       setEditVpcSite(site);
                       setEditVpcCode(code);
 
+                      const formatNum = (v: any) => {
+                        if (v === null || v === undefined) return "";
+                        return v.toString().replace(/\./g, ",");
+                      };
+
                       setEditProduct({
                         sku: selectedProduct.sku,
                         mpn: selectedProduct.mpn,
@@ -3090,49 +3439,61 @@ function App() {
                         category: selectedProduct.category,
                         sub_category: selectedProduct.sub_category,
                         location: selectedProduct.location,
-                        min_stock: selectedProduct.min_stock,
-                        price: selectedProduct.price,
+                        min_stock: formatNum(selectedProduct.min_stock),
+                        price: formatNum(selectedProduct.price),
                         item_type: selectedProduct.item_type,
                         image_path: selectedProduct.image_path || null,
                         pdf_path: selectedProduct.pdf_path || null,
                         attributes: typeof selectedProduct.attributes === "string" ? selectedProduct.attributes : JSON.stringify(selectedProduct.attributes || {}),
-                        pack_size: selectedProduct.pack_size || 1,
-                        largeur: attributesObj.largeur || "",
-                        hauteur: attributesObj.hauteur || "",
-                        profondeur: attributesObj.profondeur || "",
-                        poids: attributesObj.poids || ""
+                        pack_size: formatNum(selectedProduct.pack_size || 1),
+                        largeur: formatNum(attributesObj.largeur || ""),
+                        hauteur: formatNum(attributesObj.hauteur || ""),
+                        profondeur: formatNum(attributesObj.profondeur || ""),
+                        poids: formatNum(attributesObj.poids || "")
                       });
+                      setAutofillType(site || "mpn");
+                      setAutofillCodeInput(code || selectedProduct.mpn || "");
                       setShowEditModal(true);
                     }}
                   >
                     ✏️ Modifier
                   </button>
-                  <button 
-                    type="button" 
-                    className="btn btn-danger" 
-                    style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "12px", backgroundColor: "var(--danger)" }}
-                    onClick={() => {
-                      setConfirmModal({
-                        title: "Supprimer le produit",
-                        message: `Êtes-vous sûr de vouloir supprimer définitivement le SKU ${selectedProduct.sku} ?`,
-                        onConfirm: async () => {
-                          try {
-                            await invoke("delete_product", {
-                              networkPath: config.network_path,
-                              trigramme: config.trigramme,
-                              sku: selectedProduct.sku
-                            });
-                            setSelectedProduct(null);
-                            syncAndFetch(config);
-                          } catch (err: any) {
-                            setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+                  {inlineConfirm?.id === "product-delete" ? (
+                    <div style={{ flex: 1, display: "flex", gap: "0.5rem", alignItems: "center", justifyContent: "center", backgroundColor: "rgba(239, 68, 68, 0.1)", borderRadius: "6px", padding: "0 0.5rem" }}>
+                      <span style={{ color: "var(--danger)", fontSize: "12px", fontWeight: "bold" }}>Sûr ?</span>
+                      <button type="button" className="btn" style={{ background: "var(--danger)", color: "#fff", padding: "0.3rem 0.6rem", fontSize: "12px" }} onClick={() => {
+                        inlineConfirm.action();
+                        setInlineConfirm(null);
+                      }}>Oui</button>
+                      <button type="button" className="btn" style={{ background: "var(--bg-lighter)", color: "var(--text-color)", padding: "0.3rem 0.6rem", fontSize: "12px" }} onClick={() => setInlineConfirm(null)}>Non</button>
+                    </div>
+                  ) : (
+                    <button 
+                      type="button" 
+                      className="btn btn-danger" 
+                      style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "12px", backgroundColor: "var(--danger)" }}
+                      onClick={() => {
+                        setInlineConfirm({
+                          id: "product-delete",
+                          action: async () => {
+                            try {
+                              await invoke("delete_product", {
+                                networkPath: config.network_path,
+                                trigramme: config.trigramme,
+                                sku: selectedProduct.sku
+                              });
+                              setSelectedProduct(null);
+                              syncAndFetch(config);
+                            } catch (err: any) {
+                              setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+                            }
                           }
-                        }
-                      });
-                    }}
-                  >
-                    🗑️ Supprimer
-                  </button>
+                        });
+                      }}
+                    >
+                      🗑️ Supprimer
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -3262,34 +3623,42 @@ function App() {
                             </button>
                           </>
                         )}
-                        <button
-                          className="btn btn-danger"
-                          title="Supprimer cette notice"
-                          style={{ backgroundColor: "var(--danger)", color: "#fff", padding: "0 0.5rem", border: "none", borderRadius: "6px", cursor: "pointer" }}
-                          onClick={() => {
-                            setConfirmModal({
-                              title: "Supprimer la notice",
-                              message: `Êtes-vous sûr de vouloir supprimer définitivement la notice ${fileName} ?`,
-                              onConfirm: async () => {
-                                try {
-                                  await invoke("delete_media", {
-                                    networkPath: config.network_path,
-                                    sku: selectedProduct.sku,
-                                    mediaType: "pdf",
-                                    filePath: pdf
-                                  });
-                                  const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
-                                  setProductPdfs(updatedPdfs);
-                                  syncAndFetch(config);
-                                } catch (err: any) {
-                                  setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+                        {inlineConfirm?.id === `pdf-delete-${fileName}` ? (
+                          <div style={{ display: "flex", gap: "4px", alignItems: "center", backgroundColor: "rgba(239, 68, 68, 0.9)", padding: "2px 4px", borderRadius: "4px", flexShrink: 0 }}>
+                            <span style={{ color: "white", fontSize: "10px", fontWeight: "bold" }}>Sûr ?</span>
+                            <button onClick={(e) => { e.stopPropagation(); inlineConfirm.action(); setInlineConfirm(null); }} style={{ background: "#fff", color: "var(--danger)", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "10px", fontWeight: "bold", padding: "2px 6px" }}>Oui</button>
+                            <button onClick={(e) => { e.stopPropagation(); setInlineConfirm(null); }} style={{ background: "rgba(0,0,0,0.3)", color: "white", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "10px", padding: "2px 6px" }}>Non</button>
+                          </div>
+                        ) : (
+                          <button
+                            className="btn btn-danger"
+                            title="Supprimer cette notice"
+                            style={{ backgroundColor: "var(--danger)", color: "#fff", padding: "0 0.5rem", border: "none", borderRadius: "6px", cursor: "pointer", flexShrink: 0 }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setInlineConfirm({
+                                id: `pdf-delete-${fileName}`,
+                                action: async () => {
+                                  try {
+                                    await invoke("delete_media", {
+                                      networkPath: config.network_path,
+                                      sku: selectedProduct.sku,
+                                      mediaType: "pdf",
+                                      filePath: pdf
+                                    });
+                                    const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
+                                    setProductPdfs(updatedPdfs);
+                                    syncAndFetch(config);
+                                  } catch (err: any) {
+                                    setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+                                  }
                                 }
-                              }
-                            });
-                          }}
-                        >
-                          🗑️
-                        </button>
+                              });
+                            }}
+                          >
+                            🗑️
+                          </button>
+                        )}
                       </div>
                     );
                   })
@@ -3310,10 +3679,9 @@ function App() {
                   <label htmlFor="m-qty">Quantité :</label>
                   <input
                     id="m-qty"
-                    type="number"
-                    min={1}
+                    type="text"
                     value={movementQty}
-                    onChange={(e) => setMovementQty(Number(e.target.value) || 1)}
+                    onChange={(e) => setMovementQty(cleanNumericInput(e.target.value))}
                   />
                 </div>
                 <div className="form-group" style={{ marginBottom: "0.8rem" }}>
@@ -3399,6 +3767,13 @@ function App() {
                         content = (
                           <span>
                             <strong>{item.field}</strong> : <span className="audit-old-value">{item.old_value || "—"}</span> → <span className="audit-new-value">{item.new_value || "—"}</span>
+                            {item.source_url && (
+                              <> {" "}
+                                <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
+                                  🔗 source
+                                </a>
+                              </>
+                            )}
                           </span>
                         );
                       } else if (item.action === "SCRAPE_PRICE") {
@@ -3473,7 +3848,7 @@ function App() {
           <div className="modal-container">
             <div className="modal-header">
               <h3>Ajouter un nouveau SKU</h3>
-              <button className="modal-close" onClick={() => { setShowAddModal(false); setAutoFillSource(null); }}>×</button>
+              <button className="modal-close" onClick={() => { setShowAddModal(false); setAutoFillSource(null); setAutoFillFallbackInfo(null); }}>×</button>
             </div>
             <form onSubmit={handleCreateProduct}>
               <div className="modal-body">
@@ -3481,24 +3856,50 @@ function App() {
                 {createError && <div className="wizard-error">{createError}</div>}
                 {duplicateWarning && <div className="wizard-error" style={{ color: "var(--warning)", backgroundColor: "var(--warning-light)", borderColor: "rgba(245,158,11,0.2)" }}>{duplicateWarning}</div>}
 
-                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)", alignItems: "center" }}>
-                  <span style={{ fontSize: "11px", color: "var(--text-secondary)", flex: 1 }}>
-                    💡 Saisissez le <strong>SKU</strong> ou le <strong>Code VPC</strong>, puis utilisez le bouton global ci-contre ou les boutons 🔍 individuels pour auto-remplir les données.
-                  </span>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    style={{ padding: "0.4rem 0.8rem", fontSize: "11px", whiteSpace: "nowrap" }}
-                    disabled={autoFillLoading["ALL"]}
-                    onClick={() => handleAutoFill(false)}
-                  >
-                    {autoFillLoading["ALL"] ? "⏳ Chargement..." : "🔍 Auto-remplir tout"}
-                  </button>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "0.8rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                  <div style={{ fontSize: "11px", fontWeight: "bold", color: "var(--text-secondary)" }}>
+                    🚀 Auto-remplissage rapide
+                  </div>
+                  <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                    <select
+                      id="modal-autofill-type"
+                      value={autofillType}
+                      onChange={(e) => setAutofillType(e.target.value)}
+                      style={{ width: "160px", padding: "0.3rem", fontSize: "12px", height: "32px" }}
+                    >
+                      <option value="mpn">Référence fabricant (MPN)</option>
+                      {config?.vpc_sites?.map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                    <input
+                      id="modal-autofill-code"
+                      type="text"
+                      placeholder="Saisir la référence / le code..."
+                      value={autofillCodeInput}
+                      onChange={(e) => setAutofillCodeInput(e.target.value)}
+                      style={{ flex: 1, padding: "0.3rem", fontSize: "12px", height: "32px" }}
+                    />
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: "0 1rem", fontSize: "12px", height: "32px" }}
+                      disabled={autoFillLoading["ALL"]}
+                      onClick={() => triggerAutoFillAction(false)}
+                    >
+                      {autoFillLoading["ALL"] ? "⏳ ..." : "Auto-remplir"}
+                    </button>
+                  </div>
                 </div>
 
                 {autoFillSource && (
                   <div className="autofill-source-info">
                     🌐 Source détectée : <a href={autoFillSource} target="_blank" rel="noopener noreferrer">{autoFillSource}</a>
+                  </div>
+                )}
+                {autoFillFallbackInfo && (
+                  <div className="autofill-fallback-info" style={{ fontSize: "11px", color: "var(--warning)", marginTop: "0.2rem", backgroundColor: "rgba(245,158,11,0.1)", padding: "0.4rem", borderRadius: "4px", border: "1px solid rgba(245,158,11,0.2)" }}>
+                    ⚠️ {autoFillFallbackInfo}
                   </div>
                 )}
 
@@ -3675,12 +4076,32 @@ function App() {
                       <label htmlFor="modal-p-min">Seuil Alerte Stock</label>
                       <input
                         id="modal-p-min"
-                        type="number"
-                        min={0}
+                        type="text"
                         list="minstocks-datalist"
                         value={newProduct.min_stock}
-                        onChange={(e) => setNewProduct(prev => ({ ...prev, min_stock: Number(e.target.value) || 0 }))}
+                        onChange={(e) => setNewProduct(prev => ({ ...prev, min_stock: cleanNumericInput(e.target.value) }))}
                       />
+                    </div>
+                  </div>
+
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="modal-p-initial-stock" style={{ color: "var(--success)", fontWeight: 600 }}>
+                        📦 Stock initial (à la création)
+                      </label>
+                      <input
+                        id="modal-p-initial-stock"
+                        type="text"
+                        placeholder="0"
+                        value={newProduct.initial_stock}
+                        onChange={(e) => setNewProduct(prev => ({ ...prev, initial_stock: cleanNumericInput(e.target.value) }))}
+                        style={{ borderColor: Number(newProduct.initial_stock) > 0 ? "var(--success)" : undefined }}
+                      />
+                      {Number(newProduct.initial_stock) > 0 && (
+                        <span style={{ fontSize: "11px", color: "var(--success)", marginTop: "2px", display: "block" }}>
+                          Un mouvement d'entrée de {newProduct.initial_stock} unité(s) sera créé automatiquement.
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -3691,12 +4112,10 @@ function App() {
                           <label htmlFor="modal-p-price">Prix d'Achat (€)</label>
                           <input
                             id="modal-p-price"
-                            type="number"
-                            step="0.01"
-                            min={0}
+                            type="text"
                             list="prices-datalist"
                             value={newProduct.price}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, price: Number(e.target.value) || 0 }))}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, price: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -3717,10 +4136,9 @@ function App() {
                           <label htmlFor="modal-p-pack">Taille du Lot (pack)</label>
                           <input
                             id="modal-p-pack"
-                            type="number"
-                            min={1}
+                            type="text"
                             value={newProduct.pack_size}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, pack_size: Number(e.target.value) || 1 }))}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, pack_size: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -3750,7 +4168,7 @@ function App() {
                             type="text"
                             placeholder="Largeur"
                             value={newProduct.largeur}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, largeur: e.target.value }))}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, largeur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -3774,7 +4192,7 @@ function App() {
                             type="text"
                             placeholder="Hauteur"
                             value={newProduct.hauteur}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, hauteur: e.target.value }))}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, hauteur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -3798,7 +4216,7 @@ function App() {
                             type="text"
                             placeholder="Profondeur"
                             value={newProduct.profondeur}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, profondeur: e.target.value }))}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, profondeur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -3822,7 +4240,7 @@ function App() {
                             type="text"
                             placeholder="Poids"
                             value={newProduct.poids}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, poids: e.target.value }))}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, poids: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -3855,31 +4273,55 @@ function App() {
           <div className="modal-container">
             <div className="modal-header">
               <h3>Modifier le SKU : {editProduct.sku}</h3>
-              <button className="modal-close" onClick={() => { setShowEditModal(false); setAutoFillSource(null); }}>×</button>
+              <button className="modal-close" onClick={() => { setShowEditModal(false); setAutoFillSource(null); setAutoFillFallbackInfo(null); }}>×</button>
             </div>
             <form onSubmit={handleEditProduct}>
               <div className="modal-body">
                 {editSuccess && <div className="wizard-error" style={{ color: "var(--success)", backgroundColor: "var(--success-light)", borderColor: "rgba(16,185,129,0.2)" }}>{editSuccess}</div>}
                 {editError && <div className="wizard-error">{editError}</div>}
 
-                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)", alignItems: "center" }}>
-                  <span style={{ fontSize: "11px", color: "var(--text-secondary)", flex: 1 }}>
-                    💡 Utilisez le bouton global ou les boutons 🔍 individuels pour auto-remplir les données modifiables depuis le site VPC.
-                  </span>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    style={{ padding: "0.4rem 0.8rem", fontSize: "11px", whiteSpace: "nowrap" }}
-                    disabled={autoFillLoading["ALL"]}
-                    onClick={() => handleAutoFill(true)}
-                  >
-                    {autoFillLoading["ALL"] ? "⏳ Remplissage..." : "🔍 Auto-remplir tout"}
-                  </button>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "0.8rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                  <div style={{ fontSize: "11px", fontWeight: "bold", color: "var(--text-secondary)" }}>
+                    🚀 Auto-remplissage rapide
+                  </div>
+                  <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                    <select
+                      value={autofillType}
+                      onChange={(e) => setAutofillType(e.target.value)}
+                      style={{ width: "160px", padding: "0.3rem", fontSize: "12px", height: "32px" }}
+                    >
+                      <option value="mpn">Référence fabricant (MPN)</option>
+                      {config?.vpc_sites?.map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="text"
+                      placeholder="Saisir la référence / le code..."
+                      value={autofillCodeInput}
+                      onChange={(e) => setAutofillCodeInput(e.target.value)}
+                      style={{ flex: 1, padding: "0.3rem", fontSize: "12px", height: "32px" }}
+                    />
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: "0 1rem", fontSize: "12px", height: "32px" }}
+                      disabled={autoFillLoading["ALL"]}
+                      onClick={() => triggerAutoFillAction(true)}
+                    >
+                      {autoFillLoading["ALL"] ? "⏳ ..." : "Auto-remplir"}
+                    </button>
+                  </div>
                 </div>
 
                 {autoFillSource && (
                   <div className="autofill-source-info">
                     🌐 Source détectée : <a href={autoFillSource} target="_blank" rel="noopener noreferrer">{autoFillSource}</a>
+                  </div>
+                )}
+                {autoFillFallbackInfo && (
+                  <div className="autofill-fallback-info" style={{ fontSize: "11px", color: "var(--warning)", marginTop: "0.2rem", backgroundColor: "rgba(245,158,11,0.1)", padding: "0.4rem", borderRadius: "4px", border: "1px solid rgba(245,158,11,0.2)" }}>
+                    ⚠️ {autoFillFallbackInfo}
                   </div>
                 )}
 
@@ -4044,11 +4486,10 @@ function App() {
                       <label htmlFor="edit-p-min">Seuil Alerte Stock</label>
                       <input
                         id="edit-p-min"
-                        type="number"
-                        min={0}
+                        type="text"
                         list="minstocks-datalist"
                         value={editProduct.min_stock}
-                        onChange={(e) => setEditProduct(prev => ({ ...prev, min_stock: Number(e.target.value) || 0 }))}
+                        onChange={(e) => setEditProduct(prev => ({ ...prev, min_stock: cleanNumericInput(e.target.value) }))}
                       />
                     </div>
                   </div>
@@ -4060,12 +4501,10 @@ function App() {
                           <label htmlFor="edit-p-price">Prix d'Achat (€)</label>
                           <input
                             id="edit-p-price"
-                            type="number"
-                            step="0.01"
-                            min={0}
+                            type="text"
                             list="prices-datalist"
                             value={editProduct.price}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, price: Number(e.target.value) || 0 }))}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, price: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -4086,10 +4525,9 @@ function App() {
                           <label htmlFor="edit-p-pack">Taille du Lot (pack)</label>
                           <input
                             id="edit-p-pack"
-                            type="number"
-                            min={1}
+                            type="text"
                             value={editProduct.pack_size}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, pack_size: Number(e.target.value) || 1 }))}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, pack_size: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -4119,7 +4557,7 @@ function App() {
                             type="text"
                             placeholder="Largeur"
                             value={editProduct.largeur}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, largeur: e.target.value }))}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, largeur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -4143,7 +4581,7 @@ function App() {
                             type="text"
                             placeholder="Hauteur"
                             value={editProduct.hauteur}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, hauteur: e.target.value }))}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, hauteur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -4167,7 +4605,7 @@ function App() {
                             type="text"
                             placeholder="Profondeur"
                             value={editProduct.profondeur}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, profondeur: e.target.value }))}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, profondeur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button
@@ -4191,7 +4629,7 @@ function App() {
                             type="text"
                             placeholder="Poids"
                             value={editProduct.poids}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, poids: e.target.value }))}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, poids: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
                         <button

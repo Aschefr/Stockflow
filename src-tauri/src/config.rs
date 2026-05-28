@@ -18,6 +18,10 @@ fn default_pdf_size_threshold() -> Option<f64> {
     Some(5.0)
 }
 
+fn default_price_tax_type() -> Option<String> {
+    Some("HT".to_string())
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub trigramme: String,
@@ -32,6 +36,8 @@ pub struct AppConfig {
     pub image_rename_convention: Option<String>,
     #[serde(default = "default_pdf_size_threshold")]
     pub pdf_size_threshold: Option<f64>,
+    #[serde(default = "default_price_tax_type")]
+    pub price_tax_type: Option<String>,
     #[serde(default)]
     pub vpc_api_keys: std::collections::HashMap<String, String>,
     #[serde(default)]

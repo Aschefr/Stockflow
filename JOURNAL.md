@@ -5,13 +5,34 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.3.3] - 2026-05-28
+
+### Correctif Scraping PDF RS Components & Fallback SearxNG
+- **Résolution du domaine de recherche :** Remplacement automatique de `ma.rsdelivers.com` par `rs-online.com` lors des requêtes SearxNG pour assurer la couverture de `docs.rs-online.com` qui héberge les PDF réels de RS.
+- **Recherche SearxNG Multi-Requêtes progressive :** Implémentation d'une boucle séquentielle testant plusieurs termes de recherche du plus précis (VPC code + domaine cible) au plus général (MPN + marque + pdf), s'arrêtant dès qu'un document valide est trouvé.
+- **Assouplissement des guillemets :** Désactivation de l'encadrement par guillemets doubles pour les MPN complexes (contenant des espaces/slashes) afin de laisser les moteurs de recherche indexer les parties du numéro de pièce.
+- **Nommage intelligent des fichiers :** Extension de `detect_doc_type` pour reconnaître et nettoyer à la volée les titres de documents téléchargés et les formater en minuscules normalisés (ex: `fiche_technique`, `datasheet`, `manuel`, `schema`, `certificat`, `catalogue`) ou utiliser le libellé épuré du lien.
+
+## [1.3.2] - 2026-05-28
+
+### Sauvegarde Réseau Partagée (Feature 2) & Option de Taxe Scraping (Feature 5)
+- **Sauvegarde Automatique Partagée (Feature 2) :** Implémentation complète d'un système robuste de sauvegarde automatique dans le dossier réseau partagé. Les réglages sont stockés et synchronisés via `backup_config.json` sur le réseau.
+- **Gestion de la Concurrence :** Utilisation d'un fichier de verrouillage (`backup.lock`) avec mécanisme d'invalidation (expiration après 5 minutes) et bouton de déverrouillage manuel pour empêcher les écritures concurrentes par plusieurs instances.
+- **Planificateur intelligent :** Boucle temporelle Rust vérifiant l'inactivité au démarrage (par défaut 30 minutes) et évitant le déclenchement si aucune modification d'événement n'a eu lieu depuis le dernier backup.
+- **Rétention et Rotation :** Gestion du nombre maximum de sauvegardes à conserver (par défaut 5) avec effacement automatique des backups les plus anciens.
+- **Option de Taxe pour Scraping (Feature 5) :** Ajout de la préférence `price_tax_type` ("HT" ou "TTC") dans la configuration de l'application. Le scraper applique automatiquement un multiplicateur de taxe de 1.20 si configuré en "TTC" pour les prix récupérés en ligne.
+- **Améliorations Esthétiques et Ergonomie :** Correction des variables de thème et contrastes du mode clair pour la gestion VPC, limitation de la hauteur et ajustement du viewport des modaux de saisie avec scrollbar fine, et alignements des colonnes logistiques.
+
 ## [1.3.1] - 2026-05-28
 
 ### Correctif et Amélioration du Scraping RS & Cloudflare Bypass
+- **Forçage HTTP/1.1 (Bypass Cloudflare/Akamai) :** En-têtes et paramètres client modifiés avec `.http1_only()` sur le client de scraping Rust pour imiter la pile WinHTTP de la macro Excel VBA. Cela permet d'obtenir un JA3/TLS fingerprint autorisé et de contourner les blocages HTTP/2 automatiques sur `fr.rs-online.com`.
+- **Mécanisme d'information de repli (Fallback Info) :** Ajout du champ `fallback_info` dans la structure `ScrapedProductDetails` pour remonter dynamiquement jusqu'à l'UI si la requête a échoué sur l'URL configurée par l'utilisateur et a dû basculer en repli sur `ma.rsdelivers.com` ou SearxNG, en précisant les causes et URLs associées.
+- **Conversion numérique robuste (Correctif Prix à 0) :** Correction des fonctions de création (`handleCreateProduct`) et de mise à jour (`handleEditProduct`) dans le frontend React. Les valeurs saisies pour le prix et les champs numériques sont désormais expurgées des virgules françaises via `.replace(",", ".")` avant d'être passées au constructeur `Number()`, évitant les conversions silencieuses en `NaN` / `0` lors de la validation des formulaires.
 - **Contournement de la protection Akamai/Cloudflare :** Ajout d'un mécanisme de bascule automatique vers le miroir `ma.rsdelivers.com` si la requête directe vers le domaine RS principal (ex: `fr.rs-online.com`) retourne un code d'erreur HTTP 403 (Accès refusé).
 - **Extraction précise des métadonnées de produit :** Extraction directe des informations structurées (MPN réel `0803874`, désignation complète, marque `Phoenix Contact`, lot de conditionnement) depuis la page produit de secours.
 - **Conversion de devise intelligente :** Conversion automatique des prix de MAD (Dirhams Marocains) vers l'EUR (Euros) en appliquant le taux de change de référence lorsque le site configuré est européen, évitant l'utilisation de prix de seuil de livraison incorrects (50.00 €).
-- **Correctif d'Image et de PDF :** Récupération réussie du PDF de datasheet réel et des images de produit sur Cloudinary en s'appuyant sur le MPN et le code VPC de secours correctement résolus.
+- **Correctif de l'URL Source dans l'Historique (Race Condition) :** Correction d'une anomalie où l'URL source de scraping était écrasée par `None` dans le cache SQLite local et l'audit log réseau lors de la validation du formulaire de modification/création d'un produit (dû à l'envoi d'attributs obsolètes par le frontend). La commande Rust `create_product` dans `lib.rs` a été renforcée pour récupérer et fusionner automatiquement les URLs de scraping existantes (`scrape_price_url`, `scrape_image_url`, `scrape_doc_url`) depuis l'ancien état en base de données si elles sont absentes de la requête frontend, garantissant l'affichage systématique de l'ancre `🔗 source` sur les lignes de modifications `UPDATE` associées.
 
 ## [1.3.0] - 2026-05-28
 
@@ -237,3 +258,17 @@ Ne pas oublier de le remplir pendant le developpement.
   - **Double sélecteur d'URL VPC :** Restauration de la liste déroulante d'origine des URLs pré-enregistrées de base, positionnée côte à côte avec le champ de saisie libre et l'assistance de recherche SearXNG pour une flexibilité maximale.
   - **Filtrage de l'historique physique :** Correction d'un bug qui affichait à tort les créations/mises à jour de métadonnées comme des mouvements de stock de "0 unités". La table SQLite locale ne filtre plus que les véritables événements physiques (`STOCK_IN` et `STOCK_OUT`).
   - **Rafraîchissement dynamique immédiat (sans F5) :** Ajout de la fonction front-end `refreshSelectedProduct` qui réinterroge immédiatement la base de données et met à jour instantanément la sidebar (prix, stocks, historique, et audits) après chaque opération d'édition, de mouvement ou de scraping réussie.
+
+- **Saisie Rapide du Stock :**
+  - Ajout du champ optionnel `initial_stock` au formulaire d'ajout (`App.tsx`), géré dynamiquement dans le backend Rust (`lib.rs`) pour générer un mouvement `STOCK_IN` lors de la création.
+  - Rendu de la cellule **Stock Actuel** éditable (double-clic) dans le tableau (`DataGrid`), avec un calcul automatique et transparent de la différence entre l'ancien et le nouveau stock pour générer la transaction `STOCK_IN` ou `STOCK_OUT` associée.
+
+- **UI/UX - Confirmations Inline :**
+  - Suppression complète de la modale globale perturbante (`confirmModal`) pour les actions destructives.
+  - Implémentation d'un état React local (`inlineConfirm`) permettant aux boutons 'Corbeille' et 'Supprimer' de se transformer de manière contextuelle en petits bandeaux de confirmation 'Sûr ? [Oui] [Non]'.
+
+- **Amélioration du Moteur de Scraping PDF :**
+  - **Extraction contextuelle (Rust) :** Ajout de la fonction `extract_link_text` dans `scraper.rs` qui analyse le HTML environnant pour récupérer le texte exact du lien (`<a href>Texte</a>`).
+  - **Nommage Dynamique :** La fonction `detect_doc_type` a été adaptée pour lire ce texte extrait et assigner un type de document ultra-pertinent au lieu du type générique 'Datasheet'.
+  - **Coupe-circuit SearxNG :** Ajout d'une condition interrompant totalement la recherche fallback sur le moteur de recherche public dès lors que la page VPC (ex: RS) a retourné au moins un PDF valide.
+  - **Déduplication agressive :** Modification du seuil de tolérance PDF : maximum de 3 fichiers gardés en mémoire, et suppression des doublons sur le seul critère du type de document si la taille est similaire.
