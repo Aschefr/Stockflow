@@ -238,7 +238,11 @@ function App() {
     min_stock: 0,
     price: 0,
     pack_size: 1,
-    attributes: "{}"
+    attributes: "{}",
+    largeur: "",
+    hauteur: "",
+    profondeur: "",
+    poids: ""
   });
   const [duplicateWarning, setDuplicateWarning] = useState("");
   const [createSuccess, setCreateSuccess] = useState("");
@@ -261,6 +265,10 @@ function App() {
     pdf_path: null as string | null,
     attributes: "{}",
     pack_size: 1,
+    largeur: "",
+    hauteur: "",
+    profondeur: "",
+    poids: ""
   });
   const [newVpcSite, setNewVpcSite] = useState("");
   const [newVpcCode, setNewVpcCode] = useState("");
@@ -268,6 +276,98 @@ function App() {
   const [editVpcCode, setEditVpcCode] = useState("");
   const [editSuccess, setEditSuccess] = useState("");
   const [editError, setEditError] = useState("");
+
+  // States for transient scraping status
+  const [autoFillLoading, setAutoFillLoading] = useState<Record<string, boolean>>({});
+  const [autoFillSource, setAutoFillSource] = useState<string | null>(null);
+
+  // Helper function to scrape and auto-fill either a specific field or all fields
+  async function handleAutoFill(isEdit: boolean, targetField?: string) {
+    const vpcSite = isEdit ? editVpcSite : newVpcSite;
+    const vpcCode = isEdit ? editVpcCode : newVpcCode;
+    const sku = isEdit ? editProduct.sku : newProduct.sku;
+
+    const codeToUse = vpcCode.trim() || sku.trim();
+    if (!codeToUse) {
+      const errorMsg = "Veuillez renseigner un SKU ou un Code VPC pour le remplissage.";
+      if (isEdit) setEditError(errorMsg); else setCreateError(errorMsg);
+      return;
+    }
+
+    if (isEdit) {
+      setEditError("");
+      setEditSuccess("");
+    } else {
+      setCreateError("");
+      setCreateSuccess("");
+    }
+
+    const fieldKey = targetField || "ALL";
+    setAutoFillLoading(prev => ({ ...prev, [fieldKey]: true }));
+
+    try {
+      const details: any = await invoke("scrape_product_details", {
+        vpcSite: vpcSite || "RS",
+        vpcCode: vpcCode,
+        sku: sku
+      });
+
+      if (details.source_url) {
+        setAutoFillSource(details.source_url);
+      }
+
+      const parsedAttrs = (isEdit ? editProduct.largeur || editProduct.hauteur || editProduct.profondeur || editProduct.poids : false) 
+        ? {
+            largeur: isEdit ? editProduct.largeur : newProduct.largeur,
+            hauteur: isEdit ? editProduct.hauteur : newProduct.hauteur,
+            profondeur: isEdit ? editProduct.profondeur : newProduct.profondeur,
+            poids: isEdit ? editProduct.poids : newProduct.poids
+          }
+        : {
+            largeur: details.dimensions ? details.dimensions.split('x')[0] : undefined,
+            hauteur: details.dimensions ? details.dimensions.split('x')[1] : undefined,
+            profondeur: details.dimensions ? details.dimensions.split('x')[2] : undefined,
+            poids: details.weight || undefined
+          };
+
+      if (isEdit) {
+        setEditProduct(prev => {
+          const next = { ...prev };
+          if (!targetField || targetField === "label") next.label = details.label || prev.label;
+          if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
+          if (!targetField || targetField === "price") next.price = details.price > 0 ? details.price : prev.price;
+          if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? details.pack_size : prev.pack_size;
+          if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
+          if (!targetField || targetField === "largeur") next.largeur = parsedAttrs.largeur || prev.largeur;
+          if (!targetField || targetField === "hauteur") next.hauteur = parsedAttrs.hauteur || prev.hauteur;
+          if (!targetField || targetField === "profondeur") next.profondeur = parsedAttrs.profondeur || prev.profondeur;
+          if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids || prev.poids;
+          return next;
+        });
+        setEditSuccess(targetField ? `Champ '${targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
+      } else {
+        setNewProduct(prev => {
+          const next = { ...prev };
+          if (!targetField || targetField === "label") next.label = details.label || prev.label;
+          if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
+          if (!targetField || targetField === "price") next.price = details.price > 0 ? details.price : prev.price;
+          if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? details.pack_size : prev.pack_size;
+          if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
+          if (!targetField || targetField === "largeur") next.largeur = parsedAttrs.largeur || prev.largeur;
+          if (!targetField || targetField === "hauteur") next.hauteur = parsedAttrs.hauteur || prev.hauteur;
+          if (!targetField || targetField === "profondeur") next.profondeur = parsedAttrs.profondeur || prev.profondeur;
+          if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids || prev.poids;
+          return next;
+        });
+        setCreateSuccess(targetField ? `Champ '${targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
+      }
+    } catch (err: any) {
+      const errMsg = `Échec de l'auto-remplissage : ${err.toString()}`;
+      if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
+    } finally {
+      setAutoFillLoading(prev => ({ ...prev, [fieldKey]: false }));
+    }
+  }
 
   // Inventory movement dialog/state inside detail panel
   const [movementQty, setMovementQty] = useState(1);
@@ -951,6 +1051,12 @@ function App() {
     if (newVpcSite && newVpcCode) {
       attributesObj.vpc = { [newVpcSite]: newVpcCode };
     }
+    
+    // Inject physical dimensions & weight into attributes
+    if (newProduct.largeur) attributesObj.largeur = newProduct.largeur;
+    if (newProduct.hauteur) attributesObj.hauteur = newProduct.hauteur;
+    if (newProduct.profondeur) attributesObj.profondeur = newProduct.profondeur;
+    if (newProduct.poids) attributesObj.poids = newProduct.poids;
 
     try {
       await invoke("create_product", {
@@ -975,6 +1081,7 @@ function App() {
       setCreateSuccess("Produit créé avec succès ! Événement généré.");
       setNewVpcSite("");
       setNewVpcCode("");
+      setAutoFillSource(null);
       setNewProduct({
         sku: "",
         mpn: "",
@@ -986,7 +1093,11 @@ function App() {
         min_stock: 0,
         price: 0,
         pack_size: 1,
-        attributes: "{}"
+        attributes: "{}",
+        largeur: "",
+        hauteur: "",
+        profondeur: "",
+        poids: ""
       });
       setShowAddModal(false);
       syncAndFetch(config);
@@ -1013,6 +1124,12 @@ function App() {
       delete attributesObj.vpc;
     }
 
+    // Inject physical dimensions & weight into attributes
+    if (editProduct.largeur) attributesObj.largeur = editProduct.largeur; else delete attributesObj.largeur;
+    if (editProduct.hauteur) attributesObj.hauteur = editProduct.hauteur; else delete attributesObj.hauteur;
+    if (editProduct.profondeur) attributesObj.profondeur = editProduct.profondeur; else delete attributesObj.profondeur;
+    if (editProduct.poids) attributesObj.poids = editProduct.poids; else delete attributesObj.poids;
+
     try {
       await invoke("create_product", {
         networkPath: config.network_path,
@@ -1034,6 +1151,7 @@ function App() {
       });
 
       setEditSuccess("Produit mis à jour avec succès !");
+      setAutoFillSource(null);
       setShowEditModal(false);
 
       // Update selected product view in real time
@@ -1048,6 +1166,7 @@ function App() {
         min_stock: Number(editProduct.min_stock) || 0,
         price: Number(editProduct.price) || 0,
         pack_size: Number(editProduct.pack_size) || 1,
+        attributes: JSON.stringify(attributesObj)
       };
       setSelectedProduct(updated);
 
@@ -1647,7 +1766,11 @@ function App() {
                       min_stock: 0,
                       price: 0,
                       pack_size: 1,
-                      attributes: "{}"
+                      attributes: "{}",
+                      largeur: "",
+                      hauteur: "",
+                      profondeur: "",
+                      poids: ""
                     });
                     setShowAddModal(true);
                   }}
@@ -2945,13 +3068,14 @@ function App() {
                       
                       let site = "";
                       let code = "";
+                      let attributesObj: any = {};
                       try {
-                        const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
-                        if (attrs && attrs.vpc) {
-                          const keys = Object.keys(attrs.vpc);
+                        attributesObj = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
+                        if (attributesObj && attributesObj.vpc) {
+                          const keys = Object.keys(attributesObj.vpc);
                           if (keys.length > 0) {
                             site = keys[0];
-                            code = attrs.vpc[site];
+                            code = attributesObj.vpc[site];
                           }
                         }
                       } catch (e) {}
@@ -2973,6 +3097,10 @@ function App() {
                         pdf_path: selectedProduct.pdf_path || null,
                         attributes: typeof selectedProduct.attributes === "string" ? selectedProduct.attributes : JSON.stringify(selectedProduct.attributes || {}),
                         pack_size: selectedProduct.pack_size || 1,
+                        largeur: attributesObj.largeur || "",
+                        hauteur: attributesObj.hauteur || "",
+                        profondeur: attributesObj.profondeur || "",
+                        poids: attributesObj.poids || ""
                       });
                       setShowEditModal(true);
                     }}
@@ -3345,7 +3473,7 @@ function App() {
           <div className="modal-container">
             <div className="modal-header">
               <h3>Ajouter un nouveau SKU</h3>
-              <button className="modal-close" onClick={() => setShowAddModal(false)}>×</button>
+              <button className="modal-close" onClick={() => { setShowAddModal(false); setAutoFillSource(null); }}>×</button>
             </div>
             <form onSubmit={handleCreateProduct}>
               <div className="modal-body">
@@ -3353,197 +3481,367 @@ function App() {
                 {createError && <div className="wizard-error">{createError}</div>}
                 {duplicateWarning && <div className="wizard-error" style={{ color: "var(--warning)", backgroundColor: "var(--warning-light)", borderColor: "rgba(245,158,11,0.2)" }}>{duplicateWarning}</div>}
 
-                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)", alignItems: "center" }}>
+                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)", alignItems: "center" }}>
                   <span style={{ fontSize: "11px", color: "var(--text-secondary)", flex: 1 }}>
-                    💡 Renseignez le <strong>SKU</strong> ou le <strong>Code VPC</strong> ci-dessous puis cliquez sur Pré-remplir pour charger automatiquement la désignation, la marque et le prix.
+                    💡 Saisissez le <strong>SKU</strong> ou le <strong>Code VPC</strong>, puis utilisez le bouton global ci-contre ou les boutons 🔍 individuels pour auto-remplir les données.
                   </span>
                   <button
                     type="button"
                     className="btn btn-secondary"
                     style={{ padding: "0.4rem 0.8rem", fontSize: "11px", whiteSpace: "nowrap" }}
-                    onClick={async () => {
-                      const code = newVpcCode.trim() || newProduct.sku.trim();
-                      if (!code) {
-                        setCreateError("Veuillez renseigner un SKU ou un Code VPC pour le pré-remplissage.");
-                        return;
-                      }
-                      setCreateError("");
-                      setCreateSuccess("");
-                      try {
-                        const details: any = await invoke("scrape_product_details", {
-                          vpcSite: newVpcSite || "RS",
-                          vpcCode: newVpcCode,
-                          sku: newProduct.sku
-                        });
-                        setNewProduct(prev => ({
-                          ...prev,
-                          label: details.label || prev.label,
-                          brand: details.brand || prev.brand,
-                          price: details.price > 0 ? details.price : prev.price,
-                          pack_size: details.pack_size > 0 ? details.pack_size : prev.pack_size,
-                          mpn: details.mpn || prev.mpn,
-                          sku: details.sku || prev.sku,
-                          // dimensions and weight are transiently kept or added to attributes
-                          attributes: JSON.stringify({
-                            ...JSON.parse(typeof prev.attributes === 'string' ? prev.attributes : "{}"),
-                            largeur: details.dimensions ? details.dimensions.split('x')[0] : undefined,
-                            hauteur: details.dimensions ? details.dimensions.split('x')[1] : undefined,
-                            profondeur: details.dimensions ? details.dimensions.split('x')[2] : undefined,
-                            poids: details.weight
-                          })
-                        }));
-                        setCreateSuccess("Champs pré-remplis avec succès !");
-                      } catch (err: any) {
-                        setCreateError(`Échec du pré-remplissage : ${err.toString()}`);
-                      }
-                    }}
+                    disabled={autoFillLoading["ALL"]}
+                    onClick={() => handleAutoFill(false)}
                   >
-                    🔍 Pré-remplir
+                    {autoFillLoading["ALL"] ? "⏳ Chargement..." : "🔍 Auto-remplir tout"}
                   </button>
                 </div>
 
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="modal-p-sku">SKU (Référence Interne) *</label>
-                  <input
-                    id="modal-p-sku"
-                    type="text"
-                    required
-                    list="skus-datalist"
-                    value={newProduct.sku}
-                    onChange={(e) => handleSkuChange(e.target.value)}
-                    placeholder="ex: 6ES75070RA000AB0"
-                  />
-                </div>
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="modal-p-mpn">Référence Fabricant (MPN)</label>
-                  <input
-                    id="modal-p-mpn"
-                    type="text"
-                    list="mpns-datalist"
-                    value={newProduct.mpn}
-                    onChange={(e) => setNewProduct(prev => ({ ...prev, mpn: e.target.value }))}
-                    placeholder="Saisie libre (laissé vide = identique SKU)"
-                  />
-                </div>
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="modal-p-label">Désignation Produit *</label>
-                  <input
-                    id="modal-p-label"
-                    type="text"
-                    required
-                    list="labels-datalist"
-                    value={newProduct.label}
-                    onChange={(e) => setNewProduct(prev => ({ ...prev, label: e.target.value }))}
-                    placeholder="ex: Siemens S7-1500 PS 60W"
-                  />
-                </div>
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="modal-p-brand">Marque</label>
-                  <input
-                    id="modal-p-brand"
-                    type="text"
-                    list="brands-datalist"
-                    value={newProduct.brand}
-                    onChange={(e) => setNewProduct(prev => ({ ...prev, brand: e.target.value }))}
-                    placeholder="ex: Siemens"
-                  />
-                </div>
-                <div className="row" style={{ gap: "1rem", marginBottom: "1rem", justifyContent: "stretch" }}>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="modal-p-cat">Famille</label>
-                    <input
-                      id="modal-p-cat"
-                      type="text"
-                      list="categories-datalist"
-                      value={newProduct.category}
-                      onChange={(e) => setNewProduct(prev => ({ ...prev, category: e.target.value }))}
-                      placeholder="ex: Automatisme"
-                    />
+                {autoFillSource && (
+                  <div className="autofill-source-info">
+                    🌐 Source détectée : <a href={autoFillSource} target="_blank" rel="noopener noreferrer">{autoFillSource}</a>
                   </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="modal-p-subcat">Sous-Famille</label>
-                    <input
-                      id="modal-p-subcat"
-                      type="text"
-                      list="add-subcategories-datalist"
-                      value={newProduct.sub_category}
-                      onChange={(e) => setNewProduct(prev => ({ ...prev, sub_category: e.target.value }))}
-                      placeholder="ex: Alimentation"
-                    />
+                )}
+
+                {/* 1. Identification */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">1. Identification</div>
+                  
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <label htmlFor="modal-p-sku">SKU (Référence Interne) *</label>
+                      <input
+                        id="modal-p-sku"
+                        type="text"
+                        required
+                        list="skus-datalist"
+                        value={newProduct.sku}
+                        onChange={(e) => handleSkuChange(e.target.value)}
+                        placeholder="ex: 6ES75070RA000AB0"
+                      />
+                    </div>
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="modal-p-mpn">Référence Fabricant (MPN)</label>
+                          <input
+                            id="modal-p-mpn"
+                            type="text"
+                            list="mpns-datalist"
+                            value={newProduct.mpn}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, mpn: e.target.value }))}
+                            placeholder="Identique SKU si vide"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir MPN"
+                          disabled={autoFillLoading["mpn"]}
+                          onClick={() => handleAutoFill(false, "mpn")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div className="row" style={{ gap: "1rem", marginBottom: "1rem", justifyContent: "stretch" }}>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="modal-p-vpc-site">Fournisseur VPC</label>
-                    <select
-                      id="modal-p-vpc-site"
-                      value={newVpcSite}
-                      onChange={(e) => setNewVpcSite(e.target.value)}
-                    >
-                      <option value="">Sélectionner</option>
-                      {config?.vpc_sites?.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="modal-p-vpc-code">Code VPC (Catalogue)</label>
-                    <input
-                      id="modal-p-vpc-code"
-                      type="text"
-                      placeholder="ex: RS-123-456"
-                      value={newVpcCode}
-                      onChange={(e) => setNewVpcCode(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="modal-p-loc">Emplacement Physique</label>
-                  <input
-                    id="modal-p-loc"
-                    type="text"
-                    list="locations-datalist"
-                    value={newProduct.location}
-                    onChange={(e) => setNewProduct(prev => ({ ...prev, location: e.target.value }))}
-                    placeholder="ex: MAG-A1-E2-B3"
-                  />
-                </div>
-                <div className="row" style={{ gap: "1rem", justifyContent: "stretch" }}>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="modal-p-min">Seuil d'Alerte Stock</label>
-                    <input
-                      id="modal-p-min"
-                      type="number"
-                      min={0}
-                      list="minstocks-datalist"
-                      value={newProduct.min_stock}
-                      onChange={(e) => setNewProduct(prev => ({ ...prev, min_stock: Number(e.target.value) || 0 }))}
-                    />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="modal-p-price">Prix d'Achat (€)</label>
-                    <input
-                      id="modal-p-price"
-                      type="number"
-                      step="0.01"
-                      min={0}
-                      list="prices-datalist"
-                      value={newProduct.price}
-                      onChange={(e) => setNewProduct(prev => ({ ...prev, price: Number(e.target.value) || 0 }))}
-                    />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="modal-p-pack">Taille du Lot (pack)</label>
-                    <input
-                      id="modal-p-pack"
-                      type="number"
-                      min={1}
-                      value={newProduct.pack_size}
-                      onChange={(e) => setNewProduct(prev => ({ ...prev, pack_size: Number(e.target.value) || 1 }))}
-                    />
+
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 3 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="modal-p-label">Désignation Produit *</label>
+                          <input
+                            id="modal-p-label"
+                            type="text"
+                            required
+                            list="labels-datalist"
+                            value={newProduct.label}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, label: e.target.value }))}
+                            placeholder="ex: Siemens S7-1500 PS 60W"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Désignation"
+                          disabled={autoFillLoading["label"]}
+                          onClick={() => handleAutoFill(false, "label")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="modal-p-brand">Marque</label>
+                          <input
+                            id="modal-p-brand"
+                            type="text"
+                            list="brands-datalist"
+                            value={newProduct.brand}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, brand: e.target.value }))}
+                            placeholder="ex: Siemens"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Marque"
+                          disabled={autoFillLoading["brand"]}
+                          onClick={() => handleAutoFill(false, "brand")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
+
+                {/* 2. Fournisseur VPC */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">2. Fournisseur VPC</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="modal-p-vpc-site">Fournisseur VPC</label>
+                      <select
+                        id="modal-p-vpc-site"
+                        value={newVpcSite}
+                        onChange={(e) => setNewVpcSite(e.target.value)}
+                      >
+                        <option value="">Sélectionner</option>
+                        {config?.vpc_sites?.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="modal-p-vpc-code">Code VPC (Catalogue)</label>
+                      <input
+                        id="modal-p-vpc-code"
+                        type="text"
+                        placeholder="ex: RS-123-456"
+                        value={newVpcCode}
+                        onChange={(e) => setNewVpcCode(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Classification */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">3. Classification</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="modal-p-cat">Famille (Sans auto-remplissage)</label>
+                      <input
+                        id="modal-p-cat"
+                        type="text"
+                        list="categories-datalist"
+                        value={newProduct.category}
+                        onChange={(e) => setNewProduct(prev => ({ ...prev, category: e.target.value }))}
+                        placeholder="ex: Automatisme"
+                      />
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="modal-p-subcat">Sous-Famille (Sans auto-remplissage)</label>
+                      <input
+                        id="modal-p-subcat"
+                        type="text"
+                        list="add-subcategories-datalist"
+                        value={newProduct.sub_category}
+                        onChange={(e) => setNewProduct(prev => ({ ...prev, sub_category: e.target.value }))}
+                        placeholder="ex: Alimentation"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4. Logistique */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">4. Logistique</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <label htmlFor="modal-p-loc">Emplacement Physique</label>
+                      <input
+                        id="modal-p-loc"
+                        type="text"
+                        list="locations-datalist"
+                        value={newProduct.location}
+                        onChange={(e) => setNewProduct(prev => ({ ...prev, location: e.target.value }))}
+                        placeholder="ex: MAG-A1-E2-B3"
+                      />
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="modal-p-min">Seuil Alerte Stock</label>
+                      <input
+                        id="modal-p-min"
+                        type="number"
+                        min={0}
+                        list="minstocks-datalist"
+                        value={newProduct.min_stock}
+                        onChange={(e) => setNewProduct(prev => ({ ...prev, min_stock: Number(e.target.value) || 0 }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="modal-p-price">Prix d'Achat (€)</label>
+                          <input
+                            id="modal-p-price"
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            list="prices-datalist"
+                            value={newProduct.price}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, price: Number(e.target.value) || 0 }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Prix"
+                          disabled={autoFillLoading["price"]}
+                          onClick={() => handleAutoFill(false, "price")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="modal-p-pack">Taille du Lot (pack)</label>
+                          <input
+                            id="modal-p-pack"
+                            type="number"
+                            min={1}
+                            value={newProduct.pack_size}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, pack_size: Number(e.target.value) || 1 }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Taille Lot"
+                          disabled={autoFillLoading["pack_size"]}
+                          onClick={() => handleAutoFill(false, "pack_size")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 5. Caractéristiques Physiques */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">5. Caractéristiques Physiques</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="modal-p-largeur">Largeur (mm)</label>
+                          <input
+                            id="modal-p-largeur"
+                            type="text"
+                            placeholder="Largeur"
+                            value={newProduct.largeur}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, largeur: e.target.value }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Largeur"
+                          disabled={autoFillLoading["largeur"]}
+                          onClick={() => handleAutoFill(false, "largeur")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="modal-p-hauteur">Hauteur (mm)</label>
+                          <input
+                            id="modal-p-hauteur"
+                            type="text"
+                            placeholder="Hauteur"
+                            value={newProduct.hauteur}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, hauteur: e.target.value }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Hauteur"
+                          disabled={autoFillLoading["hauteur"]}
+                          onClick={() => handleAutoFill(false, "hauteur")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="modal-p-profondeur">Profondeur (mm)</label>
+                          <input
+                            id="modal-p-profondeur"
+                            type="text"
+                            placeholder="Profondeur"
+                            value={newProduct.profondeur}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, profondeur: e.target.value }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Profondeur"
+                          disabled={autoFillLoading["profondeur"]}
+                          onClick={() => handleAutoFill(false, "profondeur")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="modal-p-poids">Poids (g)</label>
+                          <input
+                            id="modal-p-poids"
+                            type="text"
+                            placeholder="Poids"
+                            value={newProduct.poids}
+                            onChange={(e) => setNewProduct(prev => ({ ...prev, poids: e.target.value }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Poids"
+                          disabled={autoFillLoading["poids"]}
+                          onClick={() => handleAutoFill(false, "poids")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowAddModal(false)}>Annuler</button>
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowAddModal(false); setAutoFillSource(null); }}>Annuler</button>
                 <button type="submit" className="btn">Créer le SKU</button>
               </div>
             </form>
@@ -3557,143 +3855,362 @@ function App() {
           <div className="modal-container">
             <div className="modal-header">
               <h3>Modifier le SKU : {editProduct.sku}</h3>
-              <button className="modal-close" onClick={() => setShowEditModal(false)}>×</button>
+              <button className="modal-close" onClick={() => { setShowEditModal(false); setAutoFillSource(null); }}>×</button>
             </div>
             <form onSubmit={handleEditProduct}>
               <div className="modal-body">
                 {editSuccess && <div className="wizard-error" style={{ color: "var(--success)", backgroundColor: "var(--success-light)", borderColor: "rgba(16,185,129,0.2)" }}>{editSuccess}</div>}
                 {editError && <div className="wizard-error">{editError}</div>}
 
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="edit-p-mpn">Référence Fabricant (MPN)</label>
-                  <input
-                    id="edit-p-mpn"
-                    type="text"
-                    list="mpns-datalist"
-                    value={editProduct.mpn}
-                    onChange={(e) => setEditProduct(prev => ({ ...prev, mpn: e.target.value }))}
-                    placeholder="Saisie libre (laissé vide = identique SKU)"
-                  />
+                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)", alignItems: "center" }}>
+                  <span style={{ fontSize: "11px", color: "var(--text-secondary)", flex: 1 }}>
+                    💡 Utilisez le bouton global ou les boutons 🔍 individuels pour auto-remplir les données modifiables depuis le site VPC.
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ padding: "0.4rem 0.8rem", fontSize: "11px", whiteSpace: "nowrap" }}
+                    disabled={autoFillLoading["ALL"]}
+                    onClick={() => handleAutoFill(true)}
+                  >
+                    {autoFillLoading["ALL"] ? "⏳ Remplissage..." : "🔍 Auto-remplir tout"}
+                  </button>
                 </div>
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="edit-p-label">Désignation Produit *</label>
-                  <input
-                    id="edit-p-label"
-                    type="text"
-                    required
-                    list="labels-datalist"
-                    value={editProduct.label}
-                    onChange={(e) => setEditProduct(prev => ({ ...prev, label: e.target.value }))}
-                    placeholder="ex: Siemens S7-1500 PS 60W"
-                  />
-                </div>
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="edit-p-brand">Marque</label>
-                  <input
-                    id="edit-p-brand"
-                    type="text"
-                    list="brands-datalist"
-                    value={editProduct.brand}
-                    onChange={(e) => setEditProduct(prev => ({ ...prev, brand: e.target.value }))}
-                    placeholder="ex: Siemens"
-                  />
-                </div>
-                <div className="row" style={{ gap: "1rem", marginBottom: "1rem", justifyContent: "stretch" }}>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="edit-p-cat">Famille</label>
-                    <input
-                      id="edit-p-cat"
-                      type="text"
-                      list="categories-datalist"
-                      value={editProduct.category}
-                      onChange={(e) => setEditProduct(prev => ({ ...prev, category: e.target.value }))}
-                      placeholder="ex: Automatisme"
-                    />
+
+                {autoFillSource && (
+                  <div className="autofill-source-info">
+                    🌐 Source détectée : <a href={autoFillSource} target="_blank" rel="noopener noreferrer">{autoFillSource}</a>
                   </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="edit-p-subcat">Sous-Famille</label>
-                    <input
-                      id="edit-p-subcat"
-                      type="text"
-                      list="edit-subcategories-datalist"
-                      value={editProduct.sub_category}
-                      onChange={(e) => setEditProduct(prev => ({ ...prev, sub_category: e.target.value }))}
-                      placeholder="ex: Alimentation"
-                    />
+                )}
+
+                {/* 1. Identification */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">1. Identification</div>
+                  
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="edit-p-mpn">Référence Fabricant (MPN)</label>
+                          <input
+                            id="edit-p-mpn"
+                            type="text"
+                            list="mpns-datalist"
+                            value={editProduct.mpn}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, mpn: e.target.value }))}
+                            placeholder="Identique SKU si vide"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir MPN"
+                          disabled={autoFillLoading["mpn"]}
+                          onClick={() => handleAutoFill(true, "mpn")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div className="row" style={{ gap: "1rem", marginBottom: "1rem", justifyContent: "stretch" }}>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="edit-p-vpc-site">Fournisseur VPC</label>
-                    <select
-                      id="edit-p-vpc-site"
-                      value={editVpcSite}
-                      onChange={(e) => setEditVpcSite(e.target.value)}
-                    >
-                      <option value="">Sélectionner</option>
-                      {config?.vpc_sites?.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="edit-p-vpc-code">Code VPC (Catalogue)</label>
-                    <input
-                      id="edit-p-vpc-code"
-                      type="text"
-                      placeholder="ex: RS-123-456"
-                      value={editVpcCode}
-                      onChange={(e) => setEditVpcCode(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="edit-p-loc">Emplacement Physique</label>
-                  <input
-                    id="edit-p-loc"
-                    type="text"
-                    list="locations-datalist"
-                    value={editProduct.location}
-                    onChange={(e) => setEditProduct(prev => ({ ...prev, location: e.target.value }))}
-                    placeholder="ex: MAG-A1-E2-B3"
-                  />
-                </div>
-                <div className="row" style={{ gap: "1rem", justifyContent: "stretch" }}>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="edit-p-min">Seuil d'Alerte Stock</label>
-                    <input
-                      id="edit-p-min"
-                      type="number"
-                      min={0}
-                      list="minstocks-datalist"
-                      value={editProduct.min_stock}
-                      onChange={(e) => setEditProduct(prev => ({ ...prev, min_stock: Number(e.target.value) || 0 }))}
-                    />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="edit-p-price">Prix d'Achat (€)</label>
-                    <input
-                      id="edit-p-price"
-                      type="number"
-                      step="0.01"
-                      min={0}
-                      list="prices-datalist"
-                      value={editProduct.price}
-                      onChange={(e) => setEditProduct(prev => ({ ...prev, price: Number(e.target.value) || 0 }))}
-                    />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label htmlFor="edit-p-pack">Taille du Lot (pack)</label>
-                    <input
-                      id="edit-p-pack"
-                      type="number"
-                      min={1}
-                      value={editProduct.pack_size}
-                      onChange={(e) => setEditProduct(prev => ({ ...prev, pack_size: Number(e.target.value) || 1 }))}
-                    />
+
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 3 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="edit-p-label">Désignation Produit *</label>
+                          <input
+                            id="edit-p-label"
+                            type="text"
+                            required
+                            list="labels-datalist"
+                            value={editProduct.label}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, label: e.target.value }))}
+                            placeholder="ex: Siemens S7-1500 PS 60W"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Désignation"
+                          disabled={autoFillLoading["label"]}
+                          onClick={() => handleAutoFill(true, "label")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="edit-p-brand">Marque</label>
+                          <input
+                            id="edit-p-brand"
+                            type="text"
+                            list="brands-datalist"
+                            value={editProduct.brand}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, brand: e.target.value }))}
+                            placeholder="ex: Siemens"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Marque"
+                          disabled={autoFillLoading["brand"]}
+                          onClick={() => handleAutoFill(true, "brand")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
+
+                {/* 2. Fournisseur VPC */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">2. Fournisseur VPC</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="edit-p-vpc-site">Fournisseur VPC</label>
+                      <select
+                        id="edit-p-vpc-site"
+                        value={editVpcSite}
+                        onChange={(e) => setEditVpcSite(e.target.value)}
+                      >
+                        <option value="">Sélectionner</option>
+                        {config?.vpc_sites?.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="edit-p-vpc-code">Code VPC (Catalogue)</label>
+                      <input
+                        id="edit-p-vpc-code"
+                        type="text"
+                        placeholder="ex: RS-123-456"
+                        value={editVpcCode}
+                        onChange={(e) => setEditVpcCode(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Classification */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">3. Classification</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="edit-p-cat">Famille (Sans auto-remplissage)</label>
+                      <input
+                        id="edit-p-cat"
+                        type="text"
+                        list="categories-datalist"
+                        value={editProduct.category}
+                        onChange={(e) => setEditProduct(prev => ({ ...prev, category: e.target.value }))}
+                        placeholder="ex: Automatisme"
+                      />
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="edit-p-subcat">Sous-Famille (Sans auto-remplissage)</label>
+                      <input
+                        id="edit-p-subcat"
+                        type="text"
+                        list="edit-subcategories-datalist"
+                        value={editProduct.sub_category}
+                        onChange={(e) => setEditProduct(prev => ({ ...prev, sub_category: e.target.value }))}
+                        placeholder="ex: Alimentation"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4. Logistique */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">4. Logistique</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <label htmlFor="edit-p-loc">Emplacement Physique</label>
+                      <input
+                        id="edit-p-loc"
+                        type="text"
+                        list="locations-datalist"
+                        value={editProduct.location}
+                        onChange={(e) => setEditProduct(prev => ({ ...prev, location: e.target.value }))}
+                        placeholder="ex: MAG-A1-E2-B3"
+                      />
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="edit-p-min">Seuil Alerte Stock</label>
+                      <input
+                        id="edit-p-min"
+                        type="number"
+                        min={0}
+                        list="minstocks-datalist"
+                        value={editProduct.min_stock}
+                        onChange={(e) => setEditProduct(prev => ({ ...prev, min_stock: Number(e.target.value) || 0 }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="edit-p-price">Prix d'Achat (€)</label>
+                          <input
+                            id="edit-p-price"
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            list="prices-datalist"
+                            value={editProduct.price}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, price: Number(e.target.value) || 0 }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Prix"
+                          disabled={autoFillLoading["price"]}
+                          onClick={() => handleAutoFill(true, "price")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="edit-p-pack">Taille du Lot (pack)</label>
+                          <input
+                            id="edit-p-pack"
+                            type="number"
+                            min={1}
+                            value={editProduct.pack_size}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, pack_size: Number(e.target.value) || 1 }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Taille Lot"
+                          disabled={autoFillLoading["pack_size"]}
+                          onClick={() => handleAutoFill(true, "pack_size")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 5. Caractéristiques Physiques */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">5. Caractéristiques Physiques</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="edit-p-largeur">Largeur (mm)</label>
+                          <input
+                            id="edit-p-largeur"
+                            type="text"
+                            placeholder="Largeur"
+                            value={editProduct.largeur}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, largeur: e.target.value }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Largeur"
+                          disabled={autoFillLoading["largeur"]}
+                          onClick={() => handleAutoFill(true, "largeur")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="edit-p-hauteur">Hauteur (mm)</label>
+                          <input
+                            id="edit-p-hauteur"
+                            type="text"
+                            placeholder="Hauteur"
+                            value={editProduct.hauteur}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, hauteur: e.target.value }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Hauteur"
+                          disabled={autoFillLoading["hauteur"]}
+                          onClick={() => handleAutoFill(true, "hauteur")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="edit-p-profondeur">Profondeur (mm)</label>
+                          <input
+                            id="edit-p-profondeur"
+                            type="text"
+                            placeholder="Profondeur"
+                            value={editProduct.profondeur}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, profondeur: e.target.value }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Profondeur"
+                          disabled={autoFillLoading["profondeur"]}
+                          onClick={() => handleAutoFill(true, "profondeur")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="field-with-autofill">
+                        <div style={{ flex: 1 }}>
+                          <label htmlFor="edit-p-poids">Poids (g)</label>
+                          <input
+                            id="edit-p-poids"
+                            type="text"
+                            placeholder="Poids"
+                            value={editProduct.poids}
+                            onChange={(e) => setEditProduct(prev => ({ ...prev, poids: e.target.value }))}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-field-autofill"
+                          title="Auto-remplir Poids"
+                          disabled={autoFillLoading["poids"]}
+                          onClick={() => handleAutoFill(true, "poids")}
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowEditModal(false)}>Annuler</button>
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowEditModal(false); setAutoFillSource(null); }}>Annuler</button>
                 <button type="submit" className="btn">Enregistrer</button>
               </div>
             </form>

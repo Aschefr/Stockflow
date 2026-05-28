@@ -814,14 +814,26 @@ table.spreadsheet tr.batch-selected {
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 12px;
-  width: 90%;
-  max-width: 600px;
-  max-height: 90vh;
+  width: 60vw;
+  max-width: 950px;
+  min-width: 320px;
+  max-height: 85vh;
   display: flex;
   flex-direction: column;
   box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
   animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
   overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .modal-container {
+    width: 92vw;
+    max-height: 90vh;
+  }
+  .modal-field-row {
+    flex-direction: column !important;
+    gap: 0.75rem !important;
+  }
 }
 
 .modal-header {
@@ -862,9 +874,112 @@ table.spreadsheet tr.batch-selected {
 }
 
 .modal-body {
-  padding: 1.5rem;
+  padding: 0.75rem;
   overflow-y: auto;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Groupes de champs sémantiques */
+.modal-field-group {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  background-color: rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.modal-field-group-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--accent-color, #3b82f6);
+  margin-top: -0.2rem;
+  margin-bottom: 0.15rem;
+  padding-bottom: 0.15rem;
+  border-bottom: 1px dashed var(--border-color);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Lignes de champs flexibles */
+.modal-field-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  width: 100%;
+}
+
+.modal-field-row .form-group {
+  margin-bottom: 0 !important;
+}
+
+.modal-field-row label {
+  margin-bottom: 0.2rem !important;
+  font-size: 0.75rem !important;
+}
+
+.modal-field-row input, .modal-field-row select {
+  height: 32px !important;
+  padding: 0.25rem 0.5rem !important;
+  font-size: 0.8rem !important;
+}
+
+/* Boutons auto-fill par champ et bannière source */
+.field-with-autofill {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.btn-field-autofill {
+  background-color: var(--bg-tertiary, #1e293b);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 0;
+  font-size: 0.75rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  height: 32px;
+  width: 32px;
+  margin-top: 1.25rem;
+}
+
+.btn-field-autofill:hover {
+  background-color: var(--accent-color, #3b82f6);
+  color: white;
+  border-color: var(--accent-color, #3b82f6);
+}
+
+.btn-field-autofill:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.autofill-source-info {
+  background-color: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: 6px;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.autofill-source-info a {
+  color: var(--accent-color, #3b82f6);
+  text-decoration: underline;
+  word-break: break-all;
 }
 
 .modal-footer {

@@ -5,6 +5,40 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.3.1] - 2026-05-28
+
+### Correctif et Amélioration du Scraping RS & Cloudflare Bypass
+- **Contournement de la protection Akamai/Cloudflare :** Ajout d'un mécanisme de bascule automatique vers le miroir `ma.rsdelivers.com` si la requête directe vers le domaine RS principal (ex: `fr.rs-online.com`) retourne un code d'erreur HTTP 403 (Accès refusé).
+- **Extraction précise des métadonnées de produit :** Extraction directe des informations structurées (MPN réel `0803874`, désignation complète, marque `Phoenix Contact`, lot de conditionnement) depuis la page produit de secours.
+- **Conversion de devise intelligente :** Conversion automatique des prix de MAD (Dirhams Marocains) vers l'EUR (Euros) en appliquant le taux de change de référence lorsque le site configuré est européen, évitant l'utilisation de prix de seuil de livraison incorrects (50.00 €).
+- **Correctif d'Image et de PDF :** Récupération réussie du PDF de datasheet réel et des images de produit sur Cloudinary en s'appuyant sur le MPN et le code VPC de secours correctement résolus.
+
+## [1.3.0] - 2026-05-28
+
+- **Refonte des Modales de SKU (Création & Modification) :**
+  - Passage à une largeur dynamique de `60vw` (maximum `950px`) s'adaptant automatiquement à `92vw` sur les écrans de moins de `900px` (design responsive mobile/tablette à une colonne).
+  - Organisation des champs de saisie en **5 groupes sémantiques** distincts avec des bordures et fonds subtils :
+    1. *Identification* (SKU, MPN, Désignation, Marque)
+    2. *Classification* (Famille, Sous-famille)
+    3. *Fournisseur VPC* (Site et Code catalogue)
+    4. *Logistique* (Emplacement, Seuil, Prix, Taille lot)
+    5. *Caractéristiques Physiques* (Largeur, Hauteur, Profondeur, Poids)
+  - Adaptation de la largeur des champs au contenu attendu (désignation sur une largeur flexible 3, marque/emplacement sur 2, et dimensions/poids/prix sur 1).
+  - Intégration complète des dimensions physiques (`largeur`, `hauteur`, `profondeur`) et du `poids` auparavant masqués. Extraction et sauvegarde dynamique dans le JSON `attributes` de la base locale SQLite et de l'Event Store réseau.
+
+- **Auto-remplissage Granulaire (Per-Field Auto-fill) :**
+  - Ajout de boutons de recherche individuels (🔍) à côté de chaque champ d'information (sauf Famille et Sous-Famille). Ces boutons permettent de scraper et de ne mettre à jour que le champ cible de manière ciblée, sans toucher aux autres saisies manuelles.
+  - Conservation du bouton global d'auto-remplissage complet ("Auto-remplir tout").
+  - Ajout d'une bannière informative indiquant l'URL source exacte utilisée par le scraper pour récupérer les données.
+
+- **Correctif VPC RS & Scraper Backend :**
+  - Correction de `scrape_product_details_internal` dans `scraper.rs` : remplacement de l'URL brute `ma.rsdelivers.com` codée en dur par une résolution dynamique utilisant le domaine configuré dans les paramètres de l'application (fallback sur `fr.rs-online.com`).
+  - Intégration de la temporisation anti-spam de 1500 ms (via le mutex `LAST_RS_REQUEST`) sur le scraper de détails pour éviter les blocages VPC.
+  - Suppression complète du repli de secours mocké (données factices de Siemens/Schneider renvoyées en cas d'erreur de scraping) pour garantir l'intégrité des informations réelles et retourner une vraie erreur claire.
+  - Ajout de `source_url: Option<String>` dans la structure `ScrapedProductDetails` pour faire remonter l'URL de scraping jusqu'au front-end.
+
+---
+
 ## [2026-05-25] Initialisation du projet et de la phase de planification
 
 - **Planification :** Création et validation du plan d'architecture global (`PLAN_AMELIORE.md`) basé sur Tauri (Rust + React) et un système d'Event-Sourcing sur lecteur réseau.

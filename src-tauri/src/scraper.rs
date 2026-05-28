@@ -1107,6 +1107,21 @@ pub fn scrape_images_internal(
     Ok(downloaded)
 }
 
+
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ScrapedProductDetails {
+    pub sku: String,
+    pub mpn: String,
+    pub label: String,
+    pub brand: String,
+    pub price: f64,
+    pub pack_size: i64,
+    pub dimensions: Option<String>,
+    pub weight: Option<String>,
+    pub source_url: Option<String>,
+}
+
 fn scrape_farnell_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -1156,6 +1171,7 @@ fn scrape_farnell_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails,
                     pack_size,
                     dimensions: None,
                     weight: None,
+                    source_url: Some(url),
                 });
             }
         }
@@ -1209,6 +1225,7 @@ fn scrape_mouser_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, 
                     }
                 }
 
+                let search_url = format!("https://www.mouser.fr/c/?q={}", urlencoding::encode(sku));
                 return Ok(ScrapedProductDetails {
                     sku: sku_val,
                     mpn,
@@ -1218,23 +1235,12 @@ fn scrape_mouser_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, 
                     pack_size,
                     dimensions: None,
                     weight: None,
+                    source_url: Some(search_url),
                 });
             }
         }
     }
     Err("Mouser API call failed or product not found".to_string())
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ScrapedProductDetails {
-    pub sku: String,
-    pub mpn: String,
-    pub label: String,
-    pub brand: String,
-    pub price: f64,
-    pub pack_size: i64,
-    pub dimensions: Option<String>,
-    pub weight: Option<String>,
 }
 
 pub fn scrape_product_details_internal(
@@ -1249,6 +1255,7 @@ pub fn scrape_product_details_internal(
 
     let config = crate::config::load_config_internal();
     let api_keys = config.as_ref().map(|c| &c.vpc_api_keys);
+    let vpc_urls = config.as_ref().map(|c| c.vpc_urls.clone()).unwrap_or_default();
 
     if vpc_site.to_lowercase().contains("farnell") {
         if let Some(key) = api_keys.and_then(|keys| keys.get(vpc_site).or_else(|| keys.get("Farnell"))) {
@@ -1275,145 +1282,352 @@ pub fn scrape_product_details_internal(
         code_to_use.to_string()
     };
 
+    // Temporisation anti-spam pour RS (1500 ms)
+    if let Ok(mut last_req) = LAST_RS_REQUEST.lock() {
+        if let Some(last) = *last_req {
+            let elapsed = last.elapsed();
+            if elapsed < Duration::from_millis(1500) {
+                std::thread::sleep(Duration::from_millis(1500) - elapsed);
+            }
+        }
+        *last_req = Some(std::time::Instant::now());
+    }
+
+    let mut rs_domain = "fr.rs-online.com".to_string();
+    if let Some(custom) = vpc_urls.get(vpc_site) {
+        if !custom.trim().is_empty() {
+            rs_domain = custom.trim().to_string();
+        }
+    } else if let Some(custom) = vpc_urls.get("RS") {
+        if !custom.trim().is_empty() {
+            rs_domain = custom.trim().to_string();
+        }
+    }
+
     // Tenter de scrapper en direct
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36")
         .build()
         .map_err(|e| e.to_string())?;
 
-    let direct_url = if rs_code.chars().all(char::is_numeric) && rs_code.len() == 7 {
-        format!("https://ma.rsdelivers.com/product/a/a/a/{}", rs_code)
+    let direct_url = if rs_domain.contains("rsdelivers") {
+        format!("https://{}/product/a/a/a/{}", rs_domain, rs_code)
     } else {
-        format!("https://ma.rsdelivers.com/product/a/a/a/{}", rs_code) // fallback search
+        format!("https://{}/web/c/?searchTerm={}", rs_domain, rs_code)
     };
 
-    if let Ok(res) = client.get(&direct_url).send() {
+    let mut html_opt = None;
+    let mut final_url = direct_url.clone();
+    let mut is_ma_rs = false;
+
+    if let Ok(res) = client.get(&direct_url)
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+        .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+        .header("Sec-Fetch-Dest", "document")
+        .header("Sec-Fetch-Mode", "navigate")
+        .header("Sec-Fetch-Site", "none")
+        .header("Sec-Fetch-User", "?1")
+        .header("Upgrade-Insecure-Requests", "1")
+        .send() {
         if res.status().is_success() {
             if let Ok(html) = res.text() {
-                let mut mpn = String::new();
-                let mut sku_val = rs_code.clone();
-                let mut weight: Option<String> = None;
-                
-                let json_ld_blocks = re_find_json_ld(&html);
-                for block in json_ld_blocks {
-                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&block) {
-                        if data.get("@type").and_then(|v| v.as_str()) == Some("Product") {
-                            let label = data.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let brand = data.get("brand").and_then(|v| {
-                                v.get("name").and_then(|n| n.as_str())
-                                 .or_else(|| v.as_str())
-                            }).unwrap_or("").to_string();
-                            let manufacturer = data.get("manufacturer").and_then(|v| v.as_str()).unwrap_or("");
-                            let final_brand = if brand.is_empty() { manufacturer.to_string() } else { brand };
-                            
-                            let mut price = 0.0;
-                            if let Some(offers) = data.get("offers") {
-                                if let Some(low_p) = offers.get("lowPrice").and_then(|v| v.as_f64()) {
-                                    price = low_p;
-                                } else if let Some(p_val) = offers.get("price").and_then(|v| v.as_f64()) {
-                                    price = p_val;
-                                }
-                            }
-                            
-                            let mut pack_size = 1;
-                            let html_lower = html.to_lowercase();
-                            if let Some(pos) = html_lower.find("paquet de ") {
-                                let sub = &html_lower[pos + 10 ..];
-                                let num_str: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
-                                if let Ok(val) = num_str.parse::<i64>() {
-                                    pack_size = val;
-                                }
-                            } else if let Some(pos) = html_lower.find("pack of ") {
-                                let sub = &html_lower[pos + 8 ..];
-                                let num_str: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
-                                if let Ok(val) = num_str.parse::<i64>() {
-                                    pack_size = val;
-                                }
-                            } else if let Some(pos) = html_lower.find("lot de ") {
-                                let sub = &html_lower[pos + 7 ..];
-                                let num_str: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
-                                if let Ok(val) = num_str.parse::<i64>() {
-                                    pack_size = val;
-                                }
-                            }
-
-                            if let Some(mpn_val) = data.get("mpn").and_then(|v| v.as_str()) {
-                                mpn = mpn_val.to_string();
-                            } else if let Some(product_id) = data.get("productID").and_then(|v| v.as_str()) {
-                                mpn = product_id.to_string();
-                            }
-                            if let Some(sku_str) = data.get("sku").and_then(|v| v.as_str()) {
-                                sku_val = sku_str.to_string();
-                            }
-
-                            // Try to extract weight
-                            if let Some(w_obj) = data.get("weight").and_then(|v| v.as_object()) {
-                                if let Some(v) = w_obj.get("value").and_then(|v| v.as_f64()) {
-                                    weight = Some(format!("{}", v * 1000.0)); // to grams approx if kg, but let's just keep as string
-                                }
-                            }
-
-                            if mpn.is_empty() {
-                                mpn = rs_code.clone();
-                            }
-
-                            return Ok(ScrapedProductDetails {
-                                sku: sku_val,
-                                mpn,
-                                label,
-                                brand: final_brand,
-                                price,
-                                pack_size,
-                                dimensions: None, // Hard to extract reliably from JSON-LD without deep parsing
-                                weight,
-                            });
-                        }
-                    }
-                }
-                
-                // If not found in JSON-LD, try rudimentary HTML extraction for mpn/sku
-                if mpn.is_empty() {
-                    mpn = rs_code.clone();
-                }
-
-                return Ok(ScrapedProductDetails {
-                    sku: sku_val,
-                    mpn,
-                    label: format!("Produit automatique - {}", rs_code),
-                    brand: "Inconnue".to_string(),
-                    price: 0.0,
-                    pack_size: 1,
-                    dimensions: None,
-                    weight: None,
-                });
+                html_opt = Some(html);
             }
         }
     }
 
-    // Repli de secours mocké
-    let (label, brand, price, pack_size) = if code_to_use == "746-5347" || code_to_use == "7465347" {
-        ("Connecteur RJ45 FastConnect 180 Siemens".to_string(), "Siemens".to_string(), 15.50, 1)
-    } else if code_to_use == "6ES7511-1AK02-0AB0" {
-        ("CPU 1511-1 PN S7-1500".to_string(), "Siemens".to_string(), 1280.0, 1)
-    } else {
-        let hash = code_to_use.chars().fold(0, |acc, c| acc + c as usize);
-        let brand = if hash % 2 == 0 { "Siemens".to_string() } else { "Schneider Electric".to_string() };
-        let label = format!("Produit automatique - {}", code_to_use);
-        let price = (hash % 120) as f64 + 19.99;
-        let pack_size = if hash % 7 == 0 { 10 } else { 1 };
-        (label, brand, price, pack_size)
-    };
+    // Si le scraping direct a échoué (403 bloqué par Akamai/Cloudflare sur fr.rs-online.com), 
+    // on utilise ma.rsdelivers.com qui possède la même structure de page mais sans le blocage strict des clients HTTP.
+    if html_opt.is_none() {
+        let ma_url = format!("https://ma.rsdelivers.com/product/a/a/a/{}", rs_code);
+        if let Ok(res) = client.get(&ma_url)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36")
+            .send() {
+            if res.status().is_success() {
+                if let Ok(html) = res.text() {
+                    html_opt = Some(html);
+                    final_url = ma_url;
+                    is_ma_rs = true;
+                }
+            }
+        }
+    }
 
-    Ok(ScrapedProductDetails {
-        sku: code_to_use.to_string(),
-        mpn: code_to_use.to_string(),
-        label,
-        brand,
-        price,
-        pack_size,
-        dimensions: Some("100x100x50".to_string()),
-        weight: Some("500".to_string()),
-    })
+    if let Some(html) = html_opt {
+        let mut mpn = String::new();
+        let mut sku_val = rs_code.clone();
+        let mut weight: Option<String> = None;
+        
+        let json_ld_blocks = re_find_json_ld(&html);
+        for block in json_ld_blocks {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&block) {
+                if data.get("@type").and_then(|v| v.as_str()) == Some("Product") {
+                    let label = data.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let brand = data.get("brand").and_then(|v| {
+                        v.get("name").and_then(|n| n.as_str())
+                         .or_else(|| v.as_str())
+                    }).unwrap_or("").to_string();
+                    let manufacturer = data.get("manufacturer").and_then(|v| v.as_str()).unwrap_or("");
+                    let final_brand = if brand.is_empty() { manufacturer.to_string() } else { brand };
+                    
+                    let mut price = 0.0;
+                    if let Some(offers) = data.get("offers") {
+                        if let Some(low_p) = offers.get("lowPrice").and_then(|v| v.as_f64()) {
+                            price = low_p;
+                        } else if let Some(p_val) = offers.get("price").and_then(|v| v.as_f64()) {
+                            price = p_val;
+                        }
+                    }
+                    
+                    // Si on a récupéré la page via ma.rsdelivers.com (prix en MAD), 
+                    // et que la config attend du EUR (ex: fr.rs-online.com), on applique le taux de conversion standard
+                    if is_ma_rs && !rs_domain.contains("rsdelivers") {
+                        price = (price / 10.8 * 100.0).round() / 100.0;
+                    }
+                    
+                    let mut pack_size = 1;
+                    let html_lower = html.to_lowercase();
+                    if let Some(pos) = html_lower.find("paquet de ") {
+                        let sub = &html_lower[pos + 10 ..];
+                        let num_str: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
+                        if let Ok(val) = num_str.parse::<i64>() {
+                            pack_size = val;
+                        }
+                    } else if let Some(pos) = html_lower.find("pack of ") {
+                        let sub = &html_lower[pos + 8 ..];
+                        let num_str: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
+                        if let Ok(val) = num_str.parse::<i64>() {
+                            pack_size = val;
+                        }
+                    } else if let Some(pos) = html_lower.find("lot de ") {
+                        let sub = &html_lower[pos + 7 ..];
+                        let num_str: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
+                        if let Ok(val) = num_str.parse::<i64>() {
+                            pack_size = val;
+                        }
+                    }
+
+                    if let Some(mpn_val) = data.get("mpn").and_then(|v| v.as_str()) {
+                        mpn = mpn_val.to_string();
+                    } else if let Some(product_id) = data.get("productID").and_then(|v| v.as_str()) {
+                        mpn = product_id.to_string();
+                    }
+                    if let Some(sku_str) = data.get("sku").and_then(|v| v.as_str()) {
+                        sku_val = sku_str.to_string();
+                    }
+
+                    // Try to extract weight
+                    if let Some(w_obj) = data.get("weight").and_then(|v| v.as_object()) {
+                        if let Some(v) = w_obj.get("value").and_then(|v| v.as_f64()) {
+                            weight = Some(format!("{}", v * 1000.0));
+                        }
+                    }
+
+                    if mpn.is_empty() {
+                        mpn = rs_code.clone();
+                    }
+
+                    return Ok(ScrapedProductDetails {
+                        sku: sku_val,
+                        mpn,
+                        label,
+                        brand: final_brand,
+                        price,
+                        pack_size,
+                        dimensions: None,
+                        weight,
+                        source_url: Some(final_url),
+                    });
+                }
+            }
+        }
+        
+        // If not found in JSON-LD, try rudimentary HTML extraction for mpn/sku
+        if mpn.is_empty() {
+            mpn = rs_code.clone();
+        }
+
+        return Ok(ScrapedProductDetails {
+            sku: sku_val,
+            mpn,
+            label: format!("Produit automatique - {}", rs_code),
+            brand: "Inconnue".to_string(),
+            price: 0.0,
+            pack_size: 1,
+            dimensions: None,
+            weight: None,
+            source_url: Some(final_url),
+        });
+    }
+
+    // Tenter SearxNG en dernier recours si le scraping direct a échoué (par exemple bloqué par Cloudflare)
+    if let Some(s_url) = config.as_ref().and_then(|c| c.searxng_url.as_ref()) {
+        let mut target_domain = rs_domain.clone();
+        if vpc_site.to_lowercase().contains("farnell") {
+            target_domain = vpc_urls.get(vpc_site)
+                .or_else(|| vpc_urls.get("Farnell"))
+                .cloned()
+                .unwrap_or_else(|| "fr.farnell.com".to_string());
+        } else if vpc_site.to_lowercase().contains("mouser") {
+            target_domain = vpc_urls.get(vpc_site)
+                .or_else(|| vpc_urls.get("Mouser"))
+                .cloned()
+                .unwrap_or_else(|| "www.mouser.fr".to_string());
+        } else if vpc_site.to_lowercase().contains("conrad") {
+            target_domain = vpc_urls.get(vpc_site)
+                .or_else(|| vpc_urls.get("Conrad"))
+                .cloned()
+                .unwrap_or_else(|| "www.conrad.fr".to_string());
+        }
+
+        let clean_domain = target_domain
+            .replace("https://", "")
+            .replace("http://", "")
+            .trim_end_matches('/')
+            .to_string();
+
+        let sku_lower = sku.to_lowercase();
+        let vpc_lower = vpc_code.to_lowercase();
+        let clean_sku: String = sku_lower.chars().filter(|c| c.is_ascii_digit()).collect();
+        let clean_vpc: String = vpc_lower.chars().filter(|c| c.is_ascii_digit()).collect();
+        let clean_sku_padded = if !clean_sku.is_empty() { format!("{:0>7}", clean_sku) } else { "".to_string() };
+        let clean_vpc_padded = if !clean_vpc.is_empty() { format!("{:0>7}", clean_vpc) } else { "".to_string() };
+
+        let q = if !vpc_code.is_empty() && vpc_code != sku {
+            format!("site:{} {} OR {} OR {}", clean_domain, sku, vpc_code, clean_vpc_padded)
+        } else {
+            format!("site:{} {} OR {}", clean_domain, sku, clean_sku_padded)
+        };
+
+        let search_url = format!("{}/search?q={}&format=json", s_url.trim_end_matches('/'), urlencoding::encode(&q));
+        if let Ok(res) = client.get(&search_url).send() {
+            if res.status().is_success() {
+                if let Ok(json) = res.json::<serde_json::Value>() {
+                    if let Some(results) = json["results"].as_array() {
+                        for r in results {
+                            let title = r["title"].as_str().unwrap_or("").to_string();
+                            let snippet = r["content"].as_str().unwrap_or("").to_string();
+                            let url = r["url"].as_str().unwrap_or("").to_string();
+
+                            let title_lower = title.to_lowercase();
+                            let snippet_lower = snippet.to_lowercase();
+
+                            let has_code_in_url = (!sku_lower.is_empty() && url.contains(&sku_lower))
+                                || (!vpc_lower.is_empty() && url.contains(&vpc_lower))
+                                || (!clean_sku.is_empty() && url.contains(&clean_sku))
+                                || (!clean_vpc.is_empty() && url.contains(&clean_vpc))
+                                || (!clean_sku_padded.is_empty() && url.contains(&clean_sku_padded))
+                                || (!clean_vpc_padded.is_empty() && url.contains(&clean_vpc_padded));
+
+                            let is_relevant = has_code_in_url && (
+                                url.contains("/product/") 
+                                || url.contains("/p/") 
+                                || url.contains("/web/p/")
+                            );
+
+                            if !title.is_empty() && !url.ends_with(".pdf") && is_relevant {
+                                let price = extract_price_from_text(&snippet)
+                                    .or_else(|| extract_price_from_text(&title))
+                                    .unwrap_or(0.0);
+
+                                let mut brand = "Inconnue".to_string();
+                                let title_lower = title.to_lowercase();
+                                let snippet_lower = snippet.to_lowercase();
+
+                                let common_brands = vec![
+                                    "siemens", "schneider", "phoenix contact", "abb", "wago", 
+                                    "legrand", "rs pro", "rs", "conrad", "eaton", "harting", 
+                                    "weidmuller", "omron", "sick", "pilz", "keyence", "smc", 
+                                    "festo", "te connectivity", "molex", "fluke"
+                                ];
+                                for b in common_brands {
+                                    if title_lower.contains(b) || snippet_lower.contains(b) {
+                                        brand = b.to_uppercase();
+                                        break;
+                                    }
+                                }
+
+                                let mut clean_label = title.clone();
+                                if let Some(pos) = clean_label.find('|') {
+                                    let after_pipe = clean_label[pos+1..].to_lowercase();
+                                    if after_pipe.contains("rs") || after_pipe.contains("conrad") || after_pipe.contains("farnell") || after_pipe.contains("mouser") {
+                                        clean_label = clean_label[..pos].trim().to_string();
+                                    }
+                                }
+                                if clean_label.contains('-') {
+                                    let parts: Vec<&str> = clean_label.split('-').collect();
+                                    if parts.len() > 1 && (parts.last().unwrap().to_lowercase().contains("rs") || parts.last().unwrap().to_lowercase().contains("conrad")) {
+                                        clean_label = parts[..parts.len()-1].join("-").trim().to_string();
+                                    }
+                                }
+
+                                // Réécriture dynamique du domaine pour utiliser la langue / pays configuré
+                                let mut clean_url = url.clone();
+                                let mut target_domain = rs_domain.clone();
+                                if vpc_site.to_lowercase().contains("farnell") {
+                                    target_domain = vpc_urls.get(vpc_site)
+                                        .or_else(|| vpc_urls.get("Farnell"))
+                                        .cloned()
+                                        .unwrap_or_else(|| "fr.farnell.com".to_string());
+                                } else if vpc_site.to_lowercase().contains("mouser") {
+                                    target_domain = vpc_urls.get(vpc_site)
+                                        .or_else(|| vpc_urls.get("Mouser"))
+                                        .cloned()
+                                        .unwrap_or_else(|| "www.mouser.fr".to_string());
+                                } else if vpc_site.to_lowercase().contains("conrad") {
+                                    target_domain = vpc_urls.get(vpc_site)
+                                        .or_else(|| vpc_urls.get("Conrad"))
+                                        .cloned()
+                                        .unwrap_or_else(|| "www.conrad.fr".to_string());
+                                }
+
+                                let clean_domain = target_domain
+                                    .replace("https://", "")
+                                    .replace("http://", "")
+                                    .trim_end_matches('/')
+                                    .to_string();
+
+                                if clean_url.contains("rs-online.com") || clean_url.contains("rsdelivers.com") {
+                                    if let Some(pos) = clean_url.find("/web/") {
+                                        clean_url = format!("https://{}{}", clean_domain, &clean_url[pos..]);
+                                    } else if let Some(pos) = clean_url.find("/product/") {
+                                        clean_url = format!("https://{}{}", clean_domain, &clean_url[pos..]);
+                                    }
+                                } else if clean_url.contains("farnell.com") {
+                                    if let Some(pos) = clean_url.find("/w/") {
+                                        clean_url = format!("https://{}{}", clean_domain, &clean_url[pos..]);
+                                    }
+                                } else if clean_url.contains("mouser.") {
+                                    if let Some(pos) = clean_url.find("/Search/") {
+                                        clean_url = format!("https://{}{}", clean_domain, &clean_url[pos..]);
+                                    }
+                                } else if clean_url.contains("conrad.") {
+                                    if let Some(pos) = clean_url.find("/fr/") {
+                                        clean_url = format!("https://{}{}", clean_domain, &clean_url[pos..]);
+                                    }
+                                }
+
+                                return Ok(ScrapedProductDetails {
+                                    sku: sku.to_string(),
+                                    mpn: if !vpc_code.is_empty() { vpc_code.to_string() } else { sku.to_string() },
+                                    label: clean_label,
+                                    brand,
+                                    price,
+                                    pack_size: 1,
+                                    dimensions: None,
+                                    weight: None,
+                                    source_url: Some(clean_url),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Remonter une erreur au lieu de fausses données mockées
+    Err(format!("Impossible de scrapper le produit depuis le site VPC ({}) avec le code '{}'", rs_domain, code_to_use))
 }
 

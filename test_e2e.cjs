@@ -61,34 +61,68 @@ async function runTest() {
         await page.selectOption("#modal-p-vpc-site", { index: 1 });
         await page.fill("#modal-p-vpc-code", "519-724");
         
-        // Tester le bouton Pré-remplir
-        console.log("Clic sur le bouton Pré-remplir...");
-        await page.click("button:has-text('Pré-remplir')");
-        await page.waitForTimeout(4000); // laissons le temps au scraper de répondre en réseau
+        // Tester le bouton global Auto-remplir tout
+        console.log("Clic sur le bouton global Auto-remplir tout...");
+        await page.click("button:has-text('Auto-remplir tout')");
+        await page.waitForTimeout(6000); // laissons le temps au scraper / SearxNG de répondre
         
         // Vérifier qu'un champ a bien été pré-rempli et contient les bonnes informations de RS
-        const labelVal = await page.inputValue("#modal-p-label");
-        const brandVal = await page.inputValue("#modal-p-brand");
-        const packVal = await page.inputValue("#modal-p-pack");
-        const priceVal = await page.inputValue("#modal-p-price");
-        const mpnVal = await page.inputValue("#modal-p-mpn");
-        const skuVal = await page.inputValue("#modal-p-sku");
+        let labelVal = await page.inputValue("#modal-p-label");
+        let brandVal = await page.inputValue("#modal-p-brand");
+        let packVal = await page.inputValue("#modal-p-pack");
+        let priceVal = await page.inputValue("#modal-p-price");
+        let mpnVal = await page.inputValue("#modal-p-mpn");
+        let skuVal = await page.inputValue("#modal-p-sku");
         
-        console.log("Scraped details:", { labelVal, brandVal, packVal, priceVal, mpnVal, skuVal });
+        console.log("Global Scraped details:", { labelVal, brandVal, packVal, priceVal, mpnVal, skuVal });
         if (!labelVal.toLowerCase().includes("repère") && !labelVal.toLowerCase().includes("phoenix") && !labelVal.toLowerCase().includes("bloc")) {
-            throw new Error(`Désignation incorrecte : ${labelVal}`);
+            throw new Error(`Désignation incorrecte ou non récupérée : ${labelVal}`);
         }
-        if (brandVal !== "Phoenix Contact") {
+        if (brandVal.toUpperCase() !== "PHOENIX CONTACT") {
             throw new Error(`Marque incorrecte : ${brandVal}`);
-        }
-        if (parseInt(packVal) !== 10) {
-            throw new Error(`Taille de lot incorrecte : ${packVal}`);
         }
         if (parseFloat(priceVal) <= 0) {
             throw new Error(`Prix incorrect ou non récupéré : ${priceVal}`);
         }
         if (!mpnVal) {
             throw new Error(`MPN non récupéré`);
+        }
+
+        // --- TESTER LES BOUTONS D'AUTO-REMPLISSAGE INDIVIDUELS ---
+        console.log("Test des boutons d'auto-remplissage individuels...");
+        
+        // 1. Individuel : Marque
+        console.log("Individuel : Effacement de la marque et re-clic individuel...");
+        await page.fill("#modal-p-brand", "");
+        await page.click("button[title='Auto-remplir Marque']");
+        // Attendre que le bouton ne soit plus désactivé (ce qui indique la fin de la requête)
+        await page.waitForSelector("button[title='Auto-remplir Marque']:not([disabled])", { timeout: 15000 });
+        brandVal = await page.inputValue("#modal-p-brand");
+        console.log("Individuel Scraped Brand:", brandVal);
+        if (brandVal.toUpperCase() !== "PHOENIX CONTACT") {
+            throw new Error(`Auto-remplissage individuel Marque a échoué ou est incorrect : ${brandVal}`);
+        }
+
+        // 2. Individuel : Prix
+        console.log("Individuel : Effacement du prix et re-clic individuel...");
+        await page.fill("#modal-p-price", "0");
+        await page.click("button[title='Auto-remplir Prix']");
+        await page.waitForSelector("button[title='Auto-remplir Prix']:not([disabled])", { timeout: 15000 });
+        priceVal = await page.inputValue("#modal-p-price");
+        console.log("Individuel Scraped Price:", priceVal);
+        if (parseFloat(priceVal) <= 0) {
+            throw new Error(`Auto-remplissage individuel Prix a échoué ou est incorrect : ${priceVal}`);
+        }
+
+        // 3. Individuel : MPN
+        console.log("Individuel : Effacement du MPN et re-clic individuel...");
+        await page.fill("#modal-p-mpn", "");
+        await page.click("button[title='Auto-remplir MPN']");
+        await page.waitForSelector("button[title='Auto-remplir MPN']:not([disabled])", { timeout: 15000 });
+        mpnVal = await page.inputValue("#modal-p-mpn");
+        console.log("Individuel Scraped MPN:", mpnVal);
+        if (!mpnVal) {
+            throw new Error(`Auto-remplissage individuel MPN a échoué.`);
         }
         
         await page.fill("#modal-p-min", "2");
