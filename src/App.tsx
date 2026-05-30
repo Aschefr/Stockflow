@@ -314,6 +314,7 @@ function App() {
   const [editVpcCode, setEditVpcCode] = useState("");
   const [editSuccess, setEditSuccess] = useState("");
   const [editError, setEditError] = useState("");
+  const [isFindingReseller, setIsFindingReseller] = useState(false);
 
   // States for transient scraping status
   const [autoFillLoading, setAutoFillLoading] = useState<Record<string, boolean>>({});
@@ -531,6 +532,50 @@ function App() {
       if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
     } finally {
       setAutoFillLoading(prev => ({ ...prev, ["ALL"]: false }));
+    }
+  }
+
+  async function handleFindReseller(isEdit: boolean) {
+    setIsFindingReseller(true);
+    if (isEdit) {
+      setEditError("");
+      setEditSuccess("");
+    } else {
+      setCreateError("");
+      setCreateSuccess("");
+    }
+    const skuToUse = isEdit ? editProduct.sku : newProduct.sku;
+    const brandToUse = isEdit ? editProduct.brand : newProduct.brand;
+    const labelToUse = isEdit ? editProduct.label : newProduct.label;
+
+    try {
+      const reseller: { provider: string; code: string; url: string } | null = await invoke(
+        "find_reseller_via_searxng",
+        {
+          sku: skuToUse,
+          brand: brandToUse || null,
+          label: labelToUse || null
+        }
+      );
+      if (reseller) {
+        if (isEdit) {
+          setEditVpcSite(reseller.provider);
+          setEditVpcCode(reseller.code);
+          setEditSuccess(`Revendeur trouvé ! Fournisseur : ${reseller.provider}, Code : ${reseller.code}`);
+        } else {
+          setNewVpcSite(reseller.provider);
+          setNewVpcCode(reseller.code);
+          setCreateSuccess(`Revendeur trouvé ! Fournisseur : ${reseller.provider}, Code : ${reseller.code}`);
+        }
+      } else {
+        const noResellerMsg = "Aucun revendeur configuré trouvé sur SearXNG pour cette référence.";
+        if (isEdit) setEditError(noResellerMsg); else setCreateError(noResellerMsg);
+      }
+    } catch (err: any) {
+      const errMsg = `Erreur lors de la recherche de revendeur : ${err.toString()}`;
+      if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
+    } finally {
+      setIsFindingReseller(false);
     }
   }
 
@@ -4228,6 +4273,19 @@ function App() {
                       />
                     </div>
                   </div>
+                  {!newVpcCode.trim() && (
+                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.5rem" }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ fontSize: "11px", padding: "0.3rem 0.6rem", height: "28px" }}
+                        disabled={isFindingReseller}
+                        onClick={() => handleFindReseller(false)}
+                      >
+                        {isFindingReseller ? "🔍 Recherche en cours..." : "🔍 Trouver un revendeur"}
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* 3. Classification */}
@@ -4638,6 +4696,19 @@ function App() {
                       />
                     </div>
                   </div>
+                  {!editVpcCode.trim() && (
+                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.5rem" }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ fontSize: "11px", padding: "0.3rem 0.6rem", height: "28px" }}
+                        disabled={isFindingReseller}
+                        onClick={() => handleFindReseller(true)}
+                      >
+                        {isFindingReseller ? "🔍 Recherche en cours..." : "🔍 Trouver un revendeur"}
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* 3. Classification */}
