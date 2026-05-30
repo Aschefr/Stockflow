@@ -978,25 +978,53 @@ fn parse_vpc_url(url_str: &str, sku: &str, vpc_urls: &std::collections::HashMap<
                 .trim_end_matches('/')
                 .to_lowercase();
             if !clean_domain.is_empty() && host.contains(&clean_domain) {
-                let sku_clean = sku.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
-                if sku_clean.is_empty() {
-                    return Some((provider_name.clone(), sku.to_string()));
-                }
-                
-                for seg in &segments {
-                    let seg_clean = seg.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
-                    if seg_clean.contains(&sku_clean) || sku_clean.contains(&seg_clean) {
-                        let clean_code = seg.split('?').next()?.trim().to_string();
-                        if !clean_code.is_empty() {
-                            return Some((provider_name.clone(), clean_code));
+                // 1. Try to check common query parameters for a product code / id
+                let common_params = ["code", "id", "partnumber", "part_number", "part", "product", "prod", "ref", "reference", "sku"];
+                for (k, v) in parsed.query_pairs() {
+                    let k_lower = k.to_lowercase();
+                    if common_params.iter().any(|&p| k_lower == p) {
+                        let val = v.trim().to_string();
+                        if !val.is_empty() {
+                            return Some((provider_name.clone(), val));
                         }
                     }
                 }
                 
-                for (_k, v) in parsed.query_pairs() {
-                    let v_clean = v.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
-                    if v_clean.contains(&sku_clean) {
-                        return Some((provider_name.clone(), v.trim().to_string()));
+                // 2. Try to search query parameters matching SKU (as in original code)
+                let sku_clean = sku.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
+                if !sku_clean.is_empty() {
+                    for (_k, v) in parsed.query_pairs() {
+                        let v_clean = v.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
+                        if v_clean.contains(&sku_clean) {
+                            return Some((provider_name.clone(), v.trim().to_string()));
+                        }
+                    }
+                }
+
+                // 3. Try to extract from path segments
+                if !sku_clean.is_empty() {
+                    for seg in &segments {
+                        let seg_clean = seg.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
+                        if seg_clean.contains(&sku_clean) || sku_clean.contains(&seg_clean) {
+                            let clean_code = seg.split('?').next().unwrap_or(seg).trim().to_string();
+                            if !clean_code.is_empty() {
+                                return Some((provider_name.clone(), clean_code));
+                            }
+                        }
+                    }
+                }
+
+                // 4. Try to extract the last non-empty segment of the path
+                if let Some(last_seg) = segments.last() {
+                    let mut clean_code = last_seg.split('?').next().unwrap_or(last_seg).trim();
+                    if clean_code.ends_with(".html") {
+                        clean_code = &clean_code[..clean_code.len() - 5];
+                    } else if clean_code.ends_with(".htm") {
+                        clean_code = &clean_code[..clean_code.len() - 4];
+                    }
+                    let clean_str = clean_code.to_string();
+                    if !clean_str.is_empty() {
+                        return Some((provider_name.clone(), clean_str));
                     }
                 }
                 
