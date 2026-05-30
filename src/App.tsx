@@ -3038,24 +3038,26 @@ function App() {
                           onBlur={() => triggerAutoSave()}
                           style={{ flex: 1, padding: "0.2rem 0.5rem", fontSize: "11px", background: "var(--bg-tertiary)", border: "1px solid var(--border-color)", borderRadius: "3px", color: "var(--text-primary)", height: "24px" }}
                         />
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          style={{ padding: "0 0.4rem", height: "24px", minWidth: "24px", display: "flex", alignItems: "center", justifyContent: "center" }}
-                          onClick={() => {
-                            const updatedSites = vpcSitesInput.filter(s => s !== site);
-                            setVpcSitesInput(updatedSites);
-                            const updatedKeys = { ...vpcKeysInput };
-                            delete updatedKeys[site];
-                            setVpcKeysInput(updatedKeys);
-                            const updatedUrls = { ...vpcUrlsInput };
-                            delete updatedUrls[site];
-                            setVpcUrlsInput(updatedUrls);
-                            triggerAutoSave({ vpc_sites: updatedSites, vpc_api_keys: updatedKeys, vpc_urls: updatedUrls });
-                          }}
-                        >
-                          ×
-                        </button>
+                        {!["RS", "Farnell", "Mouser", "Conrad"].some(def => def.toLowerCase() === site.toLowerCase()) && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            style={{ padding: "0 0.4rem", height: "24px", minWidth: "24px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                            onClick={() => {
+                              const updatedSites = vpcSitesInput.filter(s => s !== site);
+                              setVpcSitesInput(updatedSites);
+                              const updatedKeys = { ...vpcKeysInput };
+                              delete updatedKeys[site];
+                              setVpcKeysInput(updatedKeys);
+                              const updatedUrls = { ...vpcUrlsInput };
+                              delete updatedUrls[site];
+                              setVpcUrlsInput(updatedUrls);
+                              triggerAutoSave({ vpc_sites: updatedSites, vpc_api_keys: updatedKeys, vpc_urls: updatedUrls });
+                            }}
+                          >
+                            ×
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -4249,7 +4251,32 @@ function App() {
 
                 {/* 2. Fournisseur VPC */}
                 <div className="modal-field-group">
-                  <div className="modal-field-group-title">2. Fournisseur VPC</div>
+                  <div className="modal-field-group-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>2. Fournisseur VPC</span>
+                    {!newVpcCode.trim() && (
+                      <button
+                        type="button"
+                        className="btn-field-autofill"
+                        style={{
+                          marginTop: 0,
+                          height: "22px",
+                          width: "auto",
+                          padding: "0 0.5rem",
+                          fontSize: "10px",
+                          backgroundColor: "var(--accent)",
+                          color: "#fff",
+                          borderColor: "var(--accent)",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.2rem"
+                        }}
+                        disabled={isFindingReseller}
+                        onClick={() => handleFindReseller(false)}
+                      >
+                        {isFindingReseller ? "⏳ ..." : "🔍 Trouver un revendeur"}
+                      </button>
+                    )}
+                  </div>
                   <div className="modal-field-row">
                     <div className="form-group" style={{ flex: 1 }}>
                       <label htmlFor="modal-p-vpc-site">Fournisseur VPC</label>
@@ -4273,19 +4300,6 @@ function App() {
                       />
                     </div>
                   </div>
-                  {!newVpcCode.trim() && (
-                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.5rem" }}>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        style={{ fontSize: "11px", padding: "0.3rem 0.6rem", height: "28px" }}
-                        disabled={isFindingReseller}
-                        onClick={() => handleFindReseller(false)}
-                      >
-                        {isFindingReseller ? "🔍 Recherche en cours..." : "🔍 Trouver un revendeur"}
-                      </button>
-                    </div>
-                  )}
                 </div>
 
                 {/* 3. Classification */}
@@ -4672,7 +4686,32 @@ function App() {
 
                 {/* 2. Fournisseur VPC */}
                 <div className="modal-field-group">
-                  <div className="modal-field-group-title">2. Fournisseur VPC</div>
+                  <div className="modal-field-group-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>2. Fournisseur VPC</span>
+                    {!editVpcCode.trim() && (
+                      <button
+                        type="button"
+                        className="btn-field-autofill"
+                        style={{
+                          marginTop: 0,
+                          height: "22px",
+                          width: "auto",
+                          padding: "0 0.5rem",
+                          fontSize: "10px",
+                          backgroundColor: "var(--accent)",
+                          color: "#fff",
+                          borderColor: "var(--accent)",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.2rem"
+                        }}
+                        disabled={isFindingReseller}
+                        onClick={() => handleFindReseller(true)}
+                      >
+                        {isFindingReseller ? "⏳ ..." : "🔍 Trouver un revendeur"}
+                      </button>
+                    )}
+                  </div>
                   <div className="modal-field-row">
                     <div className="form-group" style={{ flex: 1 }}>
                       <label htmlFor="edit-p-vpc-site">Fournisseur VPC</label>
@@ -4696,19 +4735,6 @@ function App() {
                       />
                     </div>
                   </div>
-                  {!editVpcCode.trim() && (
-                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.5rem" }}>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        style={{ fontSize: "11px", padding: "0.3rem 0.6rem", height: "28px" }}
-                        disabled={isFindingReseller}
-                        onClick={() => handleFindReseller(true)}
-                      >
-                        {isFindingReseller ? "🔍 Recherche en cours..." : "🔍 Trouver un revendeur"}
-                      </button>
-                    </div>
-                  )}
                 </div>
 
                 {/* 3. Classification */}
