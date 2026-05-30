@@ -84,6 +84,15 @@ fn select_csv_file() -> Option<String> {
 }
 
 #[tauri::command]
+fn select_image_file() -> Option<String> {
+    let file = rfd::FileDialog::new()
+        .set_title("Sélectionner une image (Logo)")
+        .add_filter("Images (*.png;*.jpg;*.jpeg)", &["png", "jpg", "jpeg"])
+        .pick_file();
+    file.map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn select_image_dir() -> Option<String> {
     let dir = rfd::FileDialog::new()
         .set_title("Sélectionner le dossier des images")
@@ -167,7 +176,7 @@ fn create_product(
     if let Some(db_path) = events::get_db_path() {
         if let Ok(conn) = Connection::open(&db_path) {
             let existing: Option<Product> = conn.query_row(
-                "SELECT sku, mpn, label, brand, category, sub_category, location, item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size FROM products WHERE sku = ?",
+                "SELECT sku, mpn, label, brand, category, sub_category, location, item_type, min_stock, price, current_stock, reserved_stock, attributes, image_path, pdf_path, pack_size FROM products WHERE sku = ?",
                 [&clean_sku],
                 |row| Ok(Product {
                     sku: row.get(0)?,
@@ -181,10 +190,11 @@ fn create_product(
                     min_stock: row.get(8)?,
                     price: row.get(9)?,
                     current_stock: row.get(10)?,
-                    attributes: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-                    image_path: row.get(12)?,
-                    pdf_path: row.get(13)?,
-                    pack_size: row.get::<_, Option<i64>>(14)?.unwrap_or(1),
+                    reserved_stock: row.get::<_, Option<f64>>(11)?.unwrap_or(0.0),
+                    attributes: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                    image_path: row.get(13)?,
+                    pdf_path: row.get(14)?,
+                    pack_size: row.get::<_, Option<i64>>(15)?.unwrap_or(1),
                 })
             ).ok();
 
@@ -542,12 +552,12 @@ fn get_dashboard_stats() -> Result<serde_json::Value, String> {
         |row| row.get(0)
     ).unwrap_or(0);
 
-    // Récupérer les 5 derniers mouvements (uniquement les flux physiques STOCK_IN et STOCK_OUT)
+    // Récupérer les 100 derniers mouvements (uniquement les flux physiques STOCK_IN et STOCK_OUT)
     let mut stmt = conn.prepare(
         "SELECT sku, timestamp, trigramme, event_type, qty, note 
          FROM product_history 
          WHERE event_type IN ('STOCK_IN', 'STOCK_OUT')
-         ORDER BY timestamp DESC LIMIT 5"
+         ORDER BY timestamp DESC LIMIT 100"
     ).map_err(|e| e.to_string())?;
 
     let recent_moves_iter = stmt.query_map([], |row| {
@@ -568,12 +578,40 @@ fn get_dashboard_stats() -> Result<serde_json::Value, String> {
         }
     }
 
+    // Récupérer les 100 dernières modifications
+    let mut audit_stmt = conn.prepare(
+        "SELECT sku, timestamp, trigramme, action, field, old_value, new_value, source_url 
+         FROM product_audit_log 
+         ORDER BY timestamp DESC LIMIT 100"
+    ).map_err(|e| e.to_string())?;
+
+    let recent_audits_iter = audit_stmt.query_map([], |row| {
+        Ok(json!({
+            "sku": row.get::<_, String>(0)?,
+            "timestamp": row.get::<_, String>(1)?,
+            "trigramme": row.get::<_, String>(2)?,
+            "action": row.get::<_, String>(3)?,
+            "field": row.get::<_, Option<String>>(4)?,
+            "old_value": row.get::<_, Option<String>>(5)?,
+            "new_value": row.get::<_, Option<String>>(6)?,
+            "source_url": row.get::<_, Option<String>>(7)?,
+        }))
+    }).map_err(|e| e.to_string())?;
+
+    let mut recent_audits = Vec::new();
+    for item in recent_audits_iter {
+        if let Ok(val) = item {
+            recent_audits.push(val);
+        }
+    }
+
     Ok(json!({
         "total_references": total_refs,
         "total_value": total_value,
         "low_stock_count": low_stock_count,
         "out_of_stock_count": out_of_stock_count,
         "recent_movements": recent_moves,
+        "recent_audits": recent_audits,
     }))
 }
 
@@ -875,6 +913,184 @@ async fn scrape_product_details(
     }).await.map_err(|e| e.to_string())?
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct DetectedReseller {
+    pub provider: String,
+    pub code: String,
+    pub url: String,
+}
+
+fn parse_vpc_url(url_str: &str, sku: &str, vpc_urls: &std::collections::HashMap<String, String>) -> Option<(String, String)> {
+    let parsed = reqwest::Url::parse(url_str).ok()?;
+    let host = parsed.host_str()?.to_lowercase();
+    
+    let segments: Vec<&str> = parsed.path_segments()?
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Check built-in ones first
+    if host.contains("rs-online") || host.contains("rsdelivers") {
+        let is_prod = url_str.contains("/web/p/") || url_str.contains("/product/");
+        if !is_prod {
+            return None;
+        }
+        let code = segments.last()?;
+        let clean_code = code.split('?').next()?.trim().to_string();
+        if !clean_code.is_empty() {
+            return Some(("RS".to_string(), clean_code));
+        }
+    } else if host.contains("farnell") {
+        let dp_idx = segments.iter().position(|&s| s == "dp" || s == "p")?;
+        let code = segments.get(dp_idx + 1)?;
+        let clean_code = code.split('?').next()?.trim().to_string();
+        if !clean_code.is_empty() {
+            return Some(("Farnell".to_string(), clean_code));
+        }
+    } else if host.contains("mouser") {
+        let _pd_idx = segments.iter().position(|&s| s.to_lowercase() == "productdetail")?;
+        let code = segments.last()?;
+        let clean_code = code.split('?').next()?.trim().to_string();
+        if !clean_code.is_empty() {
+            return Some(("Mouser".to_string(), clean_code));
+        }
+    } else if host.contains("conrad") {
+        let _p_idx = segments.iter().position(|&s| s == "p")?;
+        let last_seg = segments.last()?;
+        let mut clean_seg = last_seg.split('?').next()?;
+        if clean_seg.ends_with(".html") {
+            clean_seg = &clean_seg[..clean_seg.len() - 5];
+        } else if clean_seg.ends_with(".htm") {
+            clean_seg = &clean_seg[..clean_seg.len() - 4];
+        }
+        let parts: Vec<&str> = clean_seg.split('-').collect();
+        let code = parts.last()?;
+        let clean_code = code.trim().to_string();
+        if !clean_code.is_empty() {
+            return Some(("Conrad".to_string(), clean_code));
+        }
+    } else {
+        // Generic fallback for user-added sites!
+        for (provider_name, configured_domain) in vpc_urls {
+            let clean_domain = configured_domain
+                .replace("https://", "")
+                .replace("http://", "")
+                .replace("www.", "")
+                .trim_end_matches('/')
+                .to_lowercase();
+            if !clean_domain.is_empty() && host.contains(&clean_domain) {
+                let sku_clean = sku.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
+                if sku_clean.is_empty() {
+                    return Some((provider_name.clone(), sku.to_string()));
+                }
+                
+                for seg in &segments {
+                    let seg_clean = seg.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
+                    if seg_clean.contains(&sku_clean) || sku_clean.contains(&seg_clean) {
+                        let clean_code = seg.split('?').next()?.trim().to_string();
+                        if !clean_code.is_empty() {
+                            return Some((provider_name.clone(), clean_code));
+                        }
+                    }
+                }
+                
+                for (_k, v) in parsed.query_pairs() {
+                    let v_clean = v.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
+                    if v_clean.contains(&sku_clean) {
+                        return Some((provider_name.clone(), v.trim().to_string()));
+                    }
+                }
+                
+                return Some((provider_name.clone(), sku.to_string()));
+            }
+        }
+    }
+    
+    None
+}
+
+#[tauri::command]
+async fn find_reseller_via_searxng(
+    sku: String,
+    brand: Option<String>,
+    label: Option<String>,
+) -> Result<Option<DetectedReseller>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config_internal().ok_or("Configuration introuvable")?;
+        let searxng_url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+        
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let brand_word = brand.as_deref().unwrap_or("").trim();
+        let ref_word = sku.trim();
+        let label_words = label.as_deref().unwrap_or("")
+            .split_whitespace()
+            .take(4)
+            .collect::<Vec<&str>>()
+            .join(" ");
+            
+        let mut terms = Vec::new();
+        if !brand_word.is_empty() {
+            terms.push(brand_word.to_string());
+        }
+        if !ref_word.is_empty() {
+            terms.push(ref_word.to_string());
+        }
+        if !label_words.is_empty() {
+            terms.push(label_words);
+        }
+        let search_terms = terms.join(" ");
+
+        let mut domains = vec![
+            "fr.rs-online.com".to_string(),
+            "fr.farnell.com".to_string(),
+            "www.mouser.fr".to_string(),
+            "www.conrad.fr".to_string(),
+        ];
+        
+        for (_, custom_url) in &config.vpc_urls {
+            let clean = custom_url
+                .replace("https://", "")
+                .replace("http://", "")
+                .trim_end_matches('/')
+                .to_string();
+            if !clean.is_empty() && !domains.contains(&clean) {
+                domains.push(clean);
+            }
+        }
+        
+        let site_filters = domains.iter().map(|d| format!("site:{}", d)).collect::<Vec<String>>().join(" OR ");
+        let query = format!("({}) {}", site_filters, search_terms);
+        
+        let url = format!("{}/search?q={}&format=json", searxng_url.trim_end_matches('/'), urlencoding::encode(&query));
+        let response = client.get(&url).send().map_err(|e| format!("Erreur connexion SearxNG : {}", e))?;
+        
+        if !response.status().is_success() {
+            return Err(format!("SearxNG a retourné une erreur {}", response.status()));
+        }
+        
+        let json: serde_json::Value = response.json().map_err(|e| format!("JSON invalide : {}", e))?;
+        let results = json["results"].as_array().ok_or("Aucun résultat dans la réponse SearxNG")?;
+        
+        for r in results {
+            if let Some(link) = r["url"].as_str() {
+                if let Some((provider, code)) = parse_vpc_url(link, &sku, &config.vpc_urls) {
+                    return Ok(Some(DetectedReseller {
+                        provider,
+                        code,
+                        url: link.to_string(),
+                    }));
+                }
+            }
+        }
+        
+        Ok(None)
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn search_vpc_domains_via_searxng(query: String) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -938,6 +1154,69 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+#[tauri::command]
+fn get_boms() -> Result<Vec<db::Bom>, String> {
+    let db_path = events::get_db_path().ok_or("Base de données cache introuvable")?;
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    let _ = db::init_db(&conn);
+    db::get_boms(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_bom(
+    network_path: String,
+    trigramme: String,
+    bom_id: String,
+    name: String,
+    status: String,
+    equipment_note: String,
+    items: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let payload = json!({
+        "bom_id": bom_id,
+        "name": name.trim(),
+        "status": status.trim(),
+        "equipment_note": equipment_note.trim(),
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+        "items": items,
+    });
+    events::write_event_file(&network_path, "BOM_SAVE", &trigramme, payload)
+}
+
+#[tauri::command]
+fn delete_bom(
+    network_path: String,
+    trigramme: String,
+    bom_id: String,
+) -> Result<(), String> {
+    let payload = json!({
+        "bom_id": bom_id,
+    });
+    events::write_event_file(&network_path, "BOM_DELETE", &trigramme, payload)
+}
+
+#[tauri::command]
+fn save_file_dialog(
+    filename: String,
+    contents: Vec<u8>,
+    filter_name: String,
+    filter_ext: String,
+) -> Result<Option<String>, String> {
+    let file_path = rfd::FileDialog::new()
+        .set_title("Enregistrer le fichier")
+        .set_file_name(&filename)
+        .add_filter(&filter_name, &[&filter_ext])
+        .save_file();
+        
+    if let Some(path) = file_path {
+        std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+        Ok(Some(path.to_string_lossy().to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Planificateur de sauvegarde automatique
@@ -981,10 +1260,16 @@ pub fn run() {
             scrape_product_details,
             get_product_audit_log,
             search_vpc_domains_via_searxng,
+            find_reseller_via_searxng,
             get_app_version,
             get_backup_config,
             save_backup_config,
-            trigger_manual_backup
+            trigger_manual_backup,
+            get_boms,
+            save_bom,
+            delete_bom,
+            save_file_dialog,
+            select_image_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

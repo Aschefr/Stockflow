@@ -1,4 +1,4 @@
-# 📈 StockFlow (v1.3.3)
+# 📈 StockFlow (v1.4.0)
 
 **StockFlow** est un système intelligent de gestion d'inventaire industriel conçu pour fonctionner dans un environnement d'entreprise Windows hautement restreint. 
 
@@ -77,13 +77,16 @@ Pour éviter les corruptions de base de données (comme SQLite ou Access) induit
 
 ---
 
-## 📋 Fonctionnalités de la Phase 3 (Audit Log, Anti-Spam & Flexibilité)
+## 📋 Fonctionnalités de la Phase 3 (Audit Log, Anti-Spam, Exports & Personnalisation)
 
 - [x] **Anti-Spam & Scraper RS France / Conrad :** Ajout d'une file d'attente avec temporisation de 1500 ms anti-blocage d'IP, scraping en euro réel sur `fr.rs-online.com`, et support complet de Conrad.
 - [x] **Double sélecteur d'URL VPC :** Liste déroulante d'origine des adresses connues (FR, MA, UK, US, etc.) couplée à un champ texte libre et une recherche en ligne assistée par SearXNG pour ajouter des domaines personnalisés.
 - [x] **Journal d'Audit Partagé (Audit Log) :** Fichiers JSON d'audit individuels stockés dans un dossier immuable `audit/` sur le réseau partagé (indépendant de la compaction) répliqués en local pour suivre toutes les créations, modifications de champs (avant/après en vert/rouge) et téléchargements de médias.
 - [x] **Rafraîchissement dynamique et temps réel :** Rafraîchissement automatique de la sidebar après toute action (scraping, mouvements, édition) pour voir le résultat immédiatement sans rechargement (sans F5).
 - [x] **Filtrage de l'historique physique :** Filtrage propre de la vue historique pour n'afficher que les vrais mouvements d'entrées et de sorties physiques (`STOCK_IN`/`STOCK_OUT`).
+- [x] **Configuration Avancée du Tableau de Nomenclature :** Panneau modal `⚙️ Affichage` pour choisir les colonnes actives, l'ordre des colonnes, le tri, les sauts de lignes de regroupement, et poignées de redimensionnement de colonnes persistantes (avec double-clic d'auto-ajustement).
+- [x] **Export Excel Amélioré (`xlsx-js-style`) :** Formatage professionnel des fichiers Excel exportés avec ajout du quadrillage complet de grille et adaptation automatique de la largeur des colonnes.
+- [x] **Dashboard Double Colonne Défilable :** Affichage côte à côte des derniers mouvements de stock et des dernières modifications de références sous forme de listes scrollables indépendantes.
 
 ---
 

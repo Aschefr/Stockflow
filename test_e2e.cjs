@@ -74,7 +74,7 @@ async function runTest() {
         await page.waitForSelector("#modal-p-sku");
         // Choisir "RS" dans la liste déroulante d'auto-remplissage
         await page.selectOption("#modal-autofill-type", { index: 1 });
-        await page.fill("#modal-autofill-code", "519-724");
+        await page.fill("#modal-autofill-code", "0519-724");
         await page.click("button:has-text('Auto-remplir')");
         await page.waitForTimeout(6000); // Attente du scraping
         
@@ -162,8 +162,8 @@ async function runTest() {
         console.log("Suppression du produit pour nettoyage final...");
         const deleteButton = page.locator(".details-panel button:has-text('Supprimer')");
         await deleteButton.click();
-        await page.waitForSelector("button:has-text('Confirmer')");
-        await page.click("button:has-text('Confirmer')");
+        await page.waitForSelector("button:has-text('Oui')");
+        await page.click("button:has-text('Oui')");
         await page.waitForTimeout(2000);
 
         console.log("✅ TOUS LES TESTS CIBLÉS ET LES VÉRIFICATIONS DE COHÉRENCE SONT RÉUSSIS AVEC SUCCÈS !");

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::fs;
 
 fn default_vpc_sites() -> Vec<String> {
-    vec!["RS".to_string(), "Farnell".to_string(), "Mouser".to_string()]
+    vec!["RS".to_string(), "Farnell".to_string(), "Mouser".to_string(), "Conrad".to_string()]
 }
 
 fn default_pdf_rename() -> Option<String> {
@@ -67,21 +67,41 @@ pub fn load_config_internal() -> Option<AppConfig> {
         return None;
     }
     let data = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+    let mut config: AppConfig = serde_json::from_str(&data).ok()?;
+    
+    // S'assurer que les 4 fournisseurs intégrés sont toujours présents
+    let builtins = ["RS", "Farnell", "Mouser", "Conrad"];
+    for builtin in &builtins {
+        if !config.vpc_sites.iter().any(|s| s.to_lowercase() == builtin.to_lowercase()) {
+            config.vpc_sites.push(builtin.to_string());
+        }
+    }
+    
+    Some(config)
 }
 
 pub fn save_config_internal(config: &AppConfig) -> Result<(), String> {
+    let mut config_to_save = config.clone();
+    
+    // S'assurer que les 4 fournisseurs intégrés sont toujours présents
+    let builtins = ["RS", "Farnell", "Mouser", "Conrad"];
+    for builtin in &builtins {
+        if !config_to_save.vpc_sites.iter().any(|s| s.to_lowercase() == builtin.to_lowercase()) {
+            config_to_save.vpc_sites.push(builtin.to_string());
+        }
+    }
+
     // 1. Sauvegarde locale du fichier de config
     let dir = get_config_dir().ok_or("Impossible de localiser le dossier APPDATA")?;
     fs::create_dir_all(&dir).map_err(|e| format!("Erreur création dossier config : {}", e))?;
     
     let path = dir.join("config.json");
-    let data = serde_json::to_string_pretty(config)
+    let data = serde_json::to_string_pretty(&config_to_save)
         .map_err(|e| format!("Erreur sérialisation config : {}", e))?;
     fs::write(path, data).map_err(|e| format!("Erreur écriture config : {}", e))?;
 
     // 2. Initialisation et vérification des sous-dossiers sur le lecteur réseau partagé
-    let net_path = PathBuf::from(&config.network_path);
+    let net_path = PathBuf::from(&config_to_save.network_path);
     if !net_path.exists() {
         return Err("Le chemin réseau spécifié est introuvable ou inaccessible.".to_string());
     }

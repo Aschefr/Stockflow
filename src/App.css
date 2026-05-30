@@ -662,6 +662,25 @@ table.spreadsheet tr.batch-selected {
   background-color: var(--bg-tertiary);
 }
 
+.history-list::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.history-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.history-list::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 10px;
+  border: 1px solid transparent;
+}
+
+.history-list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
 .history-item {
   padding: 0.5rem;
   border-bottom: 1px solid var(--border-color);

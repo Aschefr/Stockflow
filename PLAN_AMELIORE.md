@@ -1,4 +1,4 @@
-# StockFlow - Plan de Projet (v1.4.1)
+# StockFlow - Plan de Projet (v1.4.0)
 
 **StockFlow** est un système intelligent de gestion d'inventaire industriel conçu pour fonctionner dans un environnement Windows restreint (sans installation, sans droits administrateur, sans ports réseau ouverts). Il repose sur une architecture "Serverless" utilisant un lecteur réseau partagé comme unique vecteur de communication.
 
@@ -9,7 +9,7 @@
 | Propriété | Valeur |
 |---|---|
 | **Nom** | StockFlow |
-| **Version** | 1.4.1 |
+| **Version** | 1.4.0 |
 | **Description** | Système de gestion d'inventaire industriel portable fonctionnant exclusivement sur dossier réseau partagé, basé sur l'Event-Sourcing. Sans gestion de compte. |
 | **Architecture cible** | App Windows Portable (.exe standalone via Tauri ou Go/React) / Base de données par Event-Sourcing (fichiers JSON) sur Lecteur Réseau / Stockage direct (PDF/Images) sur lecteur réseau |
 
@@ -143,19 +143,30 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
 
 **Objectif :** Gérer les nomenclatures (BOM), les réservations virtuelles et les commandes.
 
-#### P3.1 — Gestion Nomenclature (BOM) & Réservation
-- Interface d'assemblage de listes de pièces pour des projets.
-- **Réservation de Stock :** L'utilisateur publie un événement JSON de "Réservation", déduisant virtuellement les pièces du stock disponible pour les autres sans pour autant les sortir physiquement.
+#### P3.1 — Création et Assemblage de Nomenclature (BOM)
+- Interface de création de listes de pièces pour des projets (ex: "Armoire Électrique Tapis 2").
+- **Ajout d'articles (Instance du tableau principal) :** L'interface de sélection des articles réutilise le même composant de tableau que la page principale (même base de code) pour garantir que les évolutions futures s'appliquent aux deux. Ce tableau inclut :
+  - Filtrage par recherche texte.
+  - Filtrage par Famille et Sous-Famille.
+  - Aperçu des images au survol de la souris.
+- **Statut en temps réel :** Indicateur visuel immédiat si le stock est suffisant lors de l'ajout. Les pièces manquantes apparaissent en rouge/orange avec la quantité à commander.
 
-#### P3.2 — Workflows de Retrait
-- Édition de bons de préparation indiquant l'emplacement physique exact.
-- Obligation d'une validation explicite dans l'interface pour convertir une "Réservation" en événement de "Sortie Définitive".
+#### P3.2 — Workflows de Réservation et de Retrait
+Une fois la nomenclature constituée, l'utilisateur a le choix entre deux actions sur le stock :
+- **Réservation de Stock (Virtuel) :** L'utilisateur génère un événement JSON de "Réservation". Les pièces sont déduites du "stock disponible" pour les autres utilisateurs (évitant la double affectation) sans être sorties physiquement.
+- **Génération Bon de Préparation & Retrait (Physique) :** L'utilisateur valide un retrait définitif pour aller chercher les pièces. Si une réservation existait, elle est convertie en événement de "Sortie Définitive".
 - **Annulation de Retrait :** Possibilité d'annuler un retrait erroné (génération d'un événement `STOCK_REVERSAL` qui restaure les quantités). L'historique conserve la trace de l'erreur et de sa correction.
 
-#### P3.3 — Exportation Commande Achat
-- Génération de fichiers XLSX épurés pour le service Achat.
-- Regroupement des besoins par Fournisseur VPC et masquage des informations confidentielles ou inutiles.
-- **Fonction d'exclusion :** Possibilité de masquer/exclure manuellement certaines références de la liste générée avant l'export (ex: pour retarder un achat).
+#### P3.3 — Génération Fiche Projet (Atelier) et Commande Achat (XLSX)
+- **Fiche Projet (Impression PDF) :**
+  - Destinée au technicien pour la préparation (picking) au magasin.
+  - Contient le nom du projet, la liste des pièces avec images miniatures, références (SKU/MPN), désignation, et quantité à retirer.
+  - Trie et affiche l'**emplacement physique** exact (ex: Allée B, Étagère 4) pour optimiser le trajet de collecte, avec des cases à cocher pour pointage manuel.
+- **Exportation Commande Achat (XLSX) :**
+  - Génération de fichiers Excel épurés pour le service Achat, affichant les besoins (pièces manquantes ou stock à reconstituer).
+  - Regroupement des besoins par **Fournisseur VPC**.
+  - **Colonnes de l'export :** Code VPC, MPN, Désignation, Famille, Sous-Famille, et calcul de la quantité à commander ajusté selon la **Taille de Lot** du fournisseur.
+  - **Fonction d'exclusion :** Possibilité de masquer/exclure manuellement certaines références de la liste via une modale de prévisualisation avant de générer l'export.
 
 #### P3.4 — Recherche Globale & Opérations en Lot
 - Moteur de recherche local (en mémoire) combinant texte, références, numéros de série et attributs techniques. Filtres à facettes instantanés.
@@ -191,6 +202,15 @@ Pour pallier l'absence de serveur dédié et les risques de corruption de bases 
   - *Nommage Contextuel :* Extraction manuelle du texte contenu dans la balise HTML `<a>` du PDF par le scraper pour nommer automatiquement les fichiers avec le libellé officiel du fournisseur (ex: "Notice de montage").
   - *Anti-Duplication :* Limite maximale absolue de 3 documents par SKU, avec déduplication agressive par "doc_type".
   - *Recherche Multi-Requêtes progressive :* Boucle intelligente dans le backend testant le code VPC, le MPN un-quoted et la marque sur SearxNG avec remplacement du domaine mobile `ma.rsdelivers.com` par `rs-online.com` pour trouver les fiches techniques réelles.
+- **Personnalisation Avancée du Tableau de Nomenclature :**
+  - Ajout d'une modale de configuration complète (⚙️ Affichage) permettant de masquer/afficher les colonnes, les réordonner, et choisir des critères de tri et de saut de ligne (saut de ligne visuel lors du changement de valeur du champ choisi).
+  - Gestion du redimensionnement persistant des colonnes avec auto-ajustement automatique à la largeur optimale lors d'un double-clic sur la poignée.
+  - Sauvegarde et persistance complète de ces préférences d'affichage utilisateur dans le `localStorage`.
+- **Amélioration de l'Exportation Excel :**
+  - Ajout du quadrillage complet (lignes et colonnes délimitées) et ajustement automatique de la largeur des colonnes dans le fichier Excel exporté.
+- **Double colonne défilable sur le Dashboard (v1.4.0) :**
+  - Affichage en colonnes côte à côte des *Derniers Mouvements de Stock* et des *Dernières Modifications de Références* (journal d'audit global).
+  - Les deux colonnes sont autonomes et défilables verticalement (scrollables).
 
 ## 5. Compilation & Automatisation
 

@@ -300,6 +300,70 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
                 (sku, &event.timestamp, &event.trigramme, "STOCK_OUT", qty, note),
             ).map_err(|e| e.to_string())?;
         }
+        "STOCK_RESERVE" => {
+            let sku = event.payload["sku"].as_str().unwrap_or("");
+            let qty = event.payload["qty"].as_f64().unwrap_or(0.0);
+            let note = event.payload["note"].as_str().unwrap_or("");
+
+            conn.execute(
+                "UPDATE products SET reserved_stock = reserved_stock + ? WHERE sku = ?",
+                (qty, sku),
+            ).map_err(|e| e.to_string())?;
+
+            conn.execute(
+                "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
+                (sku, &event.timestamp, &event.trigramme, "STOCK_RESERVE", qty, note),
+            ).map_err(|e| e.to_string())?;
+        }
+        "STOCK_UNRESERVE" => {
+            let sku = event.payload["sku"].as_str().unwrap_or("");
+            let qty = event.payload["qty"].as_f64().unwrap_or(0.0);
+            let note = event.payload["note"].as_str().unwrap_or("");
+
+            conn.execute(
+                "UPDATE products SET reserved_stock = MAX(0.0, reserved_stock - ?) WHERE sku = ?",
+                (qty, sku),
+            ).map_err(|e| e.to_string())?;
+
+            conn.execute(
+                "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
+                (sku, &event.timestamp, &event.trigramme, "STOCK_UNRESERVE", qty, note),
+            ).map_err(|e| e.to_string())?;
+        }
+        "BOM_SAVE" => {
+            let p = event.payload.clone();
+            let bom_id = p["bom_id"].as_str().unwrap_or("");
+            let name = p["name"].as_str().unwrap_or("");
+            let status = p["status"].as_str().unwrap_or("DRAFT");
+            let created_at = p["created_at"].as_str().unwrap_or("");
+            let updated_at = p["updated_at"].as_str().unwrap_or("");
+
+            let equipment_note = p["equipment_note"].as_str().unwrap_or("");
+
+            conn.execute(
+                "INSERT OR REPLACE INTO boms (id, name, status, created_at, updated_at, equipment_note) VALUES (?, ?, ?, ?, ?, ?)",
+                (bom_id, name, status, created_at, updated_at, equipment_note),
+            ).map_err(|e| e.to_string())?;
+
+            conn.execute("DELETE FROM bom_items WHERE bom_id = ?", [bom_id]).map_err(|e| e.to_string())?;
+
+            if let Some(items) = p["items"].as_array() {
+                for item in items {
+                    let sku = item["sku"].as_str().unwrap_or("");
+                    let qty = item["qty"].as_f64().unwrap_or(0.0);
+                    let note = item["note"].as_str().unwrap_or("");
+                    conn.execute(
+                        "INSERT INTO bom_items (bom_id, sku, qty, note) VALUES (?, ?, ?, ?)",
+                        (bom_id, sku, qty, note),
+                    ).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "BOM_DELETE" => {
+            let p = event.payload.clone();
+            let bom_id = p["bom_id"].as_str().unwrap_or("");
+            conn.execute("DELETE FROM boms WHERE id = ?", [bom_id]).map_err(|e| e.to_string())?;
+        }
         _ => {}
     }
     Ok(())
@@ -385,6 +449,67 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
                 "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
                 (sku, &event.timestamp, &event.trigramme, "STOCK_OUT", qty, note),
             ).map_err(|e| e.to_string())?;
+        }
+        "STOCK_RESERVE" => {
+            let sku = event.payload["sku"].as_str().unwrap_or("");
+            let qty = event.payload["qty"].as_f64().unwrap_or(0.0);
+            let note = event.payload["note"].as_str().unwrap_or("");
+
+            tx.execute(
+                "UPDATE products SET reserved_stock = reserved_stock + ? WHERE sku = ?",
+                (qty, sku),
+            ).map_err(|e| e.to_string())?;
+
+            tx.execute(
+                "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
+                (sku, &event.timestamp, &event.trigramme, "STOCK_RESERVE", qty, note),
+            ).map_err(|e| e.to_string())?;
+        }
+        "STOCK_UNRESERVE" => {
+            let sku = event.payload["sku"].as_str().unwrap_or("");
+            let qty = event.payload["qty"].as_f64().unwrap_or(0.0);
+            let note = event.payload["note"].as_str().unwrap_or("");
+
+            tx.execute(
+                "UPDATE products SET reserved_stock = MAX(0.0, reserved_stock - ?) WHERE sku = ?",
+                (qty, sku),
+            ).map_err(|e| e.to_string())?;
+
+            tx.execute(
+                "INSERT INTO product_history (sku, timestamp, trigramme, event_type, qty, note) VALUES (?, ?, ?, ?, ?, ?)",
+                (sku, &event.timestamp, &event.trigramme, "STOCK_UNRESERVE", qty, note),
+            ).map_err(|e| e.to_string())?;
+        }
+        "BOM_SAVE" => {
+            let p = event.payload.clone();
+            let bom_id = p["bom_id"].as_str().unwrap_or("");
+            let name = p["name"].as_str().unwrap_or("");
+            let status = p["status"].as_str().unwrap_or("DRAFT");
+            let created_at = p["created_at"].as_str().unwrap_or("");
+            let updated_at = p["updated_at"].as_str().unwrap_or("");
+
+            tx.execute(
+                "INSERT OR REPLACE INTO boms (id, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (bom_id, name, status, created_at, updated_at),
+            ).map_err(|e| e.to_string())?;
+
+            tx.execute("DELETE FROM bom_items WHERE bom_id = ?", [bom_id]).map_err(|e| e.to_string())?;
+
+            if let Some(items) = p["items"].as_array() {
+                for item in items {
+                    let sku = item["sku"].as_str().unwrap_or("");
+                    let qty = item["qty"].as_f64().unwrap_or(0.0);
+                    tx.execute(
+                        "INSERT INTO bom_items (bom_id, sku, qty) VALUES (?, ?, ?)",
+                        (bom_id, sku, qty),
+                    ).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "BOM_DELETE" => {
+            let p = event.payload.clone();
+            let bom_id = p["bom_id"].as_str().unwrap_or("");
+            tx.execute("DELETE FROM boms WHERE id = ?", [bom_id]).map_err(|e| e.to_string())?;
         }
         _ => {}
     }

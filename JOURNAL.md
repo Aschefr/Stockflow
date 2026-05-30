@@ -5,6 +5,22 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.4.0] - 2026-05-30
+
+### Personnalisation de Grille, Export Excel & Tableau de Bord Avancé
+- **Personnalisation Avancée du Tableau de Nomenclature (`BomTab.tsx`) :**
+  - Ajout d'un panneau modal complet `⚙️ Affichage` permettant de configurer dynamiquement l'ordre et la visibilité des colonnes, le tri, ainsi que le saut de ligne de regroupement.
+  - Gestion persistante de la largeur des colonnes avec auto-ajustement automatique sur double-clic (mesure de la cellule la plus longue).
+  - Sauvegarde automatique dans le stockage local de l'utilisateur (`localStorage`) pour conserver les dispositions entre sessions.
+- **Grille de Délimitation et Largeurs Auto pour l'Export Excel (`xlsx-js-style`) :**
+  - Passage de `xlsx` classique à la bibliothèque stylisée `xlsx-js-style`.
+  - Intégration d'un contour complet (lignes fines noires) sur toutes les cellules du fichier Excel généré pour un affichage propre du quadrillage.
+  - Calcul dynamique et automatique des largeurs de colonnes optimales dans les exports de nomenclature.
+- **Double Colonne Défilable du Dashboard (`App.tsx`) :**
+  - Refonte complète de la partie inférieure du Dashboard pour afficher côte à côte la liste des **Derniers Mouvements de Stock** et la liste des **Dernières Modifications de Références** (journal d'audit).
+  - Ajout de la propriété `sku` dans l'interface `AuditLogItem` du frontend pour mapper précisément l'audit.
+  - Les deux conteneurs de liste possèdent des barres de défilement autonomes limitées à une hauteur maximale de `400px`.
+
 ## [1.3.3] - 2026-05-28
 
 ### Correctif Scraping PDF RS Components & Fallback SearxNG

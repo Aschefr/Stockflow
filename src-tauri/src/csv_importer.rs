@@ -91,7 +91,7 @@ pub fn import_csv_file(
 
         // Récupérer le produit s'il existe déjà
         let existing: Option<super::db::Product> = conn.query_row(
-            "SELECT sku, mpn, label, brand, category, sub_category, location, item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size FROM products WHERE sku = ?",
+            "SELECT sku, mpn, label, brand, category, sub_category, location, item_type, min_stock, price, current_stock, reserved_stock, attributes, image_path, pdf_path, pack_size FROM products WHERE sku = ?",
             [&sku],
             |row| Ok(super::db::Product {
                 sku: row.get(0)?,
@@ -105,10 +105,11 @@ pub fn import_csv_file(
                 min_stock: row.get(8)?,
                 price: row.get(9)?,
                 current_stock: row.get(10)?,
-                attributes: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-                image_path: row.get(12)?,
-                pdf_path: row.get(13)?,
-                pack_size: row.get::<_, Option<i64>>(14)?.unwrap_or(1),
+                reserved_stock: row.get::<_, Option<f64>>(11)?.unwrap_or(0.0),
+                attributes: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                image_path: row.get(13)?,
+                pdf_path: row.get(14)?,
+                pack_size: row.get::<_, Option<i64>>(15)?.unwrap_or(1),
             })
         ).ok();
 
@@ -253,7 +254,6 @@ pub fn import_csv_file(
                 "hauteur": hauteur,
                 "profondeur": profondeur,
                 "poids": poids,
-                "codeRS": code_rs,
                 "notes": notes
             });
             if !code_rs.is_empty() {

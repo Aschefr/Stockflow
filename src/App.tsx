@@ -1,3 +1,4 @@
+import BomTab from "./BomTab";
 import { useState, useEffect, useRef } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -101,6 +102,7 @@ interface ProductHistoryItem {
 
 interface AuditLogItem {
   audit_id: string;
+  sku: string;
   timestamp: string;
   trigramme: string;
   action: string;
@@ -123,6 +125,7 @@ interface DashboardStats {
     qty: number;
     note: string;
   }>;
+  recent_audits: AuditLogItem[];
 }
 
 function App() {
@@ -149,7 +152,7 @@ function App() {
     return DEFAULT_COLUMNS;
   });
 
-  const [appVersion, setAppVersion] = useState("1.3.0");
+  const [appVersion, setAppVersion] = useState("1.4.0");
 
 
 
@@ -231,7 +234,7 @@ function App() {
   }
 
   // Navigation & View States
-  const [activeTab, setActiveTab] = useState<"dashboard" | "inventory" | "add_product" | "migration" | "settings" | "backup">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "inventory" | "add_product" | "migration" | "settings" | "backup" | "bom">("dashboard");
   const [products, setProducts] = useState<Product[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const selectedProductRef = useRef<Product | null>(null);
@@ -251,7 +254,8 @@ function App() {
     total_value: 0,
     low_stock_count: 0,
     out_of_stock_count: 0,
-    recent_movements: []
+    recent_movements: [],
+    recent_audits: []
   });
 
   // Search & Filter
@@ -1437,7 +1441,7 @@ function App() {
     if (!config || !editingCell) return;
     
     const updatedProd = { ...product };
-    let attributesObj = {};
+    let attributesObj: any = {};
     try {
       attributesObj = typeof updatedProd.attributes === "string" ? JSON.parse(updatedProd.attributes || "{}") : updatedProd.attributes;
     } catch (e) {}
@@ -1837,6 +1841,279 @@ function App() {
   const uniquePrices = Array.from(new Set(products.map(p => p.price.toString()).filter(Boolean))).sort();
   const uniqueMinStocks = Array.from(new Set(products.map(p => p.min_stock.toString()).filter(Boolean))).sort();
 
+
+  const renderProductTable = (productsToRender: Product[], isPickerMode: boolean = false) => (
+              <div className="table-container">
+                <table 
+                  className="spreadsheet"
+                  style={{ 
+                    tableLayout: "fixed", 
+                    width: columns.filter(c => c.visible).reduce((sum, c) => sum + c.width, 0) + 40
+                  }}
+                >
+                  <thead>
+                    <tr>
+                      <th style={{ width: isPickerMode ? "55px" : "40px", minWidth: isPickerMode ? "55px" : "40px", maxWidth: isPickerMode ? "55px" : "40px", textAlign: "center", position: "sticky", top: 0, zIndex: 11 }}>
+                        <input
+                          type="checkbox"
+                          checked={productsToRender.length > 0 && selectedSkus.length === productsToRender.length}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedSkus(productsToRender.map(p => p.sku));
+                            } else {
+                              setSelectedSkus([]);
+                            }
+                          }}
+                        />
+                      </th>
+                      {columns.map(col => {
+                        if (!col.visible) return null;
+                        return (
+                          <th
+                            key={col.id}
+                            style={{
+                              width: col.width,
+                              minWidth: col.width,
+                              maxWidth: col.width,
+                              position: "relative",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap"
+                            }}
+                          >
+                            {col.label}
+                            <div
+                              className="column-resize-handle"
+                              onMouseDown={(e) => handleMouseDown(e, col.id)}
+                            />
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {productsToRender.length === 0 ? (
+                       <tr>
+                         <td 
+                          colSpan={columns.filter(c => c.visible).length + 1} 
+                          style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)" }}
+                        >
+                          Aucun produit correspondant.
+                        </td>
+                      </tr>
+                    ) : (
+                      productsToRender.map((prod) => {
+                        let stockClass = "stock-ok";
+                        if (prod.current_stock === 0) stockClass = "stock-empty";
+                        else if (prod.min_stock > 0 && prod.current_stock <= prod.min_stock) stockClass = "stock-low";
+
+                        return (
+                          <tr 
+                            key={prod.sku}
+                            className={`${selectedProduct?.sku === prod.sku ? "selected" : ""} ${selectedSkus.includes(prod.sku) ? "batch-selected" : ""}`}
+                            onClick={() => handleSelectProduct(prod)}
+                            onDoubleClick={isPickerMode ? () => {
+                              if (selectedSkus.includes(prod.sku)) {
+                                setSelectedSkus(selectedSkus.filter(s => s !== prod.sku));
+                              } else {
+                                setSelectedSkus([...selectedSkus, prod.sku]);
+                              }
+                            } : undefined}
+                            onMouseMove={(e) => handleImageHover(e, prod.image_path)}
+                            onMouseLeave={() => setHoveredImage(null)}
+                          >
+                            <td 
+                              style={{ width: isPickerMode ? "55px" : "40px", minWidth: isPickerMode ? "55px" : "40px", maxWidth: isPickerMode ? "55px" : "40px", textAlign: "center" }}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div style={{ display: "flex", gap: "0.25rem", alignItems: "center", justifyContent: "center" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={selectedSkus.includes(prod.sku)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedSkus([...selectedSkus, prod.sku]);
+                                    } else {
+                                      setSelectedSkus(selectedSkus.filter(s => s !== prod.sku));
+                                    }
+                                  }}
+                                />
+                                {isPickerMode && (
+                                  <button
+                                    type="button"
+                                    title="Modifier la référence"
+                                    onClick={() => {
+                                      let site = "";
+                                      let code = "";
+                                      let attributesObj: any = {};
+                                      try {
+                                        attributesObj = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+                                        if (attributesObj && attributesObj.vpc) {
+                                          const keys = Object.keys(attributesObj.vpc);
+                                          if (keys.length > 0) {
+                                            site = keys[0];
+                                            code = attributesObj.vpc[site];
+                                          }
+                                        }
+                                      } catch (e) {}
+                                      setEditVpcSite(site);
+                                      setEditVpcCode(code);
+                                      
+                                      const formatNum = (v: any) => {
+                                        if (v === null || v === undefined) return "";
+                                        return v.toString().replace(/\./g, ",");
+                                      };
+                                      
+                                      setEditProduct({
+                                        sku: prod.sku,
+                                        mpn: prod.mpn,
+                                        label: prod.label,
+                                        brand: prod.brand,
+                                        category: prod.category,
+                                        sub_category: prod.sub_category,
+                                        location: prod.location,
+                                        min_stock: formatNum(prod.min_stock),
+                                        price: formatNum(prod.price),
+                                        item_type: prod.item_type,
+                                        image_path: prod.image_path || null,
+                                        pdf_path: prod.pdf_path || null,
+                                        attributes: typeof prod.attributes === "string" ? prod.attributes : JSON.stringify(prod.attributes || {}),
+                                        pack_size: formatNum(prod.pack_size || 1),
+                                        largeur: formatNum(attributesObj.largeur || ""),
+                                        hauteur: formatNum(attributesObj.hauteur || ""),
+                                        profondeur: formatNum(attributesObj.profondeur || ""),
+                                        poids: formatNum(attributesObj.poids || "")
+                                      });
+                                      setAutofillType(site || "mpn");
+                                      setAutofillCodeInput(code || prod.mpn || "");
+                                      setShowEditModal(true);
+                                    }}
+                                    style={{
+                                      background: "none",
+                                      border: "none",
+                                      cursor: "pointer",
+                                      padding: 0,
+                                      fontSize: "11px",
+                                      display: "inline-flex"
+                                    }}
+                                  >
+                                    ✏️
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                            {columns.map(col => {
+                              if (!col.visible) return null;
+                              
+                              let displayValue: any = "";
+                              let rawValue: any = "";
+                              let isEditable = false;
+                              
+                              if (col.id === "sku") {
+                                displayValue = <strong>{prod.sku}</strong>;
+                                rawValue = prod.sku;
+                              } else if (col.id === "mpn") {
+                                displayValue = prod.mpn;
+                                rawValue = prod.mpn;
+                                isEditable = true;
+                              } else if (col.id === "vpc_code") {
+                                displayValue = getVpcCode(prod);
+                                rawValue = displayValue;
+                              } else if (col.id === "brand") {
+                                displayValue = prod.brand;
+                                rawValue = prod.brand;
+                                isEditable = true;
+                              } else if (col.id === "category") {
+                                displayValue = prod.category;
+                                rawValue = prod.category;
+                                isEditable = true;
+                              } else if (col.id === "sub_category") {
+                                displayValue = prod.sub_category;
+                                rawValue = prod.sub_category;
+                                isEditable = true;
+                              } else if (col.id === "label") {
+                                displayValue = prod.label;
+                                rawValue = prod.label;
+                                isEditable = true;
+                              } else if (col.id === "location") {
+                                displayValue = prod.location || "-";
+                                rawValue = prod.location;
+                                isEditable = true;
+                              } else if (["largeur", "hauteur", "profondeur", "poids"].includes(col.id)) {
+                                const attrVal = getAttribute(prod, col.id);
+                                displayValue = attrVal || "-";
+                                rawValue = attrVal;
+                                isEditable = true;
+                              } else if (col.id === "current_stock") {
+                                displayValue = (
+                                  <span className={`stock-status-badge ${stockClass}`}>
+                                    {prod.current_stock}
+                                  </span>
+                                );
+                                rawValue = prod.current_stock;
+                                isEditable = true; // Double-clic → saisie directe → mouvement STOCK_IN/OUT
+                              } else if (col.id === "min_stock") {
+                                displayValue = prod.min_stock;
+                                rawValue = prod.min_stock;
+                                isEditable = true;
+                              } else if (col.id === "price") {
+                                displayValue = prod.pack_size > 1 
+                                  ? `${prod.price.toFixed(2).replace(".", ",")} € (Lot ${prod.pack_size})` 
+                                  : `${prod.price.toFixed(2).replace(".", ",")} €`;
+                                rawValue = prod.price;
+                                isEditable = true;
+                              } else if (col.id === "total_value") {
+                                displayValue = `${(prod.price * prod.current_stock).toFixed(2).replace(".", ",")} €`;
+                                rawValue = prod.price * prod.current_stock;
+                              }
+
+                              const isEditing = editingCell?.sku === prod.sku && editingCell.field === col.id;
+                              const isNumericField = ["price", "min_stock", "largeur", "hauteur", "profondeur", "poids"].includes(col.id);
+
+                              return (
+                                <td
+                                  key={col.id}
+                                  onDoubleClick={(!isPickerMode && isEditable) ? () => handleCellDoubleClick(prod.sku, col.id, rawValue) : undefined}
+                                  style={{
+                                    cursor: (!isPickerMode && isEditable) ? "edit" : "default",
+                                    width: col.width,
+                                    minWidth: col.width,
+                                    maxWidth: col.width,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap"
+                                  }}
+                                >
+                                  {isEditing ? (
+                                    <input
+                                      type="text"
+                                      autoFocus
+                                      value={editValue}
+                                      onChange={(e) => {
+                                        let val = e.target.value;
+                                        if (isNumericField) {
+                                          val = cleanNumericInput(val);
+                                        }
+                                        setEditValue(val);
+                                      }}
+                                      onBlur={() => handleCellSave(prod)}
+                                      onKeyDown={(e) => e.key === "Enter" && handleCellSave(prod)}
+                                    />
+                                  ) : (
+                                    displayValue
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+  );
+
   return (
     <div className="app-container">
       {/* Header */}
@@ -1891,6 +2168,12 @@ function App() {
             📋 Liste d'Inventaire
           </div>
           <div 
+            className={`nav-item ${activeTab === "bom" ? "active" : ""}`}
+            onClick={() => setActiveTab("bom")}
+          >
+            📦 Projets & Nomenclatures
+          </div>
+          <div 
             className={`nav-item ${activeTab === "migration" ? "active" : ""}`}
             onClick={() => setActiveTab("migration")}
           >
@@ -1937,31 +2220,147 @@ function App() {
                 </div>
               </div>
 
-              <div style={{ padding: "0 1.5rem 1.5rem" }}>
-                <h3 style={{ fontFamily: "var(--font-title)", marginBottom: "1rem" }}>Derniers Mouvements de Stock</h3>
-                <div className="history-list" style={{ maxHeight: "400px" }}>
-                  {stats.recent_movements.length === 0 ? (
-                    <div style={{ padding: "1.5rem", color: "var(--text-muted)" }}>Aucun mouvement enregistré.</div>
-                  ) : (
-                    stats.recent_movements.map((move, i) => (
-                      <div key={i} className="history-item">
-                        <div className="history-meta">
-                          <span>{new Date(move.timestamp).toLocaleString("fr-FR")}</span>
-                          <span>Par : <strong>{move.trigramme}</strong></span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "1.5rem", padding: "0 1.5rem 1.5rem" }}>
+                {/* Colonne 1 : Derniers Mouvements */}
+                <div style={{ flex: "1 1 400px", minWidth: 0 }}>
+                  <h3 style={{ fontFamily: "var(--font-title)", marginBottom: "1rem" }}>Derniers Mouvements de Stock</h3>
+                  <div className="history-list" style={{ maxHeight: "400px" }}>
+                    {stats.recent_movements.length === 0 ? (
+                      <div style={{ padding: "1.5rem", color: "var(--text-muted)" }}>Aucun mouvement enregistré.</div>
+                    ) : (
+                      stats.recent_movements.map((move, i) => (
+                        <div key={i} className="history-item">
+                          <div className="history-meta">
+                            <span>{new Date(move.timestamp).toLocaleString("fr-FR")}</span>
+                            <span>Par : <strong>{move.trigramme}</strong></span>
+                          </div>
+                          <div>
+                            <strong>{move.sku}</strong> — {move.event_type === "STOCK_IN" ? "📥 Entrée" : "📤 Sortie"} de{" "}
+                            <strong style={{ color: move.event_type === "STOCK_IN" ? "var(--success)" : "var(--danger)" }}>
+                              {move.qty}
+                            </strong>{" "}
+                            unités ({move.note})
+                          </div>
                         </div>
-                        <div>
-                          <strong>{move.sku}</strong> — {move.event_type === "STOCK_IN" ? "📥 Entrée" : "📤 Sortie"} de{" "}
-                          <strong style={{ color: move.event_type === "STOCK_IN" ? "var(--success)" : "var(--danger)" }}>
-                            {move.qty}
-                          </strong>{" "}
-                          unités ({move.note})
-                        </div>
-                      </div>
-                    ))
-                  )}
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Colonne 2 : Dernières Modifications de Références */}
+                <div style={{ flex: "1 1 400px", minWidth: 0 }}>
+                  <h3 style={{ fontFamily: "var(--font-title)", marginBottom: "1rem" }}>Dernières Modifications de Références</h3>
+                  <div className="history-list" style={{ maxHeight: "400px" }}>
+                    {stats.recent_audits.length === 0 ? (
+                      <div style={{ padding: "1.5rem", color: "var(--text-muted)" }}>Aucune modification enregistrée.</div>
+                    ) : (
+                      stats.recent_audits.map((item, i) => {
+                        const date = new Date(item.timestamp);
+                        const dateStr = date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "2-digit" });
+                        const timeStr = date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+
+                        let badge = "🔵";
+                        let badgeClass = "audit-badge-update";
+                        let content: React.ReactNode = "";
+
+                        if (item.action === "CREATE") {
+                          badge = "🟢";
+                          badgeClass = "audit-badge-create";
+                          content = <span>Création de la référence</span>;
+                        } else if (item.action === "UPDATE") {
+                          badge = "🔵";
+                          badgeClass = "audit-badge-update";
+                          content = (
+                            <span>
+                              <strong>{item.field}</strong> : <span className="audit-old-value">{item.old_value || "—"}</span> → <span className="audit-new-value">{item.new_value || "—"}</span>
+                              {item.source_url && (
+                                <> {" "}
+                                  <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
+                                    🔗 source
+                                  </a>
+                                </>
+                              )}
+                            </span>
+                          );
+                        } else if (item.action === "SCRAPE_PRICE") {
+                          badge = "🟠";
+                          badgeClass = "audit-badge-scrape";
+                          content = (
+                            <span>
+                              Prix scrappé : <strong>{item.new_value} €</strong>
+                              {item.source_url && (
+                                <> {" "}
+                                  <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
+                                    🔗 source
+                                  </a>
+                                </>
+                              )}
+                            </span>
+                          );
+                        } else if (item.action === "SCRAPE_PDF") {
+                          badge = "📄";
+                          badgeClass = "audit-badge-scrape";
+                          content = (
+                            <span>
+                              Notice téléchargée{item.field ? ` (${item.field})` : ""}
+                              {item.source_url && (
+                                <> {" "}
+                                  <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
+                                    🔗 source
+                                  </a>
+                                </>
+                              )}
+                            </span>
+                          );
+                        } else if (item.action === "SCRAPE_IMAGE") {
+                          badge = "🖼️";
+                          badgeClass = "audit-badge-scrape";
+                          content = (
+                            <span>
+                              Image téléchargée
+                              {item.source_url && (
+                                <> {" "}
+                                  <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
+                                    🔗 source
+                                  </a>
+                                </>
+                              )}
+                            </span>
+                          );
+                        }
+
+                        return (
+                          <div key={item.audit_id || i} className={`audit-item ${badgeClass}`} style={{ borderBottom: "1px solid var(--border-color)", padding: "0.5rem" }}>
+                            <div className="audit-meta" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <div>
+                                <span className="audit-badge" style={{ marginRight: "0.4rem" }}>{badge}</span>
+                                <span className="audit-date">{dateStr} {timeStr}</span>
+                              </div>
+                              <span className="audit-trigramme">Par : <strong>{item.trigramme}</strong></span>
+                            </div>
+                            <div className="audit-content" style={{ marginTop: "0.2rem" }}>
+                              <strong>{item.sku}</strong> — {content}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
+          )}
+
+          {/* TAB: BOM */}
+          {activeTab === "bom" && (
+            <BomTab
+              networkPath={config?.network_path}
+              trigramme={config?.trigramme}
+              products={products}
+              renderProductTable={renderProductTable}
+              selectedSkus={selectedSkus}
+              setSelectedSkus={setSelectedSkus}
+            />
           )}
 
           {/* TAB 2: INVENTORY TABLE */}
@@ -2135,204 +2534,7 @@ function App() {
                 </div>
               )}
 
-              <div className="table-container">
-                <table 
-                  className="spreadsheet"
-                  style={{ 
-                    tableLayout: "fixed", 
-                    width: columns.filter(c => c.visible).reduce((sum, c) => sum + c.width, 0) + 40
-                  }}
-                >
-                  <thead>
-                    <tr>
-                      <th style={{ width: "40px", minWidth: "40px", maxWidth: "40px", textAlign: "center", position: "sticky", top: 0, zIndex: 11 }}>
-                        <input
-                          type="checkbox"
-                          checked={filteredProducts.length > 0 && selectedSkus.length === filteredProducts.length}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedSkus(filteredProducts.map(p => p.sku));
-                            } else {
-                              setSelectedSkus([]);
-                            }
-                          }}
-                        />
-                      </th>
-                      {columns.map(col => {
-                        if (!col.visible) return null;
-                        return (
-                          <th
-                            key={col.id}
-                            style={{
-                              width: col.width,
-                              minWidth: col.width,
-                              maxWidth: col.width,
-                              position: "relative",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap"
-                            }}
-                          >
-                            {col.label}
-                            <div
-                              className="column-resize-handle"
-                              onMouseDown={(e) => handleMouseDown(e, col.id)}
-                            />
-                          </th>
-                        );
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredProducts.length === 0 ? (
-                       <tr>
-                         <td 
-                          colSpan={columns.filter(c => c.visible).length + 1} 
-                          style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)" }}
-                        >
-                          Aucun produit correspondant.
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredProducts.map((prod) => {
-                        let stockClass = "stock-ok";
-                        if (prod.current_stock === 0) stockClass = "stock-empty";
-                        else if (prod.min_stock > 0 && prod.current_stock <= prod.min_stock) stockClass = "stock-low";
-
-                        return (
-                          <tr 
-                            key={prod.sku}
-                            className={`${selectedProduct?.sku === prod.sku ? "selected" : ""} ${selectedSkus.includes(prod.sku) ? "batch-selected" : ""}`}
-                            onClick={() => handleSelectProduct(prod)}
-                            onMouseMove={(e) => handleImageHover(e, prod.image_path)}
-                            onMouseLeave={() => setHoveredImage(null)}
-                          >
-                            <td 
-                              style={{ width: "40px", minWidth: "40px", maxWidth: "40px", textAlign: "center" }}
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={selectedSkus.includes(prod.sku)}
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    setSelectedSkus([...selectedSkus, prod.sku]);
-                                  } else {
-                                    setSelectedSkus(selectedSkus.filter(s => s !== prod.sku));
-                                  }
-                                }}
-                              />
-                            </td>
-                            {columns.map(col => {
-                              if (!col.visible) return null;
-                              
-                              let displayValue: any = "";
-                              let rawValue: any = "";
-                              let isEditable = false;
-                              
-                              if (col.id === "sku") {
-                                displayValue = <strong>{prod.sku}</strong>;
-                                rawValue = prod.sku;
-                              } else if (col.id === "mpn") {
-                                displayValue = prod.mpn;
-                                rawValue = prod.mpn;
-                                isEditable = true;
-                              } else if (col.id === "vpc_code") {
-                                displayValue = getVpcCode(prod);
-                                rawValue = displayValue;
-                              } else if (col.id === "brand") {
-                                displayValue = prod.brand;
-                                rawValue = prod.brand;
-                                isEditable = true;
-                              } else if (col.id === "category") {
-                                displayValue = prod.category;
-                                rawValue = prod.category;
-                                isEditable = true;
-                              } else if (col.id === "sub_category") {
-                                displayValue = prod.sub_category;
-                                rawValue = prod.sub_category;
-                                isEditable = true;
-                              } else if (col.id === "label") {
-                                displayValue = prod.label;
-                                rawValue = prod.label;
-                                isEditable = true;
-                              } else if (col.id === "location") {
-                                displayValue = prod.location || "-";
-                                rawValue = prod.location;
-                                isEditable = true;
-                              } else if (["largeur", "hauteur", "profondeur", "poids"].includes(col.id)) {
-                                const attrVal = getAttribute(prod, col.id);
-                                displayValue = attrVal || "-";
-                                rawValue = attrVal;
-                                isEditable = true;
-                              } else if (col.id === "current_stock") {
-                                displayValue = (
-                                  <span className={`stock-status-badge ${stockClass}`}>
-                                    {prod.current_stock}
-                                  </span>
-                                );
-                                rawValue = prod.current_stock;
-                                isEditable = true; // Double-clic → saisie directe → mouvement STOCK_IN/OUT
-                              } else if (col.id === "min_stock") {
-                                displayValue = prod.min_stock;
-                                rawValue = prod.min_stock;
-                                isEditable = true;
-                              } else if (col.id === "price") {
-                                displayValue = prod.pack_size > 1 
-                                  ? `${prod.price.toFixed(2).replace(".", ",")} € (Lot ${prod.pack_size})` 
-                                  : `${prod.price.toFixed(2).replace(".", ",")} €`;
-                                rawValue = prod.price;
-                                isEditable = true;
-                              } else if (col.id === "total_value") {
-                                displayValue = `${(prod.price * prod.current_stock).toFixed(2).replace(".", ",")} €`;
-                                rawValue = prod.price * prod.current_stock;
-                              }
-
-                              const isEditing = editingCell?.sku === prod.sku && editingCell.field === col.id;
-                              const isNumericField = ["price", "min_stock", "largeur", "hauteur", "profondeur", "poids"].includes(col.id);
-
-                              return (
-                                <td
-                                  key={col.id}
-                                  onDoubleClick={isEditable ? () => handleCellDoubleClick(prod.sku, col.id, rawValue) : undefined}
-                                  style={{
-                                    cursor: isEditable ? "edit" : "default",
-                                    width: col.width,
-                                    minWidth: col.width,
-                                    maxWidth: col.width,
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                    whiteSpace: "nowrap"
-                                  }}
-                                >
-                                  {isEditing ? (
-                                    <input
-                                      type="text"
-                                      autoFocus
-                                      value={editValue}
-                                      onChange={(e) => {
-                                        let val = e.target.value;
-                                        if (isNumericField) {
-                                          val = cleanNumericInput(val);
-                                        }
-                                        setEditValue(val);
-                                      }}
-                                      onBlur={() => handleCellSave(prod)}
-                                      onKeyDown={(e) => e.key === "Enter" && handleCellSave(prod)}
-                                    />
-                                  ) : (
-                                    displayValue
-                                  )}
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
+              {renderProductTable(filteredProducts, false)}
             </>
           )}
 

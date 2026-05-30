@@ -14,10 +14,29 @@ pub struct Product {
     pub min_stock: f64,
     pub price: f64,
     pub current_stock: f64,
+    pub reserved_stock: f64,
     pub attributes: String, // JSON String
     pub image_path: Option<String>,
     pub pdf_path: Option<String>,
     pub pack_size: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Bom {
+    pub id: String,
+    pub name: String,
+    pub status: String, // "DRAFT", "RESERVED", "COMPLETED"
+    pub created_at: String,
+    pub updated_at: String,
+    pub equipment_note: Option<String>,
+    pub items: Vec<BomItem>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BomItem {
+    pub sku: String,
+    pub qty: f64,
+    pub note: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -56,6 +75,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             min_stock REAL DEFAULT 0,
             price REAL DEFAULT 0,
             current_stock REAL DEFAULT 0,
+            reserved_stock REAL DEFAULT 0,
             attributes TEXT,
             image_path TEXT,
             pdf_path TEXT,
@@ -74,6 +94,68 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         .unwrap_or(false);
     if !has_pack_size {
         let _ = conn.execute("ALTER TABLE products ADD COLUMN pack_size INTEGER DEFAULT 1", []);
+    }
+
+    // Vérifier si la colonne reserved_stock existe, sinon l'ajouter
+    let has_reserved_stock: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('products') WHERE name='reserved_stock')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_reserved_stock {
+        let _ = conn.execute("ALTER TABLE products ADD COLUMN reserved_stock REAL DEFAULT 0", []);
+    }
+
+    // Table pour les nomenclatures (BOMs)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS boms (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            equipment_note TEXT
+        )",
+        [],
+    )?;
+
+    // Migration pour ajouter la colonne equipment_note si elle n'existe pas
+    let has_equipment_note: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('boms') WHERE name='equipment_note')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_equipment_note {
+        let _ = conn.execute("ALTER TABLE boms ADD COLUMN equipment_note TEXT", []);
+    }
+
+    // Table pour les éléments des nomenclatures
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS bom_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bom_id TEXT NOT NULL,
+            sku TEXT NOT NULL,
+            qty REAL NOT NULL,
+            note TEXT,
+            FOREIGN KEY(bom_id) REFERENCES boms(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+
+    // Migration pour ajouter la colonne note si elle n'existe pas
+    let has_bom_item_note: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bom_items') WHERE name='note')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_bom_item_note {
+        let _ = conn.execute("ALTER TABLE bom_items ADD COLUMN note TEXT", []);
     }
 
     // 2. Table pour le suivi des fichiers événements déjà appliqués
@@ -125,6 +207,44 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    // Migration: migrer les clés historiques codeRS vers l'objet vpc dans attributes
+    if let Ok(mut stmt) = conn.prepare("SELECT sku, attributes FROM products WHERE attributes LIKE '%codeRS%'") {
+        let mut updates = Vec::new();
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for r in rows.flatten() {
+                let sku = r.0;
+                let attr_str = r.1;
+                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&attr_str) {
+                    if let Some(obj) = val.as_object_mut() {
+                        if let Some(code_rs_val) = obj.remove("codeRS") {
+                            if let Some(code_rs_str) = code_rs_val.as_str() {
+                                if !code_rs_str.trim().is_empty() {
+                                    let mut vpc_obj = obj.get("vpc")
+                                        .and_then(|v| v.as_object())
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    
+                                    if !vpc_obj.contains_key("RS") {
+                                        vpc_obj.insert("RS".to_string(), serde_json::Value::String(code_rs_str.trim().to_string()));
+                                    }
+                                    obj.insert("vpc".to_string(), serde_json::Value::Object(vpc_obj));
+                                }
+                            }
+                        }
+                    }
+                    if let Ok(serialized) = serde_json::to_string(&val) {
+                        updates.push((sku, serialized));
+                    }
+                }
+            }
+        }
+        for (sku, new_attr) in updates {
+            let _ = conn.execute("UPDATE products SET attributes = ? WHERE sku = ?", (new_attr, sku));
+        }
+    }
+
     Ok(())
 }
 
@@ -154,7 +274,7 @@ pub fn clear_db(conn: &Connection) -> Result<()> {
 pub fn get_all_products(conn: &Connection) -> Result<Vec<Product>> {
     let mut stmt = conn.prepare(
         "SELECT sku, mpn, label, brand, category, sub_category, location, 
-                item_type, min_stock, price, current_stock, attributes, image_path, pdf_path, pack_size 
+                item_type, min_stock, price, current_stock, reserved_stock, attributes, image_path, pdf_path, pack_size 
          FROM products ORDER BY sku ASC",
     )?;
     
@@ -171,10 +291,11 @@ pub fn get_all_products(conn: &Connection) -> Result<Vec<Product>> {
             min_stock: row.get(8)?,
             price: row.get(9)?,
             current_stock: row.get(10)?,
-            attributes: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-            image_path: row.get(12)?,
-            pdf_path: row.get(13)?,
-            pack_size: row.get::<_, Option<i64>>(14)?.unwrap_or(1),
+            reserved_stock: row.get::<_, Option<f64>>(11)?.unwrap_or(0.0),
+            attributes: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+            image_path: row.get(13)?,
+            pdf_path: row.get(14)?,
+            pack_size: row.get::<_, Option<i64>>(15)?.unwrap_or(1),
         })
     })?;
 
@@ -236,4 +357,50 @@ pub fn get_audit_log(conn: &Connection, sku: &str) -> Result<Vec<AuditLogItem>> 
         list.push(a?);
     }
     Ok(list)
+}
+
+pub fn get_boms(conn: &Connection) -> Result<Vec<Bom>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, status, created_at, updated_at, equipment_note FROM boms ORDER BY updated_at DESC",
+    )?;
+
+    let bom_iter = stmt.query_map([], |row| {
+        Ok(Bom {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            status: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+            equipment_note: row.get(5)?,
+            items: Vec::new(),
+        })
+    })?;
+
+    let mut boms = Vec::new();
+    for b in bom_iter {
+        let mut bom = b?;
+        bom.items = get_bom_items(conn, &bom.id)?;
+        boms.push(bom);
+    }
+    Ok(boms)
+}
+
+pub fn get_bom_items(conn: &Connection, bom_id: &str) -> Result<Vec<BomItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT sku, qty, note FROM bom_items WHERE bom_id = ?",
+    )?;
+
+    let item_iter = stmt.query_map([bom_id], |row| {
+        Ok(BomItem {
+            sku: row.get(0)?,
+            qty: row.get(1)?,
+            note: row.get(2)?,
+        })
+    })?;
+
+    let mut items = Vec::new();
+    for item in item_iter {
+        items.push(item?);
+    }
+    Ok(items)
 }
