@@ -1,156 +1,67 @@
 # 📈 StockFlow (v1.4.0)
 
-**StockFlow** est un système intelligent de gestion d'inventaire industriel conçu pour fonctionner dans un environnement d'entreprise Windows hautement restreint. 
+**StockFlow** est un outil intelligent de gestion d'inventaire industriel conçu pour fonctionner simplement dans les environnements d'entreprise sous Windows.
 
-L'application est **100% portable** (aucun droit administrateur requis, aucune installation) et fonctionne en mode **Serverless** : il n'y a pas de serveur central ni de base de données active en réseau. L'ensemble des communications et de la réplication de données entre postes s'effectue via un simple **dossier réseau partagé (partage SMB / lecteur réseau comme `Z:\`)**.
-
----
-
-## 🏗️ Architecture Technique (Event-Sourcing)
-
-Pour éviter les corruptions de base de données (comme SQLite ou Access) induites par les accès concurrents sur des partages réseau Windows (SMB), StockFlow implémente une architecture **Event-Sourcing (Append-Only)** :
-
-1. **Événements Immuables :** Chaque action utilisateur (création de produit, entrée de stock, sortie de stock) génère un petit fichier JSON horodaté déposé dans le dossier réseau `events/` (ex: `20260525T203000Z_JDO_STOCK_IN_f42a.json`). Ces fichiers ne sont **jamais modifiés**, éliminant tout conflit d'accès concurrent.
-2. **Cache SQLite Local :** Chaque poste client possède une base SQLite locale (`stockflow.db` dans `%APPDATA%`).
-3. **Synchronisation Réactive :** L'application surveille en tâche de fond le dossier réseau (polling régulier). Elle télécharge chronologiquement uniquement les nouveaux événements et reconstruit l'état du stock instantanément en local.
-4. **Résilience Hors-ligne :** Si la connexion réseau est coupée, l'application reste utilisable en consultation. Les nouveaux mouvements sont placés dans une file d'attente locale (`pending_events`) et poussés automatiquement sur le réseau dès le retour de la connexion.
-
-```
-+---------------------------------------------------------------+
-|                      Lecteur Réseau Partagé                   |
-|  +------------------+  +-----------------+  +--------------+  |
-|  |     /events/     |  |    /images/     |  | /documents/  |  |
-|  | (Fichiers JSON)  |  | (Images produit)|  | (PDFs Fiches)|  |
-|  +------------------+  +-----------------+  +--------------+  |
-+---------------------------------------------------------------+
-         ^                               ^
-         | (Sync toutes les 4s)          | (Lecture directe)
-         v                               v
-+---------------------------------------------------------------+
-|                         Poste Client                          |
-|  +-------------------+               +---------------------+  |
-|  |   Tauri Frontend  |<------------->|    Tauri Backend    |  |
-|  |   (React / TS)    |  IPC Command  |       (Rust)        |  |
-|  +-------------------+               +---------------------+  |
-|                                                 |             |
-|                                                 v             |
-|                                      +---------------------+  |
-|                                      | SQLite Cache Local  |  |
-|                                      |   (stockflow.db)    |  |
-|                                      +---------------------+  |
-+---------------------------------------------------------------+
-```
+L'application est **100% portable** (elle ne nécessite aucune installation ni aucun droit d'administrateur pour s'exécuter) et fonctionne de manière **autonome sur dossier réseau partagé** : il n'y a pas de serveur central complexe à administrer. L'ensemble des données et des fichiers est partagé via un simple dossier réseau partagé (comme un lecteur réseau `Z:\` ou un dossier partagé SMB).
 
 ---
 
-## 🛠️ Stack Technique
+## 🚀 Prise en Main Rapide
 
-- **Backend & Wrapper Natif :** [Tauri v2](https://tauri.app/) (Rust) - Légèreté, sécurité et binaire portable unique `.exe`.
-- **Frontend :** [React](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/) + [Vite](https://vite.dev/).
-- **Styles :** CSS Vanille moderne (CSS Variables pour thèmes Dark/Light, Layout Flexbox/Grid denses).
-- **Moteur Base de Données Cache :** SQLite (via la crate Rust `rusqlite`).
-- **Sélecteur de fichiers natif :** Crate Rust `rfd`.
+### 1. Téléchargement et Lancement
+1. Rendez-vous dans la section **Releases** de ce dépôt et téléchargez la version la plus récente de `StockFlow.exe`.
+2. Lancez le fichier `StockFlow.exe` par double-clic.
 
----
+> [!TIP]
+> **Éviter le blocage Windows SmartScreen :** 
+> Comme l'exécutable n'est pas signé numériquement, Windows peut afficher une alerte de sécurité. Pour l'éviter, déposez le fichier `StockFlow.exe` **directement sur votre lecteur réseau partagé** et lancez-le depuis ce lecteur. Sinon, faites un clic droit sur le fichier local -> **Propriétés** -> cochez la case **"Débloquer"** en bas de la fenêtre -> **Appliquer**.
 
-## 📋 Fonctionnalités de la Phase 1 (MVP)
-
-- [x] **Assistant de configuration initial :** Saisie du trigramme de poste et sélection graphique du dossier réseau partagé au premier lancement.
-- [x] **Moteur d'Event-Sourcing résistant :** Écritures réseau asynchrones non-bloquantes (`spawn_blocking`) et mise en file d'attente hors-ligne.
-- [x] **Tableur Spreadsheet ultra-dense :** Table dense de l'inventaire avec tri, recherche instantanée par marque/désignation/SKU, filtrage par famille, et double-clic pour modification directe des cellules (inline).
-- [x] **Volet de détails latéral :** Historique complet des mouvements pour la référence sélectionnée, aperçu de l'image stockée sur le réseau, lien vers la fiche technique PDF, et formulaire de saisie des entrées/sorties.
-- [x] **Miniature au survol (Hover UX) :** Affichage d'un aperçu d'image en miniature au survol de la souris sur l'inventaire.
-- [x] **Outil de migration CSV :** Importation de l'ancien fichier de stock (décodage Windows-1252, saut de 8 lignes d'en-tête Excel, copie physique des images/PDFs locaux associés vers le réseau et génération des événements de création initiale).
-- [x] **Thèmes Sombre et Clair :** Changement de thème d'un seul clic.
+### 2. Configuration Initiale (Premier Lancement)
+Au premier lancement de l'application sur votre poste, deux éléments vous seront demandés :
+- **Sélection du dossier réseau partagé** : Localisez graphiquement le dossier sur le réseau (ex: `Z:\Stockflow_Data`). C'est dans ce dossier que seront créées les bases de données d'inventaire, les images et les documentations techniques.
+- **Trigramme de poste** : Saisissez vos initiales ou votre identifiant de poste (ex: `JDO`). Ce trigramme servira à signer tous les mouvements de stock et modifications de fiches que vous effectuerez.
 
 ---
 
-## 📋 Fonctionnalités de la Phase 2 (Scraping & Médias)
+## 📋 Fonctionnalités Clés
 
-- [x] **Colonnes de dimensions industrielles :** Ajout des colonnes physiques (Largeur, Hauteur, Profondeur, Poids, Tension) dans la grille principale et le volet détails.
-- [x] **Pré-remplissage Intelligent :** Scraping en tâche de fond de la marque, désignation, prix et taille de lot à partir du SKU ou du code VPC lors de la création.
-- [x] **Scraping PDF et cascade de répertoires :** Récupération automatique des fiches techniques par SearxNG et structuration en sous-dossiers réseau partagés (`documents/MARQUE/CATEGORIE/...`).
-- [x] **Déduplication robuste des PDF :** Comparaison avancée des fichiers PDF existants (par métadonnées, taille et type) pour éviter le gaspillage de bande passante.
-- [x] **Scraping et standardisation d'images :** Téléchargement d'illustrations produits, création de miniatures rapides locales, et déduplication automatique par comparaison d'octets.
-- [x] **Scraping par lot :** Files d'attente randomisées pour le traitement par lot d'images et de PDF sur plusieurs références sélectionnées.
-- [x] **Suppression en cascade :** Le retrait d'un produit supprime physiquement ses fiches techniques PDF et ses images stockées sur le réseau partagé.
+### 📊 Tableau de Bord Interactif
+Dès l'ouverture, accédez aux indicateurs clés de votre parc de pièces :
+- Nombre total de références et valeur financière totale estimée de votre stock.
+- Nombre d'articles sous le seuil d'alerte et en rupture totale de stock.
+- **Double colonne d'activité** : Visualisez côte à côte les derniers mouvements de stock physiques et les dernières modifications de caractéristiques faites par vos collègues dans des listes défilables en temps réel.
 
----
+### 📋 Grille d'Inventaire Type Tableur
+Gérez vos pièces dans un tableau dense et rapide :
+- **Recherche instantanée** : Filtrez sur n'importe quel terme (marque, SKU, désignation, référence constructeur).
+- **Filtrage précis** : Naviguez dans vos pièces par Famille et Sous-Famille.
+- **Édition directe (Inline)** : Modifiez les informations à la volée en double-cliquant directement sur les cellules (comme dans Excel). Double-cliquez sur "Stock Actuel" pour saisir instantanément un mouvement de stock.
+- **Disposition personnalisable** : Masquez, affichez ou réordonnez vos colonnes comme vous le souhaitez. Ajustez la largeur de vos colonnes par glisser-déposer, ou double-cliquez sur la poignée de séparation pour ajuster automatiquement la colonne à la largeur du texte le plus long.
 
-## 📋 Fonctionnalités de la Phase 3 (Audit Log, Anti-Spam, Exports & Personnalisation)
+### 🔍 Enrichissement Automatique par Scraping
+Ne perdez plus de temps à remplir vos fiches produits manuellement :
+- **Fiches techniques et notices PDF** : StockFlow recherche automatiquement les documentations techniques des constructeurs (ex: Siemens, Schneider, Phoenix Contact), les télécharge et les organise proprement dans le dossier réseau partagé.
+- **Photos et illustrations** : L'outil cherche les images du produit et les intègre sous forme de carrousel photo interactif.
+- **Tarifs et conditionnements** : Récupération des prix réels en euros et des tailles de lot (pack) directement depuis les sites de VPC (RS France, Conrad, etc.).
+- **Traitement par lot** : Cochez plusieurs lignes dans l'inventaire pour lancer un scraping d'images ou de PDF groupé en arrière-plan.
 
-- [x] **Anti-Spam & Scraper RS France / Conrad :** Ajout d'une file d'attente avec temporisation de 1500 ms anti-blocage d'IP, scraping en euro réel sur `fr.rs-online.com`, et support complet de Conrad.
-- [x] **Double sélecteur d'URL VPC :** Liste déroulante d'origine des adresses connues (FR, MA, UK, US, etc.) couplée à un champ texte libre et une recherche en ligne assistée par SearXNG pour ajouter des domaines personnalisés.
-- [x] **Journal d'Audit Partagé (Audit Log) :** Fichiers JSON d'audit individuels stockés dans un dossier immuable `audit/` sur le réseau partagé (indépendant de la compaction) répliqués en local pour suivre toutes les créations, modifications de champs (avant/après en vert/rouge) et téléchargements de médias.
-- [x] **Rafraîchissement dynamique et temps réel :** Rafraîchissement automatique de la sidebar après toute action (scraping, mouvements, édition) pour voir le résultat immédiatement sans rechargement (sans F5).
-- [x] **Filtrage de l'historique physique :** Filtrage propre de la vue historique pour n'afficher que les vrais mouvements d'entrées et de sorties physiques (`STOCK_IN`/`STOCK_OUT`).
-- [x] **Configuration Avancée du Tableau de Nomenclature :** Panneau modal `⚙️ Affichage` pour choisir les colonnes actives, l'ordre des colonnes, le tri, les sauts de lignes de regroupement, et poignées de redimensionnement de colonnes persistantes (avec double-clic d'auto-ajustement).
-- [x] **Export Excel Amélioré (`xlsx-js-style`) :** Formatage professionnel des fichiers Excel exportés avec ajout du quadrillage complet de grille et adaptation automatique de la largeur des colonnes.
-- [x] **Dashboard Double Colonne Défilable :** Affichage côte à côte des derniers mouvements de stock et des dernières modifications de références sous forme de listes scrollables indépendantes.
-
----
-
-## 🚀 Démarrage & Compilation
-
-### Prérequis
-- [Node.js](https://nodejs.org/) (v18 ou supérieur)
-- [Rust & Cargo](https://www.rust-lang.org/) (outils de compilation C++ build tools installés sous Windows)
-
-### Installation
-1. Clonez ou copiez le projet dans votre répertoire de travail.
-2. Installez les dépendances npm :
-   ```bash
-   npm install
-   ```
-
-### Lancer en mode Développement
-Pour lancer la fenêtre de l'application avec rechargement à chaud (Vite + Cargo compile) :
-```bash
-npm run tauri dev
-```
-
-### Compiler pour la Production (Générer le `.exe` portable)
-Pour générer le fichier binaire exécutable autonome (`.exe` standalone dans `src-tauri/target/release/bundle/nsis/` ou dans `target/release/`) :
-```bash
-npm run tauri build
-```
-Le fichier généré est entièrement autonome et peut être copié sur n'importe quel poste Windows.
-
-### ⚠️ Windows SmartScreen (Environnement sans droits admin)
-L'exécutable n'étant pas signé numériquement, Windows SmartScreen peut bloquer le lancement si le fichier a été **téléchargé depuis internet** (GitHub). Ce blocage est lié au marqueur "Mark of the Web" (MOTW) que Windows ajoute automatiquement aux téléchargements web. Le bouton "Exécuter quand même" nécessite des droits administrateur.
-
-**Solution recommandée — Distribution via le lecteur réseau :**
-Copiez le `StockFlow.exe` compilé **directement** depuis le poste de développement vers le lecteur réseau partagé (ex: `Z:\Stockflow\app\StockFlow.exe`). Les fichiers copiés en local ou depuis un partage SMB **ne reçoivent pas** le marqueur MOTW et SmartScreen ne se déclenchera pas.
-
-**Alternative — Retirer le marqueur manuellement (ne nécessite pas de droits admin) :**
-```powershell
-Unblock-File -Path ".\StockFlow.exe"
-```
-Ou via l'explorateur Windows : clic droit sur le fichier → Propriétés → cocher **"Débloquer"** en bas → OK.
-
-> **En résumé :** Ne distribuez jamais l'application en la faisant re-télécharger depuis GitHub sur les postes utilisateurs. Déposez-la sur le partage réseau depuis un poste de confiance.
+### 📦 Projets & Nomenclatures (BOM)
+Préparez vos chantiers et vos assemblages industriels :
+- Créez des listes de matériel (BOM) pour vos projets (ex: "Armoire Électrique Tapis 2").
+- Visualisez immédiatement l'état de votre stock par rapport aux besoins du projet (les pièces manquantes s'affichent en rouge).
+- **Exportation Commande Achat** : Générez en un clic un fichier Excel formaté de manière professionnelle (avec quadrillage et largeurs adaptées) trié par fournisseur pour passer vos commandes de réapprovisionnement.
+- **Impression de Fiche picking** : Imprimez un document PDF contenant les images des pièces, les références et leurs emplacements physiques exacts dans l'atelier pour optimiser la collecte physique de vos techniciens.
 
 ---
 
-## 🗃️ Structure du Code source
+## 🛠️ Comment ça fonctionne ? (Event-Sourcing)
 
-```
-Stockflow/
-├── src-tauri/                  # Code source Rust (Backend)
-│   ├── src/
-│   │   ├── config.rs           # Gestion config locale APPDATA & Initialisation réseau
-│   │   ├── db.rs               # Gestion et requêtes du cache local SQLite
-│   │   ├── events.rs           # Écritures JSON d'événements et Sync vers SQLite
-│   │   ├── csv_importer.rs     # Parser CSV et migration des médias
-│   │   ├── lib.rs              # Déclaration des modules et Commandes IPC Tauri
-│   │   └── main.rs             # Point d'entrée de l'application Rust
-│   └── Cargo.toml              # Dépendances Rust
-├── src/                        # Code source React (Frontend)
-│   ├── assets/                 # Logos et médias
-│   ├── App.css                 # Charte graphique (Dark/Light) et layout tableur
-│   ├── App.tsx                 # Logique d'interface et d'appel des commandes Tauri
-│   └── main.tsx                # Point d'entrée React
-├── package.json                # Dépendances NPM & Scripts
-├── PLAN_AMELIORE.md            # Plan de développement validé
-└── JOURNAL.md                  # Historique chronologique des modifications
-```
+StockFlow a été conçu pour éliminer les problèmes classiques de corruption de base de données (comme avec Access ou SQLite) lorsqu'ils sont partagés en réseau local :
+
+1. **Aucun Conflit d'Accès** : Plutôt que de modifier une base de données centrale commune, chaque action (un retrait de stock, une modification de désignation) écrit un petit fichier JSON individuel et immuable sur le réseau (ex : `20260530T143000_JDO_STOCK_OUT_6ES7...json`).
+2. **Synchronisation Automatique** : StockFlow surveille le dossier réseau toutes les 4 secondes. Lorsqu'un nouveau fichier JSON écrit par un de vos collègues apparaît, l'application met à jour instantanément votre tableau local en arrière-plan.
+3. **Résilience Réseau** : Si la connexion avec le lecteur réseau partagé est coupée, l'application reste active en mode consultation. Les actions que vous effectuez hors-ligne sont mémorisées localement et automatiquement envoyées sur le réseau dès le retour de la connexion.
+
+---
+
+*Pour en savoir plus sur la compilation, l'installation ou la contribution au code de l'application, veuillez consulter le [Guide de Développement](file:///d:/Code%20Projects/Stockflow/DEVELOPER.md).*
