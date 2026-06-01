@@ -1,4 +1,4 @@
-# StockFlow - Plan de Projet (v1.4.0)
+# StockFlow - Plan de Projet (v1.4.1)
 
 **StockFlow** est un système intelligent de gestion d'inventaire industriel conçu pour fonctionner dans un environnement Windows restreint (sans installation, sans droits administrateur, sans ports réseau ouverts). Il repose sur une architecture "Serverless" utilisant un lecteur réseau partagé comme unique vecteur de communication.
 
@@ -9,7 +9,7 @@
 | Propriété | Valeur |
 |---|---|
 | **Nom** | StockFlow |
-| **Version** | 1.4.0 |
+| **Version** | 1.4.1 |
 | **Description** | Système de gestion d'inventaire industriel portable fonctionnant exclusivement sur dossier réseau partagé, basé sur l'Event-Sourcing. Sans gestion de compte. |
 | **Architecture cible** | App Windows Portable (.exe standalone via Tauri ou Go/React) / Base de données par Event-Sourcing (fichiers JSON) sur Lecteur Réseau / Stockage direct (PDF/Images) sur lecteur réseau |
 

@@ -204,6 +204,14 @@ export default function BomTab({
     setIsPickerOpen(true);
   };
 
+  const calculateProjectTotal = (bom: Bom) => {
+    return bom.items.reduce((sum, item) => {
+      const p = products.find((prod: any) => prod.sku === item.sku);
+      const price = p?.price !== undefined ? p.price : 0;
+      return sum + (price * item.qty);
+    }, 0);
+  };
+
   useEffect(() => {
     fetchBoms();
   }, []);
@@ -857,6 +865,9 @@ export default function BomTab({
           />
           <span className={`stock-status-badge ${getStatusBadgeClass(editingBom.status)}`} style={{ fontSize: "12px", padding: "0.25rem 0.6rem" }}>
             Statut: {editingBom.status}
+          </span>
+          <span className="stock-status-badge status-online" style={{ fontSize: "12px", padding: "0.25rem 0.6rem" }}>
+            Prix Total : {calculateProjectTotal(editingBom).toFixed(2)} €
           </span>
         </div>
 
@@ -2044,40 +2055,45 @@ export default function BomTab({
         <table className="spreadsheet" style={{ width: "100%" }}>
           <thead>
             <tr>
-              <th style={{ width: "40%" }}>Nom du Projet</th>
-              <th style={{ width: "20%" }}>Statut</th>
-              <th style={{ width: "25%" }}>Dernière Modif</th>
+              <th style={{ width: "35%" }}>Nom du Projet</th>
+              <th style={{ width: "15%" }}>Statut</th>
+              <th style={{ width: "20%" }}>Dernière Modif</th>
+              <th style={{ width: "15%" }}>Prix Total</th>
               <th style={{ width: "15%" }}>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {boms.map(bom => (
-              <tr key={bom.id} onClick={(e) => {
-                if ((e.target as HTMLElement).tagName !== "BUTTON" && !(e.target as HTMLElement).closest("button")) {
-                  setEditingBom(bom);
-                }
-              }}>
-                <td style={{ fontWeight: "600", color: "var(--text-primary)" }}>{bom.name}</td>
-                <td>
-                  <span className={`stock-status-badge ${getStatusBadgeClass(bom.status)}`}>
-                    {bom.status}
-                  </span>
-                </td>
-                <td>{new Date(bom.updated_at).toLocaleString()}</td>
-                <td>
-                  <button 
-                    className="btn btn-secondary" 
-                    onClick={() => handleDuplicate(bom)}
-                    style={{ padding: "0.2rem 0.6rem", minHeight: "auto" }}
-                  >
-                    👯 Dupliquer
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {boms.map(bom => {
+              const totalVal = calculateProjectTotal(bom);
+              return (
+                <tr key={bom.id} onClick={(e) => {
+                  if ((e.target as HTMLElement).tagName !== "BUTTON" && !(e.target as HTMLElement).closest("button")) {
+                    setEditingBom(bom);
+                  }
+                }}>
+                  <td style={{ fontWeight: "600", color: "var(--text-primary)" }}>{bom.name}</td>
+                  <td>
+                    <span className={`stock-status-badge ${getStatusBadgeClass(bom.status)}`}>
+                      {bom.status}
+                    </span>
+                  </td>
+                  <td>{new Date(bom.updated_at).toLocaleString()}</td>
+                  <td style={{ fontWeight: "600", color: "var(--text-primary)" }}>{totalVal.toFixed(2)} €</td>
+                  <td>
+                    <button 
+                      className="btn btn-secondary" 
+                      onClick={() => handleDuplicate(bom)}
+                      style={{ padding: "0.2rem 0.6rem", minHeight: "auto" }}
+                    >
+                      👯 Dupliquer
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
             {boms.length === 0 && (
               <tr>
-                <td colSpan={4} style={{ textAlign: "center", padding: "2rem", color: "var(--text-secondary)" }}>
+                <td colSpan={5} style={{ textAlign: "center", padding: "2rem", color: "var(--text-secondary)" }}>
                   Aucune nomenclature existante.
                 </td>
               </tr>

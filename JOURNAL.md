@@ -5,6 +5,14 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.4.1] - 2026-06-01
+
+### Prix Total dans les Nomenclatures et Projets
+- **Calcul et Affichage du Prix Total du Projet :**
+  - Ajout du calcul automatique de la valeur financière totale d'une nomenclature (quantité requise * prix unitaire du produit associé) dans `BomTab.tsx`.
+  - Intégration d'une nouvelle colonne **Prix Total** dans la table principale listant les projets.
+  - Ajout d'un badge d'information affichant le prix total du projet en temps réel au sein de l'en-tête de la vue d'édition/détails de la nomenclature.
+
 ## [1.4.0] - 2026-05-30
 
 ### Personnalisation de Grille, Export Excel & Tableau de Bord Avancé
