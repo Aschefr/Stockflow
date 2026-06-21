@@ -169,7 +169,8 @@ export default function BomTab({
       { id: "location", label: "Emplacement", enabled: true, width: 130 },
       { id: "note", label: "Note article", enabled: true, width: 200 },
       { id: "qty", label: "Qté Requise", enabled: true, width: 90 },
-      { id: "current_stock", label: "Stock Actuel", enabled: true, width: 100 }
+      { id: "current_stock", label: "Stock Actuel", enabled: true, width: 100 },
+      { id: "pack_size", label: "Pack Size", enabled: true, width: 100 }
     ];
   });
 
@@ -1292,7 +1293,8 @@ export default function BomTab({
                         { id: "location", label: "Emplacement", enabled: true, width: 130 },
                         { id: "note", label: "Note article", enabled: true, width: 200 },
                         { id: "qty", label: "Qté Requise", enabled: true, width: 90 },
-                        { id: "current_stock", label: "Stock Actuel", enabled: true, width: 100 }
+                        { id: "current_stock", label: "Stock Actuel", enabled: true, width: 100 },
+                        { id: "pack_size", label: "Pack Size", enabled: true, width: 100 }
                       ];
                       setTableColumns(defaultTableCols);
                       localStorage.setItem("sf_bom_table_columns", JSON.stringify(defaultTableCols));

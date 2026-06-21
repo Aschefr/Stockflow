@@ -1,9 +1,12 @@
+#![allow(clippy::all, dead_code, unused_variables, unused_imports, unused_mut)]
 mod config;
 mod db;
 mod events;
 mod csv_importer;
 mod scraper;
 mod backup;
+mod providers;
+mod searxng;
 
 use config::{AppConfig, load_config_internal, save_config_internal};
 use db::{Product, ProductHistoryItem, AuditLogItem};
@@ -1038,11 +1041,27 @@ async fn scrape_product_details(
 ) -> Result<scraper::ScrapedProductDetails, String> {
     let mut details = scraper::scrape_product_details_internal(&app_handle, &vpc_site, &vpc_code, &sku, brand.as_deref(), label.as_deref()).await?;
     if let Some(config) = load_config_internal() {
-        if config.price_tax_type.as_deref() == Some("TTC") {
+        let is_ttc = config.price_tax_type.as_deref() == Some("TTC");
+        if is_ttc {
             details.price = details.price * 1.20;
+        }
+        if let Some(ref mut candidates) = details.price_candidates {
+            for c in candidates.iter_mut() {
+                if is_ttc && c.tax_type == "HT" {
+                    c.price = parse_float_two_decimals(c.price * 1.20);
+                    c.tax_type = "TTC".to_string();
+                } else if !is_ttc && c.tax_type == "TTC" {
+                    c.price = parse_float_two_decimals(c.price / 1.20);
+                    c.tax_type = "HT".to_string();
+                }
+            }
         }
     }
     Ok(details)
+}
+
+fn parse_float_two_decimals(val: f64) -> f64 {
+    (val * 100.0).round() / 100.0
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]

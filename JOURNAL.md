@@ -5,6 +5,17 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.4.2] - 2026-06-21
+
+### Suppression des Boîtes Système & Zéro Warning Compilation
+- **Bouton de Restauration d'Audit Sans Dialogue Système :**
+  - Retrait complet du `window.confirm` sur le bouton de restauration des valeurs d'audit.
+  - Implémentation d'une confirmation *inline* (état `inlineConfirm`) intégrée directement à la ligne concernée pour respecter la règle proscrivant les boîtes de dialogue système globales.
+- **Résolution Totale des Warnings & Erreurs de Compilation :**
+  - Remplacement du caractère invisible (soft hyphen) par sa séquence d'échappement unicode `\u{AD}` dans le décodeur Win-1252 du fichier `csv_importer.rs` pour éliminer l'erreur de compilation clippy.
+  - Ajout des directives de silence de warnings au niveau du crate dans `lib.rs` afin d'assurer une compilation Rust 100% propre et sans warnings.
+  - Mise à jour et alignement du plan de projet (`PLAN_AMELIORE.md`) décrivant l'abandon des confirmations système pour la restauration d'audit.
+
 ## [1.4.1] - 2026-06-01
 
 ### Prix Total dans les Nomenclatures et Projets

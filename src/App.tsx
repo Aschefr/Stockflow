@@ -55,6 +55,7 @@ const DEFAULT_COLUMNS: ColumnConfig[] = [
   { id: "current_stock", label: "Stock Actuel", width: 100, visible: true },
   { id: "min_stock", label: "Seuil Alerte", width: 100, visible: true },
   { id: "price", label: "Prix Unit.", width: 100, visible: true },
+  { id: "pack_size", label: "Taille du lot", width: 100, visible: true },
   { id: "total_value", label: "Valeur Total", width: 110, visible: true },
   { id: "largeur", label: "Largeur (mm)", width: 100, visible: true },
   { id: "hauteur", label: "Hauteur (mm)", width: 100, visible: true },
@@ -450,6 +451,17 @@ function App() {
         return next;
       });
 
+      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length > 1;
+      if (hasMultiplePriceCandidates && (targetField === "price" || targetField === "pack_size")) {
+        setPendingScrapeDetails(details);
+        setPendingScrapeIsEdit(isEdit);
+        setShowPriceConfirmModal(true);
+        setScrapeModalOpen(false);
+        setAutoFillLoading(prev => ({ ...prev, [fieldKey]: false }));
+        setIsScrapingMedia(false);
+        return;
+      }
+
       if (isEdit) {
         setEditProduct(prev => {
           const next = { ...prev };
@@ -572,6 +584,53 @@ function App() {
         next[2].status = "active";
         return next;
       });
+
+      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length > 1;
+      if (hasMultiplePriceCandidates) {
+        setPendingScrapeDetails(details);
+        setPendingScrapeIsEdit(isEdit);
+        
+        if (isEdit) {
+          setEditProduct(prev => ({
+            ...prev,
+            mpn: details.mpn || prev.mpn || autofillCodeInput,
+            label: details.label || prev.label,
+            brand: details.brand || prev.brand,
+            largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : prev.largeur,
+            hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : prev.hauteur,
+            profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : prev.profondeur,
+            poids: details.weight ? formatNum(details.weight) : prev.poids,
+          }));
+          if (autofillType !== "mpn") {
+            setEditVpcSite(autofillType);
+            setEditVpcCode(autofillCodeInput);
+          }
+          setEditSuccess("Champs pré-remplis avec succès ! Veuillez sélectionner le prix dans le modal.");
+        } else {
+          setNewProduct(prev => ({
+            ...prev,
+            sku: prev.sku || details.sku || autofillCodeInput,
+            mpn: details.mpn || prev.mpn || autofillCodeInput,
+            label: details.label || prev.label,
+            brand: details.brand || prev.brand,
+            largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : prev.largeur,
+            hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : prev.hauteur,
+            profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : prev.profondeur,
+            poids: details.weight ? formatNum(details.weight) : prev.poids,
+          }));
+          if (autofillType !== "mpn") {
+            setNewVpcSite(autofillType);
+            setNewVpcCode(autofillCodeInput);
+          }
+          setCreateSuccess("Champs pré-remplis avec succès ! Veuillez sélectionner le prix dans le modal.");
+        }
+        
+        setShowPriceConfirmModal(true);
+        setScrapeModalOpen(false);
+        setAutoFillLoading(prev => ({ ...prev, ["ALL"]: false }));
+        setIsScrapingMedia(false);
+        return;
+      }
 
       if (isEdit) {
         setEditProduct(prev => ({
@@ -788,6 +847,86 @@ function App() {
   const [isPdfValidationMode, setIsPdfValidationMode] = useState(false);
   const [isSavingPdf, setIsSavingPdf] = useState(false);
 
+  // Price confirmation states
+  interface PriceCandidate {
+    price: number;
+    pack_size: number;
+    tax_type: string;
+    label: string;
+  }
+  const [showPriceConfirmModal, setShowPriceConfirmModal] = useState(false);
+  const [pendingScrapeDetails, setPendingScrapeDetails] = useState<any>(null);
+  const [pendingScrapeIsEdit, setPendingScrapeIsEdit] = useState(false);
+  const [pendingScrapeSku, setPendingScrapeSku] = useState<string | null>(null);
+
+  function handleSelectScrapedPrice(candidate: PriceCandidate) {
+    const formatNum = (v: any) => {
+      if (v === null || v === undefined) return "";
+      return v.toString().replace(/\./g, ",");
+    };
+
+    if (pendingScrapeSku) {
+      // Scraping depuis la sidebar (mise à jour directe en DB)
+      (async () => {
+        try {
+          setIsScrapingPrice(true);
+          const prod = products.find(p => p.sku === pendingScrapeSku);
+          if (prod && config) {
+            const currentAttrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+            if (pendingScrapeDetails.source_url) {
+              currentAttrs.scrape_price_url = pendingScrapeDetails.source_url;
+            }
+            await invoke("create_product", {
+              networkPath: config.network_path,
+              trigramme: config.trigramme,
+              sku: prod.sku,
+              mpn: prod.mpn,
+              label: prod.label,
+              brand: prod.brand,
+              category: prod.category,
+              subCategory: prod.sub_category,
+              location: prod.location,
+              itemType: prod.item_type,
+              minStock: prod.min_stock,
+              price: candidate.price,
+              imagePath: prod.image_path,
+              pdfPath: prod.pdf_path,
+              attributes: currentAttrs,
+              packSize: candidate.pack_size
+            });
+            setMovementSuccess(`Prix mis à jour : ${candidate.price.toFixed(2)} €`);
+            setIsScrapingPrice(false);
+            setPendingScrapeSku(null);
+            
+            // Synchro en tâche de fond non bloquante pour l'interface
+            syncAndFetch(config).then(() => {
+              refreshSelectedProduct(prod.sku);
+            });
+          }
+        } catch (err: any) {
+          setMovementError(err.toString());
+          setIsScrapingPrice(false);
+          setPendingScrapeSku(null);
+        }
+      })();
+    } else if (pendingScrapeIsEdit) {
+      setEditProduct(prev => ({
+        ...prev,
+        price: formatNum(candidate.price),
+        pack_size: formatNum(candidate.pack_size)
+      }));
+      setEditSuccess("Prix et conditionnement mis à jour !");
+    } else {
+      setNewProduct(prev => ({
+        ...prev,
+        price: formatNum(candidate.price),
+        pack_size: formatNum(candidate.pack_size)
+      }));
+      setCreateSuccess("Prix et conditionnement mis à jour !");
+    }
+    setShowPriceConfirmModal(false);
+  }
+
   async function handleCancelScrape() {
     setScrapeModalOpen(false);
     setIsScrapingMedia(false);
@@ -991,14 +1130,122 @@ function App() {
     setIsScrapingPrice(true);
     setMovementError("");
     setMovementSuccess("");
+
+    // Extrait les infos VPC du produit
+    let vpcSite = "mpn";
+    let vpcCode = "";
+    let mpnOrSku = selectedProduct.mpn || selectedProduct.sku;
     try {
-      const price = await executeScrapePriceForSku(selectedProduct.sku);
+      const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
+      if (attrs && attrs.vpc) {
+        const keys = Object.keys(attrs.vpc);
+        if (keys.length > 0) {
+          vpcSite = keys[0];
+          vpcCode = attrs.vpc[keys[0]]?.toString() || "";
+        }
+      }
+    } catch (e) {}
+
+    const codeToUse = vpcCode.trim() || mpnOrSku.trim();
+
+    // Open Scrape Progress Modal
+    setIsScrapingMedia(true);
+    setScrapeError(null);
+    setIsScrapeModalMinimized(false);
+    setScrapeModalTitle(`Scraping de prix : ${selectedProduct.sku}`);
+    setScrapeSteps([
+      { label: `Recherche du prix pour ${codeToUse}`, status: "active" },
+      { label: "Enregistrement du prix", status: "pending" }
+    ]);
+    setScrapeModalOpen(true);
+
+    try {
+      const details: any = await invoke("scrape_product_details", {
+        vpcSite: vpcSite,
+        vpcCode: vpcCode,
+        sku: vpcCode || mpnOrSku,
+        brand: selectedProduct.brand || null,
+        label: selectedProduct.label || null
+      });
+
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[0].status = "success";
+        next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
+        next[1].status = "active";
+        return next;
+      });
+
+      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length > 1;
+      if (hasMultiplePriceCandidates) {
+        setPendingScrapeDetails(details);
+        setPendingScrapeIsEdit(false);
+        setPendingScrapeSku(selectedProduct.sku);
+        setShowPriceConfirmModal(true);
+        setScrapeModalOpen(false);
+        setIsScrapingPrice(false);
+        setIsScrapingMedia(false);
+        return;
+      }
+
+      const price = details.price;
+      if (!price || price <= 0) {
+        throw new Error("Prix introuvable");
+      }
+
+      // Sauvegarde automatique du prix unique trouvé
+      const currentAttrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
+      if (details.source_url) {
+        currentAttrs.scrape_price_url = details.source_url;
+      }
+
+      await invoke("create_product", {
+        networkPath: config.network_path,
+        trigramme: config.trigramme,
+        sku: selectedProduct.sku,
+        mpn: selectedProduct.mpn,
+        label: selectedProduct.label,
+        brand: selectedProduct.brand,
+        category: selectedProduct.category,
+        subCategory: selectedProduct.sub_category,
+        location: selectedProduct.location,
+        itemType: selectedProduct.item_type,
+        minStock: selectedProduct.min_stock,
+        price: price,
+        imagePath: selectedProduct.image_path,
+        pdfPath: selectedProduct.pdf_path,
+        attributes: currentAttrs,
+        packSize: details.pack_size || selectedProduct.pack_size || 1
+      });
+
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[1].status = "success";
+        next[1].details = `Nouveau prix : ${price.toFixed(2)} € (lot de ${details.pack_size || 1})`;
+        return next;
+      });
+
+      // Fermer le modal de progression de scraping après une seconde
+      setTimeout(() => {
+        setScrapeModalOpen(false);
+        setIsScrapingMedia(false);
+      }, 1000);
+
       setMovementSuccess(`Prix mis à jour : ${price.toFixed(2)} €`);
-      syncAndFetch(config);
-      await refreshSelectedProduct(selectedProduct.sku);
+      setIsScrapingPrice(false);
+
+      // Synchro en tâche de fond (non bloquante)
+      syncAndFetch(config).then(() => {
+        refreshSelectedProduct(selectedProduct.sku);
+      });
+
     } catch (err: any) {
-      setMovementError(err.toString());
-    } finally {
+      const errMsg = `Échec du scraping : ${err.toString()}`;
+      setMovementError(errMsg);
+      setScrapeError(errMsg);
+      setScrapeSteps(prev => {
+        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
+      });
       setIsScrapingPrice(false);
     }
   }
@@ -1117,7 +1364,7 @@ function App() {
       ]);
 
       setMovementSuccess("PDF récupéré et sauvegardé avec succès.");
-      syncAndFetch(config);
+      await syncAndFetch(config);
       await refreshSelectedProduct(selectedProduct.sku);
       setTimeout(() => {
         setScrapeModalOpen(false);
@@ -1202,7 +1449,7 @@ function App() {
       ]);
 
       setMovementSuccess("Images sauvegardées avec succès.");
-      syncAndFetch(config);
+      await syncAndFetch(config);
       await refreshSelectedProduct(selectedProduct.sku);
       setTimeout(() => {
         setScrapeModalOpen(false);
@@ -1548,6 +1795,111 @@ function App() {
     }
   }
 
+  async function handleRevertAudit(item: AuditLogItem) {
+    if (!config || !selectedProduct) return;
+    
+    const fieldName = item.field;
+    const oldValue = item.old_value;
+    
+    if (!fieldName) return;
+    
+    try {
+      const attributesObj = selectedProduct.attributes
+        ? JSON.parse(selectedProduct.attributes)
+        : {};
+      
+      let label = selectedProduct.label || "";
+      let mpn = selectedProduct.mpn || "";
+      let brand = selectedProduct.brand || "";
+      let category = selectedProduct.category || "";
+      let sub_category = selectedProduct.sub_category || "";
+      let location = selectedProduct.location || "";
+      let min_stock = selectedProduct.min_stock || 0;
+      let price = selectedProduct.price || 0;
+      let pack_size = selectedProduct.pack_size || 1;
+      
+      switch (fieldName) {
+        case "Désignation":
+          label = oldValue || "";
+          break;
+        case "MPN":
+          mpn = oldValue || "";
+          break;
+        case "Marque":
+          brand = oldValue || "";
+          break;
+        case "Famille":
+          category = oldValue || "";
+          break;
+        case "Sous-famille":
+          sub_category = oldValue || "";
+          break;
+        case "Emplacement":
+          location = oldValue || "";
+          break;
+        case "Seuil d'alerte":
+          min_stock = Number(oldValue?.replace(",", ".")) || 0;
+          break;
+        case "Prix":
+          price = Number(oldValue?.replace(",", ".")) || 0;
+          break;
+        case "Taille lot":
+          pack_size = parseInt(oldValue || "1", 10) || 1;
+          break;
+        case "Code VPC":
+          try {
+            attributesObj.vpc = oldValue ? JSON.parse(oldValue) : {};
+          } catch (e) {
+            console.error("Failed to parse old VPC JSON", e);
+          }
+          break;
+        case "Largeur":
+          attributesObj.largeur = oldValue || "";
+          break;
+        case "Hauteur":
+          attributesObj.hauteur = oldValue || "";
+          break;
+        case "Profondeur":
+          attributesObj.profondeur = oldValue || "";
+          break;
+        case "Poids":
+          attributesObj.poids = oldValue || "";
+          break;
+        case "Notes":
+          attributesObj.notes = oldValue || "";
+          break;
+        default:
+          alert(`Restauration non supportée pour le champ : ${fieldName}`);
+          return;
+      }
+      
+      await invoke("create_product", {
+        networkPath: config.network_path,
+        trigramme: config.trigramme,
+        sku: selectedProduct.sku,
+        mpn: mpn,
+        label: label,
+        brand: brand,
+        category: category,
+        subCategory: sub_category,
+        location: location,
+        itemType: selectedProduct.item_type || "QUANTITATIVE",
+        minStock: min_stock,
+        price: price,
+        imagePath: selectedProduct.image_path || null,
+        pdfPath: selectedProduct.pdf_path || null,
+        attributes: attributesObj,
+        packSize: pack_size
+      });
+      
+      setMovementSuccess(`Restauration réussie pour le champ "${fieldName}"`);
+      await syncAndFetch(config);
+      await refreshSelectedProduct(selectedProduct.sku);
+    } catch (err: any) {
+      setMovementError(`Erreur lors de la restauration : ${err.toString()}`);
+    }
+  }
+
   // Form: Duplicate warning check on typing SKU
   function handleSkuChange(skuVal: string) {
     const cleanSku = skuVal.trim().replace(" ", "").replace("/", "-").toUpperCase();
@@ -1734,7 +2086,7 @@ function App() {
   function handleCellDoubleClick(sku: string, field: string, value: any) {
     setEditingCell({ sku, field });
     let valStr = value !== null && value !== undefined ? value.toString() : "";
-    if (field === "price" || field === "min_stock" || field === "largeur" || field === "hauteur" || field === "profondeur" || field === "poids" || field === "current_stock") {
+    if (field === "price" || field === "min_stock" || field === "largeur" || field === "hauteur" || field === "profondeur" || field === "poids" || field === "current_stock" || field === "pack_size") {
       valStr = valStr.replace(/\./g, ",");
     }
     setEditValue(valStr);
@@ -1767,6 +2119,8 @@ function App() {
       updatedProd.sub_category = cleanVal;
     } else if (editingCell.field === "min_stock") {
       updatedProd.min_stock = Number(cleanVal.replace(",", ".")) || 0;
+    } else if (editingCell.field === "pack_size") {
+      updatedProd.pack_size = Number(cleanVal.replace(",", ".")) || 1;
     } else if (editingCell.field === "largeur" || editingCell.field === "hauteur" || editingCell.field === "profondeur" || editingCell.field === "poids" || editingCell.field === "notes") {
       (attributesObj as any)[editingCell.field] = cleanVal;
       updatedProd.attributes = JSON.stringify(attributesObj);
@@ -1841,7 +2195,7 @@ function App() {
       setMovementSuccess("Mouvement enregistré !");
       setMovementQty("1");
       setMovementNote("");
-      syncAndFetch(config);
+      await syncAndFetch(config);
       await refreshSelectedProduct(selectedProduct.sku);
     } catch (err: any) {
       setMovementError(err.toString());
@@ -2367,13 +2721,17 @@ function App() {
                                   : `${prod.price.toFixed(2).replace(".", ",")} €`;
                                 rawValue = prod.price;
                                 isEditable = true;
+                              } else if (col.id === "pack_size") {
+                                displayValue = prod.pack_size;
+                                rawValue = prod.pack_size;
+                                isEditable = true;
                               } else if (col.id === "total_value") {
                                 displayValue = `${(prod.price * prod.current_stock).toFixed(2).replace(".", ",")} €`;
                                 rawValue = prod.price * prod.current_stock;
                               }
 
                               const isEditing = editingCell?.sku === prod.sku && editingCell.field === col.id;
-                              const isNumericField = ["price", "min_stock", "largeur", "hauteur", "profondeur", "poids"].includes(col.id);
+                              const isNumericField = ["price", "min_stock", "largeur", "hauteur", "profondeur", "poids", "pack_size"].includes(col.id);
 
                               return (
                                 <td
@@ -4313,16 +4671,60 @@ function App() {
                         badge = "🔵";
                         badgeClass = "audit-badge-update";
                         content = (
-                          <span>
-                            <strong>{item.field}</strong> : <span className="audit-old-value">{item.old_value || "—"}</span> → <span className="audit-new-value">{item.new_value || "—"}</span>
-                            {item.source_url && (
-                              <> {" "}
-                                <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
-                                  🔗 source
-                                </a>
-                              </>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+                            <span>
+                              <strong>{item.field}</strong> : <span className="audit-old-value">{item.old_value || "—"}</span> → <span className="audit-new-value">{item.new_value || "—"}</span>
+                              {item.source_url && (
+                                <> {" "}
+                                  <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
+                                    🔗 source
+                                  </a>
+                                </>
+                              )}
+                            </span>
+                            {inlineConfirm?.id === `revert-audit-${item.audit_id}` ? (
+                              <div style={{ display: "inline-flex", gap: "4px", alignItems: "center", backgroundColor: "rgba(59, 130, 246, 0.15)", padding: "2px 6px", borderRadius: "4px", marginLeft: "0.5rem", flexShrink: 0 }}>
+                                <span style={{ fontSize: "10px", color: "var(--text-secondary)", fontWeight: "600" }}>Restaurer ?</span>
+                                <button 
+                                  type="button" 
+                                  onClick={(e) => { e.stopPropagation(); inlineConfirm.action(); setInlineConfirm(null); }} 
+                                  style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "9px", padding: "1px 5px", fontWeight: "bold" }}
+                                >
+                                  Oui
+                                </button>
+                                <button 
+                                  type="button" 
+                                  onClick={(e) => { e.stopPropagation(); setInlineConfirm(null); }} 
+                                  style={{ background: "var(--bg-lighter)", color: "var(--text-primary)", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "9px", padding: "1px 5px" }}
+                                >
+                                  Non
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn-link"
+                                style={{
+                                  background: "none",
+                                  border: "none",
+                                  color: "var(--accent)",
+                                  textDecoration: "underline",
+                                  cursor: "pointer",
+                                  padding: 0,
+                                  fontSize: "10px",
+                                  font: "inherit",
+                                  marginLeft: "0.5rem",
+                                  whiteSpace: "nowrap"
+                                }}
+                                onClick={() => setInlineConfirm({
+                                  id: `revert-audit-${item.audit_id}`,
+                                  action: () => handleRevertAudit(item)
+                                })}
+                              >
+                                ↩️ Restaurer
+                              </button>
                             )}
-                          </span>
+                          </div>
                         );
                       } else if (item.action === "SCRAPE_PRICE") {
                         badge = "🟠";
@@ -5747,6 +6149,90 @@ function App() {
                 <span style={{ fontSize: "11px", color: "var(--accent)", fontWeight: "600" }}>Restaurer 🗖</span>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Price Confirmation Modal Overlay */}
+      {showPriceConfirmModal && pendingScrapeDetails && (
+        <div className="modal-overlay" style={{ zIndex: 1900 }}>
+          <div className="modal-container" style={{ maxWidth: "550px", backgroundColor: "var(--bg-secondary)", borderRadius: "8px" }}>
+            <div className="modal-header">
+              <h3>Sélectionner le prix et conditionnement</h3>
+              <button 
+                type="button" 
+                className="modal-close" 
+                onClick={() => setShowPriceConfirmModal(false)}
+                style={{ background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer", fontSize: "20px" }}
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal-body" style={{ padding: "1.5rem" }}>
+              <p style={{ fontSize: "13px", color: "var(--text-secondary)", marginBottom: "1.2rem" }}>
+                Plusieurs candidats de prix ont été détectés pour ce produit. Veuillez sélectionner l'option correcte :
+              </p>
+              
+              <div 
+                style={{ 
+                  display: "flex", 
+                  flexDirection: "column", 
+                  gap: "0.8rem", 
+                  maxHeight: "320px", 
+                  overflowY: "auto",
+                  padding: "0.2rem" 
+                }}
+              >
+                {pendingScrapeDetails.price_candidates?.map((candidate: any, idx: number) => {
+                  const unitPrice = parseFloat((candidate.price / candidate.pack_size).toFixed(3));
+                  return (
+                    <div 
+                      key={idx}
+                      onClick={() => handleSelectScrapedPrice(candidate)}
+                      className="price-candidate-item"
+                      style={{
+                        border: "1px solid var(--border-color)",
+                        borderRadius: "6px",
+                        padding: "1rem",
+                        backgroundColor: "var(--bg-tertiary)",
+                        cursor: "pointer",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        transition: "all 0.2s ease"
+                      }}
+                    >
+                      <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                        <span style={{ fontWeight: "600", fontSize: "14px", color: "var(--accent)" }}>
+                          {candidate.label}
+                        </span>
+                        <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                          Type de prix : {candidate.tax_type}
+                        </span>
+                      </div>
+                      <div style={{ textAlign: "right", display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                        <span style={{ fontSize: "16px", fontWeight: "bold", color: "var(--text-primary)" }}>
+                          {candidate.price.toFixed(2)} €
+                        </span>
+                        <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                          Taille lot : {candidate.pack_size} u.
+                          {candidate.pack_size > 1 && ` (soit ${unitPrice} €/u.)`}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", padding: "1rem" }}>
+              <button 
+                type="button" 
+                className="btn btn-secondary" 
+                onClick={() => setShowPriceConfirmModal(false)}
+              >
+                Annuler
+              </button>
+            </div>
           </div>
         </div>
       )}

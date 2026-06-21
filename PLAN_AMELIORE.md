@@ -1,4 +1,4 @@
-# StockFlow - Plan de Projet (v1.4.1)
+# StockFlow - Plan de Projet (v1.4.2)
 
 **StockFlow** est un système intelligent de gestion d'inventaire industriel conçu pour fonctionner dans un environnement Windows restreint (sans installation, sans droits administrateur, sans ports réseau ouverts). Il repose sur une architecture "Serverless" utilisant un lecteur réseau partagé comme unique vecteur de communication.
 
@@ -195,7 +195,7 @@ Une fois la nomenclature constituée, l'utilisateur a le choix entre deux action
 
 
 #### Évolutions Récentes de l'UI et Scraping (Mai 2026)
-- **Confirmations Inline :** Toutes les actions de suppression (PDF, Images, Produit) abandonnent les modales globales au profit de micro-composants React *inline* de confirmation (état `inlineConfirm`), conservant le focus utilisateur.
+- **Confirmations Inline :** Conformément aux `globale_rules` proscrivant l'usage de boîtes de dialogue système (`alert`, `confirm`, etc.), toutes les actions de suppression (PDF, Images, Produit) ainsi que le bouton de restauration des valeurs modifiées du journal d'audit abandonnent les boîtes système globales (zéro `window.confirm`) au profit de micro-composants React *inline* de confirmation (état `inlineConfirm`), conservant le focus utilisateur.
 - **Saisie Rapide des Stocks :** La cellule "Stock Actuel" du tableau (Ag-Grid / DataGrid) est désormais éditable au double-clic avec calcul asynchrone du mouvement différentiel vers le backend SQLite.
 - **Scraping PDF Avancé :** 
   - *Coupe-circuit :* Le moteur Rust stoppe la recherche s'il trouve les documents chez le fournisseur VPC (évitant l'appel massif à SearxNG).

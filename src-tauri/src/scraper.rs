@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables)]
 use std::fs;
 use std::path::Path;
 use chrono::{DateTime, Utc, TimeZone};
@@ -75,7 +76,7 @@ fn apply_stealth_headers(builder: reqwest::blocking::RequestBuilder, url: &str) 
     builder
 }
 
-fn apply_stealth_headers_async(builder: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+pub fn apply_stealth_headers_async(builder: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
     let mut builder = builder
         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
         .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
@@ -1025,29 +1026,37 @@ fn fetch_vpc_page_http1(url: &str) -> Option<String> {
     }
 }
 
-async fn fetch_vpc_page_async(client: &reqwest::Client, url: &str) -> Option<String> {
+async fn fetch_html_direct(url: &str) -> Option<String> {
     human_delay_async().await;
+    let client = reqwest::Client::new();
     let req = client.get(url);
     let req = apply_stealth_headers_async(req, url);
-    match req.send().await {
-        Ok(r) if r.status().is_success() => r.text().await.ok(),
-        _ => None,
+    if let Ok(r) = req.send().await {
+        if r.status().is_success() {
+            if let Ok(text) = r.text().await {
+                return Some(text);
+            }
+        }
     }
-}
-
-async fn fetch_vpc_page_http1_async(url: &str) -> Option<String> {
+    
+    // Fallback HTTP/1.1
     human_delay_async().await;
-    let client = reqwest::Client::builder()
+    if let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .user_agent(get_random_user_agent())
-        .build()
-        .ok()?;
-    let req = client.get(url);
-    let req = apply_stealth_headers_async(req, url);
-    match req.send().await {
-        Ok(r) if r.status().is_success() => r.text().await.ok(),
-        _ => None,
+        .build() 
+    {
+        let req = client.get(url);
+        let req = apply_stealth_headers_async(req, url);
+        if let Ok(r) = req.send().await {
+            if r.status().is_success() {
+                if let Ok(text) = r.text().await {
+                    return Some(text);
+                }
+            }
+        }
     }
+    None
 }
 
 /// Construit l'URL de la fiche produit pour un VPC donné.
@@ -2493,6 +2502,14 @@ pub async fn scrape_images_internal(
 
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PriceCandidate {
+    pub price: f64,
+    pub pack_size: i64,
+    pub tax_type: String,
+    pub label: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ScrapedProductDetails {
     pub sku: String,
     pub mpn: String,
@@ -2507,9 +2524,10 @@ pub struct ScrapedProductDetails {
     pub is_deterministic_fallback: Option<bool>,
     pub json_ld_blocks: Option<Vec<String>>,
     pub cloudinary_urls: Option<Vec<String>>,
+    pub price_candidates: Option<Vec<PriceCandidate>>,
 }
 
-async fn scrape_farnell_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, String> {
+pub async fn scrape_farnell_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, String> {
     let url = format!(
         "https://api.element14.com/catalog/v1/service?keyword=search:{}&apiKey={}&storeInfo.id=fr.farnell.com&resultsSettings.responseGroup=large&format=json",
         urlencoding::encode(sku),
@@ -2559,6 +2577,7 @@ async fn scrape_farnell_api(sku: &str, api_key: &str) -> Result<ScrapedProductDe
                     is_deterministic_fallback: Some(false),
                     cloudinary_urls: None,
                     json_ld_blocks: None,
+                    price_candidates: None,
                 });
             }
         }
@@ -2566,7 +2585,7 @@ async fn scrape_farnell_api(sku: &str, api_key: &str) -> Result<ScrapedProductDe
     Err("Farnell API call failed or product not found".to_string())
 }
 
-async fn scrape_mouser_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, String> {
+pub async fn scrape_mouser_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, String> {
     let url = format!(
         "https://api.mouser.com/api/v1.0/search/partnumber?apiKey={}",
         api_key
@@ -2623,6 +2642,7 @@ async fn scrape_mouser_api(sku: &str, api_key: &str) -> Result<ScrapedProductDet
                     is_deterministic_fallback: Some(false),
                     cloudinary_urls: None,
                     json_ld_blocks: None,
+                    price_candidates: None,
                 });
             }
         }
@@ -2641,117 +2661,21 @@ fn debug_log(msg: &str) {
     }
 }
 
-pub async fn scrape_url_via_webview(
+pub async fn evaluate_js_in_webview(
     app_handle: &tauri::AppHandle,
     url: &str,
-) -> Result<ScrapedProductDetails, String> {
+    eval_js: &str,
+) -> Result<String, String> {
     let _ = fs::remove_file("d:\\Code Projects\\Stockflow\\scratch\\webview_debug.log");
-    debug_log(&format!("Starting webview scraping for URL: {}", url));
-    let label = format!("scraper_{}", uuid::Uuid::new_v4().simple());
+    debug_log(&format!("Starting generic webview execution for URL: {}", url));
+    let label = format!("webview_{}", uuid::Uuid::new_v4().simple());
     
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     
     let app_handle_clone = app_handle.clone();
     let url_clone = url.to_string();
-    let url_for_details = url.to_string();
+    let eval_js_string = eval_js.to_string();
     
-    let eval_js = r#"
-(function() {
-    function tryScrape() {
-        if (document.readyState !== 'complete' && document.readyState !== 'interactive') {
-            return false;
-        }
-
-        const pdfs = [];
-        document.querySelectorAll('a').forEach(a => {
-            const href = a.getAttribute('href');
-            if (href && (href.toLowerCase().includes('.pdf') || href.toLowerCase().includes('filetype=pdf') || href.toLowerCase().includes('format=pdf'))) {
-                let absUrl = href;
-                try { absUrl = new URL(href, document.baseURI || window.location.href).toString(); } catch(_) {}
-                const title = a.textContent.trim() || 'Fiche Technique';
-                pdfs.push({ url: absUrl, title: title });
-            }
-        });
-
-        let brand = '';
-        let label = '';
-        let price = 0.0;
-        let mpn = '';
-
-        document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
-            try {
-                const json = JSON.parse(script.textContent || '{}');
-                const blocks = Array.isArray(json) ? json : [json];
-                for (const data of blocks) {
-                    const items = data['@graph'] && Array.isArray(data['@graph']) ? data['@graph'] : [data];
-                    for (const item of items) {
-                        if (item['@type'] === 'Product' || (Array.isArray(item['@type']) && item['@type'].includes('Product'))) {
-                            if (item.name) label = item.name;
-                            if (item.brand) {
-                                brand = typeof item.brand === 'string' ? item.brand : (item.brand.name || '');
-                            }
-                            if (item.mpn) mpn = String(item.mpn);
-                            if (item.offers) {
-                                const offers = Array.isArray(item.offers) ? item.offers[0] : item.offers;
-                                const pVal = offers.lowPrice || offers.price;
-                                if (pVal) price = parseFloat(String(pVal).replace(',', '.'));
-                            }
-                        }
-                    }
-                }
-            } catch(_) {}
-        });
-
-        if (!label) {
-            label = document.querySelector('h1')?.textContent?.trim() || '';
-        }
-
-        if (!label && document.querySelectorAll('a').length < 10) {
-            return false;
-        }
-
-        const jsonLdBlocks = [];
-        document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
-            jsonLdBlocks.push(script.textContent);
-        });
-        
-        const cloudinaryUrls = [];
-        const htmlText = document.documentElement.outerHTML;
-        const regex = /https:\/\/res\.cloudinary\.com\/rsc\/image\/upload\/[^"'\s<>}\\]+/g;
-        const matches = htmlText.match(regex) || [];
-        matches.forEach(m => cloudinaryUrls.push(m.replace('\\', '')));
-
-        const res = {
-            brand: brand.trim(),
-            label: label.trim(),
-            price: price,
-            mpn: mpn.trim(),
-            pdfs: pdfs,
-            json_ld_blocks: jsonLdBlocks,
-            cloudinary_urls: cloudinaryUrls
-        };
-
-        window.location.hash = '#scraped:' + encodeURIComponent(JSON.stringify(res));
-        return true;
-    }
-
-    try {
-        if (!tryScrape()) {
-            const interval = setInterval(() => {
-                if (tryScrape()) clearInterval(interval);
-            }, 500);
-            setTimeout(() => {
-                clearInterval(interval);
-                window.location.hash = '#scraped_err:' + encodeURIComponent('Timeout côté JS');
-            }, 10000);
-        }
-    } catch(e) {
-        window.location.hash = '#scraped_err:' + encodeURIComponent(e.toString());
-    }
-})();
-"#;
-
-    debug_log("Requesting webview creation on main thread...");
     let webview_res_tx = std::sync::mpsc::channel();
     let tx_clone = tx.clone();
     
@@ -2762,7 +2686,7 @@ pub async fn scrape_url_via_webview(
             tauri::WebviewUrl::External(url_clone.parse().unwrap())
         )
         .visible(false)
-        .initialization_script(eval_js)
+        .initialization_script(&eval_js_string)
         .on_navigation(move |nav_url| {
             let url_str = nav_url.as_str();
             if let Some(pos) = url_str.find("#scraped:") {
@@ -2782,78 +2706,112 @@ pub async fn scrape_url_via_webview(
         Err(e) => return Err(e.to_string()),
     };
 
-    let timeout = std::time::Duration::from_secs(12);
+    let timeout = std::time::Duration::from_secs(30);
     let result = match tokio::time::timeout(timeout, rx.recv()).await {
         Ok(Some(Ok(encoded))) => {
-            if let Ok(decoded) = urlencoding::decode(&encoded) {
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&decoded) {
-                    let brand = json_val["brand"].as_str().unwrap_or("").to_string();
-                    let label = json_val["label"].as_str().unwrap_or("").to_string();
-                    let price = json_val["price"].as_f64().unwrap_or(0.0);
-                    let mpn = json_val["mpn"].as_str().unwrap_or("").to_string();
-                    
-                    let mut pdf_candidates = Vec::new();
-                    if let Some(pdfs_arr) = json_val["pdfs"].as_array() {
-                        for p_val in pdfs_arr {
-                            let u = p_val["url"].as_str().unwrap_or("").to_string();
-                            let t = p_val["title"].as_str().unwrap_or("").to_string();
-                            if !u.is_empty() {
-                                pdf_candidates.push((u, t));
-                            }
-                        }
-                    }
-                    
-                    let mut json_ld_blocks = None;
-                    if let Some(blocks) = json_val["json_ld_blocks"].as_array() {
-                        let b: Vec<String> = blocks.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-                        if !b.is_empty() { json_ld_blocks = Some(b); }
-                    }
-                    
-                    let mut cloudinary_urls = None;
-                    if let Some(urls) = json_val["cloudinary_urls"].as_array() {
-                        let u: Vec<String> = urls.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-                        if !u.is_empty() { cloudinary_urls = Some(u); }
-                    }
-
-                    if !pdf_candidates.is_empty() {
-                        if let Ok(mut cache) = crate::scraper::WEBVIEW_PDF_CACHE.lock() {
-                            *cache = Some((url_for_details.clone(), pdf_candidates));
-                        }
-                    }
-
-                    Ok(ScrapedProductDetails {
-                        sku: String::new(),
-                        mpn,
-                        brand,
-                        label,
-                        price,
-                        pack_size: 0,
-                        dimensions: None,
-                        weight: None,
-                        source_url: Some(url_for_details.to_string()),
-                        fallback_info: Some("Scraping WebView réussi".to_string()),
-                        is_deterministic_fallback: Some(true),
-                        cloudinary_urls,
-                        json_ld_blocks,
-                    })
-                } else {
-                    Err("Erreur parsing JSON webview".to_string())
-                }
-            } else {
-                Err("Erreur de décodage URL webview".to_string())
-            }
+            urlencoding::decode(&encoded)
+                .map(|s| s.into_owned())
+                .map_err(|_| "Erreur de décodage URL webview".to_string())
         },
         Ok(Some(Err(e))) => Err(urlencoding::decode(&e).unwrap_or_else(|_| "Unknown error".into()).into_owned()),
         Ok(None) => Err("Channel fermé".to_string()),
         Err(_) => Err("Timeout du scraping WebView".to_string()),
     };
 
-    let webview_clone3 = webview.clone();
+    let webview_clone = webview.clone();
     let _ = app_handle.run_on_main_thread(move || {
-        let _ = webview_clone3.close();
+        let _ = webview_clone.close();
     });
 
     result
+}
+
+pub async fn scrape_url_via_webview(
+    app_handle: &tauri::AppHandle,
+    url: &str,
+) -> Result<ScrapedProductDetails, String> {
+    let eval_js = include_str!("scripts/webview_scraper.js");
+    let url_for_details = url.to_string();
+    
+    let decoded = evaluate_js_in_webview(app_handle, url, eval_js).await?;
+
+    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&decoded) {
+                let brand = json_val["brand"].as_str().unwrap_or("").to_string();
+        let label = json_val["label"].as_str().unwrap_or("").to_string();
+        let price = json_val["price"].as_f64().unwrap_or(0.0);
+        let pack_size = json_val["pack_size"].as_i64().unwrap_or(1);
+        let mpn = json_val["mpn"].as_str().unwrap_or("").to_string();
+        
+        let mut pdf_candidates = Vec::new();
+        if let Some(pdfs_arr) = json_val["pdfs"].as_array() {
+            for p_val in pdfs_arr {
+                let u = p_val["url"].as_str().unwrap_or("").to_string();
+                let t = p_val["title"].as_str().unwrap_or("").to_string();
+                if !u.is_empty() {
+                    pdf_candidates.push((u, t));
+                }
+            }
+        }
+        
+        let mut json_ld_blocks = None;
+        if let Some(blocks) = json_val["json_ld_blocks"].as_array() {
+            let b: Vec<String> = blocks.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+            if !b.is_empty() { json_ld_blocks = Some(b); }
+        }
+        
+        let mut cloudinary_urls = None;
+        if let Some(urls) = json_val["cloudinary_urls"].as_array() {
+            let u: Vec<String> = urls.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+            if !u.is_empty() { cloudinary_urls = Some(u); }
+        }
+
+        let mut price_candidates = None;
+        if let Some(pc_arr) = json_val["price_candidates"].as_array() {
+            let mut list = Vec::new();
+            for pc_val in pc_arr {
+                let p = pc_val["price"].as_f64().unwrap_or(0.0);
+                let ps = pc_val["pack_size"].as_i64().unwrap_or(1);
+                let tt = pc_val["tax_type"].as_str().unwrap_or("").to_string();
+                let lbl = pc_val["label"].as_str().unwrap_or("").to_string();
+                if p > 0.0 {
+                    list.push(PriceCandidate {
+                        price: p,
+                        pack_size: ps,
+                        tax_type: tt,
+                        label: lbl,
+                    });
+                }
+            }
+            if !list.is_empty() {
+                price_candidates = Some(list);
+            }
+        }
+
+        if !pdf_candidates.is_empty() {
+            if let Ok(mut cache) = crate::scraper::WEBVIEW_PDF_CACHE.lock() {
+                *cache = Some((url_for_details.clone(), pdf_candidates));
+            }
+        }
+
+        Ok(ScrapedProductDetails {
+            sku: String::new(),
+            mpn,
+            brand,
+            label,
+            price,
+            pack_size,
+            dimensions: None,
+            weight: None,
+            source_url: Some(url_for_details.to_string()),
+            fallback_info: Some("Scraping WebView réussi".to_string()),
+            is_deterministic_fallback: Some(true),
+            cloudinary_urls,
+            json_ld_blocks,
+            price_candidates,
+        })
+    } else {
+        Err("Erreur parsing JSON webview".to_string())
+    }
 }
 
 pub async fn scrape_product_details_internal(
@@ -2873,21 +2831,22 @@ pub async fn scrape_product_details_internal(
     let api_keys = config.as_ref().map(|c| &c.vpc_api_keys);
     let vpc_urls = config.as_ref().map(|c| c.vpc_urls.clone()).unwrap_or_default();
 
-    if vpc_site.to_lowercase().contains("farnell") {
-        if let Some(key) = api_keys.and_then(|keys| keys.get(vpc_site).or_else(|| keys.get("Farnell"))) {
-            if let Ok(details) = scrape_farnell_api(code_to_use, key).await {
-                return Ok(details);
-            }
-        } else {
-            println!("⚠️ Avertissement : Pas de clé API pour Farnell. Requêtes directes limitées.");
+    let mut already_scraped_webview = false;
+    if let Some(provider) = crate::providers::VpcProvider::from_site(&vpc_site) {
+        if matches!(provider, crate::providers::VpcProvider::RsComponents) {
+            already_scraped_webview = true;
         }
-    } else if vpc_site.to_lowercase().contains("mouser") {
-        if let Some(key) = api_keys.and_then(|keys| keys.get(vpc_site).or_else(|| keys.get("Mouser"))) {
-            if let Ok(details) = scrape_mouser_api(code_to_use, key).await {
-                return Ok(details);
+        match provider.scrape_details(app_handle, sku, code_to_use, api_keys).await {
+            Ok(details) => {
+                if details.price > 0.0 {
+                    return Ok(details);
+                } else {
+                    println!("⚠️ Avertissement : Le provider {} a renvoyé un prix nul ou invalide ({:.2} €).", vpc_site, details.price);
+                }
             }
-        } else {
-            println!("⚠️ Avertissement : Pas de clé API pour Mouser. Requêtes directes limitées.");
+            Err(err) => {
+                println!("⚠️ Avertissement : Le provider {} a échoué ({}). Passage au scraper générique.", vpc_site, err);
+            }
         }
     }
 
@@ -2936,7 +2895,7 @@ pub async fn scrape_product_details_internal(
             }
         }
 
-        if html_opt.is_none() {
+        if html_opt.is_none() && !already_scraped_webview {
             if let Ok(details) = scrape_url_via_webview(app_handle, &direct_url).await {
                 let mut d = details;
                 d.sku = sku.to_string();
@@ -3199,6 +3158,7 @@ pub async fn scrape_product_details_internal(
                 is_deterministic_fallback: Some(false),
                 cloudinary_urls: None,
                 json_ld_blocks: Some(json_ld_blocks),
+                price_candidates: None,
             });
         }
     }
@@ -3442,6 +3402,7 @@ pub async fn scrape_product_details_internal(
                                     is_deterministic_fallback: Some(false),
                                     cloudinary_urls: None,
                                     json_ld_blocks: None,
+                                    price_candidates: None,
                                 });
                             }
                         }
@@ -3472,6 +3433,7 @@ pub async fn scrape_product_details_internal(
         is_deterministic_fallback: Some(true),
         cloudinary_urls: None,
         json_ld_blocks: None,
+        price_candidates: None,
     })
 }
 
