@@ -5,7 +5,6 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import logoImg from "./assets/logo.png";
 import "./App.css";
-
 interface AppConfig {
   trigramme: string;
   network_path: string;
@@ -61,6 +60,7 @@ const DEFAULT_COLUMNS: ColumnConfig[] = [
   { id: "hauteur", label: "Hauteur (mm)", width: 100, visible: true },
   { id: "profondeur", label: "Profondeur (mm)", width: 110, visible: true },
   { id: "poids", label: "Poids (g)", width: 90, visible: true },
+  { id: "notes", label: "Notes", width: 180, visible: false },
 ];
 
 function getVpcCode(prod: Product): string {
@@ -280,6 +280,7 @@ function App() {
     hauteur: "",
     profondeur: "",
     poids: "",
+    notes: "",
     initial_stock: "0"
   });
   const [duplicateWarning, setDuplicateWarning] = useState("");
@@ -306,7 +307,8 @@ function App() {
     largeur: "",
     hauteur: "",
     profondeur: "",
-    poids: ""
+    poids: "",
+    notes: ""
   });
   const [newVpcSite, setNewVpcSite] = useState("");
   const [newVpcCode, setNewVpcCode] = useState("");
@@ -323,6 +325,8 @@ function App() {
 
   // Helper function to scrape and auto-fill either a specific field or all fields
   async function handleAutoFill(isEdit: boolean, targetField?: string) {
+    setAutoFillSource(null);
+    setAutoFillFallbackInfo(null);
     const vpcSite = isEdit ? editVpcSite : newVpcSite;
     const vpcCode = isEdit ? editVpcCode : newVpcCode;
     const mpn = isEdit ? editProduct.mpn : newProduct.mpn;
@@ -346,8 +350,32 @@ function App() {
       setCreateSuccess("");
     }
 
+    const FIELD_NAMES_FR: Record<string, string> = {
+      label: "désignation",
+      brand: "marque",
+      price: "prix",
+      pack_size: "taille du lot",
+      mpn: "référence fabricant",
+      largeur: "largeur",
+      hauteur: "hauteur",
+      profondeur: "profondeur",
+      poids: "poids"
+    };
+
     const fieldKey = targetField || "ALL";
     setAutoFillLoading(prev => ({ ...prev, [fieldKey]: true }));
+
+    // Open Scrape Progress Modal
+    setIsScrapingMedia(true);
+    setScrapeError(null);
+    setIsScrapeModalMinimized(false);
+    setScrapeModalTitle(targetField ? `Auto-remplissage du champ : ${FIELD_NAMES_FR[targetField] || targetField}` : "Auto-remplissage de tous les champs");
+    setScrapeSteps([
+      { label: `Recherche des informations pour ${codeToUse}`, status: "active" },
+      { label: "Extraction et traitement des données", status: "pending" },
+      { label: "Mise à jour des champs", status: "pending" }
+    ]);
+    setScrapeModalOpen(true);
 
     try {
       const details: any = await invoke("scrape_product_details", {
@@ -363,6 +391,14 @@ function App() {
       }
       setAutoFillFallbackInfo(details.fallback_info || null);
 
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[0].status = "success";
+        next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
+        next[1].status = "active";
+        return next;
+      });
+
       const parsedAttrs = (isEdit ? editProduct.largeur || editProduct.hauteur || editProduct.profondeur || editProduct.poids : false) 
         ? {
             largeur: isEdit ? editProduct.largeur : newProduct.largeur,
@@ -376,18 +412,6 @@ function App() {
             profondeur: details.dimensions ? details.dimensions.split('x')[2] : undefined,
             poids: details.weight || undefined
           };
-
-      const FIELD_NAMES_FR: Record<string, string> = {
-        label: "désignation",
-        brand: "marque",
-        price: "prix",
-        pack_size: "taille du lot",
-        mpn: "référence fabricant",
-        largeur: "largeur",
-        hauteur: "hauteur",
-        profondeur: "profondeur",
-        poids: "poids"
-      };
 
       let wasFound = true;
       if (targetField) {
@@ -403,10 +427,28 @@ function App() {
       }
 
       if (!wasFound && targetField) {
+        setAutoFillSource(null);
+        setAutoFillFallbackInfo(null);
         const errMsg = `Propriété '${FIELD_NAMES_FR[targetField] || targetField}' n'a pas pu être trouvée.`;
         if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
+        
+        setScrapeError(errMsg);
+        setScrapeSteps(prev => {
+          const next = [...prev];
+          next[1].status = "error";
+          next[1].details = errMsg;
+          return next;
+        });
         return;
       }
+
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[1].status = "success";
+        next[1].details = "Données extraites avec succès";
+        next[2].status = "active";
+        return next;
+      });
 
       if (isEdit) {
         setEditProduct(prev => {
@@ -439,15 +481,29 @@ function App() {
         });
         setCreateSuccess(targetField ? `Champ '${FIELD_NAMES_FR[targetField] || targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
       }
+
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[2].status = "success";
+        next[2].details = targetField ? `Mise à jour du champ : ${FIELD_NAMES_FR[targetField] || targetField}` : "Tous les champs mis à jour";
+        return next;
+      });
     } catch (err: any) {
       const errMsg = `Échec de l'auto-remplissage : ${err.toString()}`;
       if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
+      setScrapeError(errMsg);
+      setScrapeSteps(prev => {
+        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
+      });
     } finally {
       setAutoFillLoading(prev => ({ ...prev, [fieldKey]: false }));
+      setIsScrapingMedia(false);
     }
   }
 
   async function triggerAutoFillAction(isEdit: boolean) {
+    setAutoFillSource(null);
+    setAutoFillFallbackInfo(null);
     if (!autofillCodeInput.trim()) {
       const errorMsg = "Veuillez saisir un code ou une référence pour l'auto-remplissage.";
       if (isEdit) setEditError(errorMsg); else setCreateError(errorMsg);
@@ -463,6 +519,18 @@ function App() {
     }
     
     setAutoFillLoading(prev => ({ ...prev, ["ALL"]: true }));
+
+    // Open Scrape Progress Modal
+    setIsScrapingMedia(true);
+    setScrapeError(null);
+    setIsScrapeModalMinimized(false);
+    setScrapeModalTitle("Auto-remplissage global");
+    setScrapeSteps([
+      { label: `Recherche des informations pour ${autofillCodeInput}`, status: "active" },
+      { label: "Extraction et traitement des données", status: "pending" },
+      { label: "Mise à jour de la fiche produit", status: "pending" }
+    ]);
+    setScrapeModalOpen(true);
     
     try {
       const vpcSite = autofillType;
@@ -484,10 +552,26 @@ function App() {
       }
       setAutoFillFallbackInfo(details.fallback_info || null);
 
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[0].status = "success";
+        next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
+        next[1].status = "active";
+        return next;
+      });
+
       const formatNum = (v: any) => {
         if (v === null || v === undefined) return "";
         return v.toString().replace(/\./g, ",");
       };
+
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[1].status = "success";
+        next[1].details = "Données extraites avec succès";
+        next[2].status = "active";
+        return next;
+      });
 
       if (isEdit) {
         setEditProduct(prev => ({
@@ -527,15 +611,29 @@ function App() {
         }
         setCreateSuccess("Champs pré-remplis avec succès !");
       }
+
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[2].status = "success";
+        next[2].details = "Champs pré-remplis mis à jour";
+        return next;
+      });
     } catch (err: any) {
       const errMsg = `Échec de l'auto-remplissage : ${err.toString()}`;
       if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
+      setScrapeError(errMsg);
+      setScrapeSteps(prev => {
+        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
+      });
     } finally {
       setAutoFillLoading(prev => ({ ...prev, ["ALL"]: false }));
+      setIsScrapingMedia(false);
     }
   }
 
   async function handleFindReseller(isEdit: boolean) {
+    setAutoFillSource(null);
+    setAutoFillFallbackInfo(null);
     setIsFindingReseller(true);
     if (isEdit) {
       setEditError("");
@@ -548,6 +646,18 @@ function App() {
     const brandToUse = isEdit ? editProduct.brand : newProduct.brand;
     const labelToUse = isEdit ? editProduct.label : newProduct.label;
 
+    // Open Scrape Progress Modal
+    setIsScrapingMedia(true);
+    setScrapeError(null);
+    setIsScrapeModalMinimized(false);
+    setScrapeModalTitle("Recherche de revendeur");
+    setScrapeSteps([
+      { label: `Requête SearXNG pour revendeur (${skuToUse})`, status: "active" },
+      { label: "Analyse des résultats", status: "pending" },
+      { label: "Association du revendeur trouvé", status: "pending" }
+    ]);
+    setScrapeModalOpen(true);
+
     try {
       const reseller: { provider: string; code: string; url: string } | null = await invoke(
         "find_reseller_via_searxng",
@@ -557,7 +667,27 @@ function App() {
           label: labelToUse || null
         }
       );
+
+      setScrapeSteps(prev => {
+        const next = [...prev];
+        next[0].status = "success";
+        next[1].status = "active";
+        return next;
+      });
+
       if (reseller) {
+        if (reseller.url) {
+          setAutoFillSource(reseller.url);
+        }
+
+        setScrapeSteps(prev => {
+          const next = [...prev];
+          next[1].status = "success";
+          next[1].details = `Revendeur identifié : ${reseller.provider} (Code: ${reseller.code})`;
+          next[2].status = "active";
+          return next;
+        });
+
         if (isEdit) {
           setEditVpcSite(reseller.provider);
           setEditVpcCode(reseller.code);
@@ -567,15 +697,35 @@ function App() {
           setNewVpcCode(reseller.code);
           setCreateSuccess(`Revendeur trouvé ! Fournisseur : ${reseller.provider}, Code : ${reseller.code}`);
         }
+
+        setScrapeSteps(prev => {
+          const next = [...prev];
+          next[2].status = "success";
+          next[2].details = `Associé : ${reseller.provider} - ${reseller.code}`;
+          return next;
+        });
       } else {
         const noResellerMsg = "Aucun revendeur configuré trouvé sur SearXNG pour cette référence.";
         if (isEdit) setEditError(noResellerMsg); else setCreateError(noResellerMsg);
+
+        setScrapeError(noResellerMsg);
+        setScrapeSteps(prev => {
+          const next = [...prev];
+          next[1].status = "error";
+          next[1].details = noResellerMsg;
+          return next;
+        });
       }
     } catch (err: any) {
       const errMsg = `Erreur lors de la recherche de revendeur : ${err.toString()}`;
       if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
+      setScrapeError(errMsg);
+      setScrapeSteps(prev => {
+        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
+      });
     } finally {
       setIsFindingReseller(false);
+      setIsScrapingMedia(false);
     }
   }
 
@@ -623,6 +773,41 @@ function App() {
   const [hoverPosition, setHoverPosition] = useState({ x: 0, y: 0 });
   const [isScrapingPrice, setIsScrapingPrice] = useState(false);
   const [isScrapingMedia, setIsScrapingMedia] = useState(false);
+
+  // Scraped image validation states
+  const [scrapedImageCandidates, setScrapedImageCandidates] = useState<{ url: string; title?: string; domain: string }[]>([]);
+  const [selectedImageUrls, setSelectedImageUrls] = useState<string[]>([]);
+  const [isImageValidationMode, setIsImageValidationMode] = useState(false);
+  const [isSavingImages, setIsSavingImages] = useState(false);
+  const [isScrapeModalMinimized, setIsScrapeModalMinimized] = useState(false);
+
+  // New PDF validation states
+  const [scrapedPdfCandidates, setScrapedPdfCandidates] = useState<{ url: string; title: string; domain: string }[]>([]);
+  const [selectedPdfUrl, setSelectedPdfUrl] = useState<string>("");
+  const [selectedPdfType, setSelectedPdfType] = useState<string>("");
+  const [isPdfValidationMode, setIsPdfValidationMode] = useState(false);
+  const [isSavingPdf, setIsSavingPdf] = useState(false);
+
+  async function handleCancelScrape() {
+    setScrapeModalOpen(false);
+    setIsScrapingMedia(false);
+    setIsSavingImages(false);
+    setIsSavingPdf(false);
+    setIsScrapingPrice(false);
+    setIsImageValidationMode(false);
+    setIsPdfValidationMode(false);
+    setScrapedImageCandidates([]);
+    setSelectedImageUrls([]);
+    setScrapedPdfCandidates([]);
+    setSelectedPdfUrl("");
+    if (config) {
+      try {
+        await invoke("force_release_lock", { networkPath: config.network_path });
+      } catch (err) {
+        console.error("Erreur lors de la libération du verrou :", err);
+      }
+    }
+  }
 
   interface ScrapeProgressStep {
     label: string;
@@ -818,16 +1003,33 @@ function App() {
     }
   }
 
+  function sanitizeTitleForDocType(title: string, sku: string): string {
+    let t = (title || "").toLowerCase();
+    // Supprimer les préfixes [PDF] et extensions
+    t = t.replace(/\[pdf\]/g, "");
+    t = t.replace(/pdf/g, "");
+    t = t.replace(new RegExp(sku.toLowerCase(), "g"), "");
+    t = t.replace(/legrand|schneider|siemens|abb/g, ""); // marques courantes
+    t = t.replace(/[^a-z0-9àéèçùœ\s-_]/g, ""); // garder lettres, chiffres, espaces, tirets
+    t = t.trim().replace(/[\s-_]+/g, "_"); // remplacer espaces par underscores
+    if (t.startsWith("_")) t = t.substring(1);
+    if (t.endsWith("_")) t = t.substring(0, t.length - 1);
+    if (t.length > 25) t = t.substring(0, 25);
+    return t || "document";
+  }
+
   async function handleScrapePdfSingle() {
     if (!config || !selectedProduct) return;
     setIsScrapingMedia(true);
     setScrapeError(null);
-    setScrapeModalTitle(`Scraping PDF pour : ${selectedProduct.sku}`);
+    setIsPdfValidationMode(false);
+    setIsScrapeModalMinimized(false);
+    setScrapedPdfCandidates([]);
+    setSelectedPdfUrl("");
+    setSelectedPdfType("");
+    setScrapeModalTitle(`Sélection de notices PDF : ${selectedProduct.sku}`);
     setScrapeSteps([
-      { label: "Recherche SearxNG pour PDF", status: "active" },
-      { label: "Téléchargement des documents", status: "pending" },
-      { label: "Déduplication par type & taille", status: "pending" },
-      { label: "Sauvegarde réseau (cascade)", status: "pending" },
+      { label: "Recherche des documents PDF candidats sur le web...", status: "active" }
     ]);
     setScrapeModalOpen(true);
 
@@ -838,51 +1040,99 @@ function App() {
         const payload = event.payload;
         setScrapeSteps(prev => {
           const next = [...prev];
-          next[0].status = "success";
-          next[1].status = "active";
-          next[1].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
+          if (next.length > 0) {
+            next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
+          }
           return next;
         });
       });
       unlistens.push(unlistenProgress);
 
-      const unlistenDedup = await listen<any>("pdf-dedup-summary", (event) => {
+      const candidates = await invoke<{ url: string; title: string; domain: string }[]>("search_pdf_candidates", {
+        sku: selectedProduct.sku,
+        brand: selectedProduct.brand || null,
+        label: selectedProduct.label || null
+      });
+
+      unlistens.forEach(fn => fn());
+
+      if (candidates.length === 0) {
+        throw new Error("Aucun document PDF candidat n'a été trouvé.");
+      }
+
+      setScrapeSteps([
+        { label: "Recherche des documents PDF candidats sur le web", status: "success", details: `${candidates.length} documents PDF trouvés.` }
+      ]);
+      setScrapedPdfCandidates(candidates);
+      // Pre-select the first candidate by default
+      setSelectedPdfUrl(candidates[0].url);
+      setSelectedPdfType(sanitizeTitleForDocType(candidates[0].title, selectedProduct.sku));
+      setIsPdfValidationMode(true);
+    } catch (err: any) {
+      unlistens.forEach(fn => fn());
+      const errMsg = err.toString();
+      setScrapeError(errMsg);
+      setScrapeSteps([{ label: "Recherche des documents PDF candidats sur le web", status: "error", details: errMsg }]);
+    } finally {
+      setIsScrapingMedia(false);
+    }
+  }
+
+  async function handleSaveSelectedPdf() {
+    if (!config || !selectedProduct || !selectedPdfUrl) return;
+    setIsSavingPdf(true);
+    setScrapeError(null);
+    setIsPdfValidationMode(false);
+
+    setScrapeSteps([
+      { label: "Téléchargement & validation du document PDF sélectionné...", status: "active" },
+      { label: "Sauvegarde réseau (cascade) & Enregistrement", status: "pending" }
+    ]);
+
+    const unlistens: (() => void)[] = [];
+
+    try {
+      const unlistenProgress = await listen<any>("pdf-download-progress", (event) => {
         const payload = event.payload;
         setScrapeSteps(prev => {
           const next = [...prev];
-          next[1].status = "success";
-          next[2].status = "success";
-          next[2].details = payload.message;
-          next[3].status = "active";
+          next[0].status = "active";
+          next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
           return next;
         });
       });
-      unlistens.push(unlistenDedup);
+      unlistens.push(unlistenProgress);
 
-      const relativePath = await executeScrapePdfForSku(selectedProduct.sku);
-
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        next[0].status = "success";
-        next[1].status = "success";
-        next[2].status = "success";
-        next[3].status = "success";
-        next[3].details = `Sauvegardé : ${relativePath.split('/').pop()}`;
-        return next;
+      const relativePath = await invoke<string>("save_selected_pdf", {
+        sku: selectedProduct.sku,
+        url: selectedPdfUrl,
+        networkPath: config.network_path,
+        trigramme: config.trigramme,
+        docType: selectedPdfType || null
       });
-      setMovementSuccess("PDF récupéré avec succès.");
+
+      setScrapeSteps([
+        { label: "Téléchargement & validation du document PDF sélectionné", status: "success" },
+        { label: "Sauvegarde réseau (cascade) & Enregistrement", status: "success", details: `Sauvegardé : ${relativePath.split('/').pop()}` }
+      ]);
+
+      setMovementSuccess("PDF récupéré et sauvegardé avec succès.");
       syncAndFetch(config);
       await refreshSelectedProduct(selectedProduct.sku);
+      setTimeout(() => {
+        setScrapeModalOpen(false);
+      }, 1000);
     } catch (err: any) {
       const errMsg = err.toString();
       setScrapeError(errMsg);
-      setScrapeSteps(prev => {
-        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
-      });
+      setScrapeSteps([
+        { label: "Téléchargement & validation du document PDF sélectionné", status: "error", details: errMsg },
+        { label: "Sauvegarde réseau (cascade) & Enregistrement", status: "pending" }
+      ]);
       setMovementError(errMsg);
     } finally {
       unlistens.forEach(fn => fn());
-      setIsScrapingMedia(false);
+      setIsSavingPdf(false);
     }
   }
 
@@ -890,78 +1140,83 @@ function App() {
     if (!config || !selectedProduct) return;
     setIsScrapingMedia(true);
     setScrapeError(null);
-    setScrapeModalTitle(`Scraping Images pour : ${selectedProduct.sku}`);
+    setIsImageValidationMode(false);
+    setIsScrapeModalMinimized(false);
+    setScrapedImageCandidates([]);
+    setSelectedImageUrls([]);
+    setScrapeModalTitle(`Sélection d'images : ${selectedProduct.sku}`);
     setScrapeSteps([
-      { label: "Recherche SearxNG pour images", status: "active" },
-      { label: "Analyse des images trouvées", status: "pending" },
-      { label: "Téléchargement & Redimensionnement", status: "pending" },
-      { label: "Création des miniatures & Sauvegarde", status: "pending" },
+      { label: "Recherche des images candidates sur le web...", status: "active" }
     ]);
     setScrapeModalOpen(true);
 
-    let stepTimer: any;
-    const startTime = Date.now();
-
-    const updateSimulatedSteps = () => {
-      const elapsed = Date.now() - startTime;
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (elapsed > 4000) {
-          if (next[2].status === "active") {
-            next[2].status = "success";
-            next[3].status = "active";
-          }
-        } else if (elapsed > 2500) {
-          if (next[1].status === "active") {
-            next[1].status = "success";
-            next[2].status = "active";
-          }
-        } else if (elapsed > 1000) {
-          if (next[0].status === "active") {
-            next[0].status = "success";
-            next[1].status = "active";
-          }
-        }
-        return next;
-      });
-      stepTimer = setTimeout(updateSimulatedSteps, 500);
-    };
-    stepTimer = setTimeout(updateSimulatedSteps, 500);
-
-    const unlistens: (() => void)[] = [];
     try {
-      const unlistenProgress = await listen<any>("image-scrape-progress", (event) => {
-        const payload = event.payload;
-        setScrapeSteps(prev => {
-          const next = [...prev];
-          next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
-          return next;
-        });
+      const candidates = await invoke<{ url: string; title?: string; domain: string }[]>("search_image_candidates", {
+        sku: selectedProduct.sku,
+        brand: selectedProduct.brand || null,
+        label: selectedProduct.label || null
       });
-      unlistens.push(unlistenProgress);
 
-      const urls = await executeScrapeImageForSku(selectedProduct.sku);
-      clearTimeout(stepTimer);
+      if (candidates.length === 0) {
+        throw new Error("Aucune image candidate n'a été trouvée pour ce produit.");
+      }
+
       setScrapeSteps([
-        { label: "Recherche SearxNG pour images", status: "success" },
-        { label: "Analyse des images trouvées", status: "success", details: `${urls.length} images trouvées` },
-        { label: "Téléchargement & Redimensionnement", status: "success", details: `${urls.length} fichiers JPG` },
-        { label: "Création des miniatures & Sauvegarde", status: "success", details: "Sauvegardé avec miniatures" },
+        { label: "Recherche des images candidates sur le web", status: "success", details: `${candidates.length} images trouvées.` }
       ]);
-      setMovementSuccess("Images récupérées avec succès.");
-      syncAndFetch(config);
-      await refreshSelectedProduct(selectedProduct.sku);
+      setScrapedImageCandidates(candidates);
+      // Pre-select only the first 5 candidates by default (the most relevant ones)
+      setSelectedImageUrls(candidates.slice(0, 5).map(c => c.url));
+      setIsImageValidationMode(true);
     } catch (err: any) {
-      clearTimeout(stepTimer);
       const errMsg = err.toString();
       setScrapeError(errMsg);
-      setScrapeSteps(prev => {
-        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
-      });
+      setScrapeSteps([{ label: "Recherche des images candidates sur le web", status: "error", details: errMsg }]);
       setMovementError(errMsg);
     } finally {
-      unlistens.forEach(fn => fn());
       setIsScrapingMedia(false);
+    }
+  }
+
+  async function handleSaveSelectedImages() {
+    if (!config || !selectedProduct || selectedImageUrls.length === 0) return;
+    setIsSavingImages(true);
+    setScrapeError(null);
+    setIsImageValidationMode(false);
+    
+    setScrapeSteps([
+      { label: "Téléchargement & validation des images sélectionnées...", status: "active" },
+      { label: "Création des miniatures & Sauvegarde réseau", status: "pending" }
+    ]);
+
+    try {
+      const downloaded = await invoke<string[]>("save_selected_images", {
+        sku: selectedProduct.sku,
+        urls: selectedImageUrls,
+        networkPath: config.network_path
+      });
+
+      setScrapeSteps([
+        { label: "Téléchargement & validation des images sélectionnées", status: "success", details: `${downloaded.length} images importées` },
+        { label: "Création des miniatures & Sauvegarde réseau", status: "success" }
+      ]);
+
+      setMovementSuccess("Images sauvegardées avec succès.");
+      syncAndFetch(config);
+      await refreshSelectedProduct(selectedProduct.sku);
+      setTimeout(() => {
+        setScrapeModalOpen(false);
+      }, 1000);
+    } catch (err: any) {
+      const errMsg = err.toString();
+      setScrapeError(errMsg);
+      setScrapeSteps([
+        { label: "Téléchargement & validation des images sélectionnées", status: "error", details: errMsg },
+        { label: "Création des miniatures & Sauvegarde réseau", status: "pending" }
+      ]);
+      setMovementError(errMsg);
+    } finally {
+      setIsSavingImages(false);
     }
   }
 
@@ -1332,6 +1587,7 @@ function App() {
     if (newProduct.hauteur) attributesObj.hauteur = newProduct.hauteur;
     if (newProduct.profondeur) attributesObj.profondeur = newProduct.profondeur;
     if (newProduct.poids) attributesObj.poids = newProduct.poids;
+    if (newProduct.notes) attributesObj.notes = newProduct.notes;
     if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
 
     try {
@@ -1391,6 +1647,7 @@ function App() {
         hauteur: "",
         profondeur: "",
         poids: "",
+        notes: "",
         initial_stock: "0"
       });
       setShowAddModal(false);
@@ -1423,6 +1680,7 @@ function App() {
     if (editProduct.hauteur) attributesObj.hauteur = editProduct.hauteur; else delete attributesObj.hauteur;
     if (editProduct.profondeur) attributesObj.profondeur = editProduct.profondeur; else delete attributesObj.profondeur;
     if (editProduct.poids) attributesObj.poids = editProduct.poids; else delete attributesObj.poids;
+    if (editProduct.notes) attributesObj.notes = editProduct.notes; else delete attributesObj.notes;
     if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
 
     try {
@@ -1509,7 +1767,7 @@ function App() {
       updatedProd.sub_category = cleanVal;
     } else if (editingCell.field === "min_stock") {
       updatedProd.min_stock = Number(cleanVal.replace(",", ".")) || 0;
-    } else if (editingCell.field === "largeur" || editingCell.field === "hauteur" || editingCell.field === "profondeur" || editingCell.field === "poids") {
+    } else if (editingCell.field === "largeur" || editingCell.field === "hauteur" || editingCell.field === "profondeur" || editingCell.field === "poids" || editingCell.field === "notes") {
       (attributesObj as any)[editingCell.field] = cleanVal;
       updatedProd.attributes = JSON.stringify(attributesObj);
     } else if (editingCell.field === "current_stock") {
@@ -1716,7 +1974,8 @@ function App() {
             sku: selectedProduct.sku,
             mediaType,
             fileName,
-            fileData
+            fileData,
+            trigramme: config.trigramme
           });
           
           if (isImg) {
@@ -2027,7 +2286,8 @@ function App() {
                                         largeur: formatNum(attributesObj.largeur || ""),
                                         hauteur: formatNum(attributesObj.hauteur || ""),
                                         profondeur: formatNum(attributesObj.profondeur || ""),
-                                        poids: formatNum(attributesObj.poids || "")
+                                        poids: formatNum(attributesObj.poids || ""),
+                                        notes: attributesObj.notes || ""
                                       });
                                       setAutofillType(site || "mpn");
                                       setAutofillCodeInput(code || prod.mpn || "");
@@ -2084,7 +2344,7 @@ function App() {
                                 displayValue = prod.location || "-";
                                 rawValue = prod.location;
                                 isEditable = true;
-                              } else if (["largeur", "hauteur", "profondeur", "poids"].includes(col.id)) {
+                              } else if (["largeur", "hauteur", "profondeur", "poids", "notes"].includes(col.id)) {
                                 const attrVal = getAttribute(prod, col.id);
                                 displayValue = attrVal || "-";
                                 rawValue = attrVal;
@@ -2312,6 +2572,28 @@ function App() {
                           badge = "🟢";
                           badgeClass = "audit-badge-create";
                           content = <span>Création de la référence</span>;
+                        } else if (item.action === "DELETE") {
+                          badge = "🔴";
+                          badgeClass = "audit-badge-delete";
+                          content = <span>Référence supprimée</span>;
+                        } else if (item.action === "UPLOAD_MEDIA") {
+                          badge = "📥";
+                          badgeClass = "audit-badge-media-add";
+                          content = <span>Ajout du média <strong>{item.field === "image" ? "image" : "notice PDF"}</strong> : {item.old_value?.split("/").pop()}</span>;
+                        } else if (item.action === "DELETE_MEDIA") {
+                          badge = "🗑️";
+                          badgeClass = "audit-badge-media-delete";
+                          content = <span>Suppression du média <strong>{item.field === "image" ? "image" : "notice PDF"}</strong> : {item.old_value?.split("/").pop()}</span>;
+                        } else if (item.action === "RENAME_MEDIA") {
+                          badge = "✏️";
+                          badgeClass = "audit-badge-media-rename";
+                          content = (
+                            <span>
+                              Renommé le média <strong>{item.field === "image" ? "image" : "notice PDF"}</strong> :{" "}
+                              <span className="audit-old-value">{item.old_value?.split("/").pop()}</span> →{" "}
+                              <span className="audit-new-value">{item.new_value?.split("/").pop()}</span>
+                            </span>
+                          );
                         } else if (item.action === "UPDATE") {
                           badge = "🔵";
                           badgeClass = "audit-badge-update";
@@ -2521,6 +2803,7 @@ function App() {
                       hauteur: "",
                       profondeur: "",
                       poids: "",
+                      notes: "",
                       initial_stock: "0"
                     });
                     setAutofillCodeInput("");
@@ -3407,7 +3690,8 @@ function App() {
                                   networkPath: config.network_path,
                                   sku: selectedProduct.sku,
                                   mediaType: "image",
-                                  filePath: imgPath
+                                  filePath: imgPath,
+                                  trigramme: config.trigramme
                                 });
                                 const updatedImgs: string[] = await invoke("list_sku_images", { networkPath: config.network_path, sku: selectedProduct.sku });
                                 setProductImages(updatedImgs);
@@ -3530,6 +3814,18 @@ function App() {
                           {depth && <div>Profondeur: <strong>{depth} mm</strong></div>}
                           {weight && <div>Poids: <strong>{weight} g</strong></div>}
                           {tension && <div style={{ gridColumn: "span 2" }}>Tension: <strong>{tension}</strong></div>}
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
+                  {(() => {
+                    const notes = getAttribute(selectedProduct, "notes");
+                    if (notes) {
+                      return (
+                        <div style={{ gridColumn: "span 2", borderTop: "1px solid var(--border-color)", paddingTop: "0.4rem", marginTop: "0.4rem" }}>
+                          <div style={{ fontWeight: "600", marginBottom: "0.3rem", fontSize: "11px", color: "var(--text-secondary)" }}>📝 Notes / Remarques :</div>
+                          <div style={{ fontSize: "12px", whiteSpace: "pre-wrap", color: "var(--text-primary)" }}>{notes}</div>
                         </div>
                       );
                     }
@@ -3698,7 +3994,8 @@ function App() {
                         largeur: formatNum(attributesObj.largeur || ""),
                         hauteur: formatNum(attributesObj.hauteur || ""),
                         profondeur: formatNum(attributesObj.profondeur || ""),
-                        poids: formatNum(attributesObj.poids || "")
+                        poids: formatNum(attributesObj.poids || ""),
+                        notes: attributesObj.notes || ""
                       });
                       setAutofillType(site || "mpn");
                       setAutofillCodeInput(code || selectedProduct.mpn || "");
@@ -3822,7 +4119,8 @@ function App() {
                                     sku: selectedProduct.sku,
                                     mediaType: "pdf",
                                     oldPath: pdf,
-                                    newName: newPdfName
+                                    newName: newPdfName,
+                                    trigramme: config.trigramme
                                   });
                                   setEditingPdfPath(null);
                                   const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
@@ -3893,7 +4191,8 @@ function App() {
                                       networkPath: config.network_path,
                                       sku: selectedProduct.sku,
                                       mediaType: "pdf",
-                                      filePath: pdf
+                                      filePath: pdf,
+                                      trigramme: config.trigramme
                                     });
                                     const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
                                     setProductPdfs(updatedPdfs);
@@ -4531,6 +4830,23 @@ function App() {
                   </div>
                 </div>
 
+                {/* 6. Notes / Remarques */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">6. Notes / Remarques</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="modal-p-notes">Notes / Remarques</label>
+                      <textarea
+                        id="modal-p-notes"
+                        placeholder="Notes de maintenance, observations, etc."
+                        value={newProduct.notes}
+                        onChange={(e) => setNewProduct(prev => ({ ...prev, notes: e.target.value }))}
+                        style={{ width: "100%", height: "80px", padding: "0.5rem", borderRadius: "4px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-primary)", color: "var(--text-primary)", resize: "vertical", fontSize: "12px", fontFamily: "inherit" }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
               </div>
               <div className="modal-footer">
                 <button type="button" className="btn btn-secondary" onClick={() => { setShowAddModal(false); setAutoFillSource(null); }}>Annuler</button>
@@ -4945,6 +5261,23 @@ function App() {
                   </div>
                 </div>
 
+                {/* 6. Notes / Remarques */}
+                <div className="modal-field-group">
+                  <div className="modal-field-group-title">6. Notes / Remarques</div>
+                  <div className="modal-field-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label htmlFor="edit-p-notes">Notes / Remarques</label>
+                      <textarea
+                        id="edit-p-notes"
+                        placeholder="Notes de maintenance, observations, etc."
+                        value={editProduct.notes}
+                        onChange={(e) => setEditProduct(prev => ({ ...prev, notes: e.target.value }))}
+                        style={{ width: "100%", height: "80px", padding: "0.5rem", borderRadius: "4px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-primary)", color: "var(--text-primary)", resize: "vertical", fontSize: "12px", fontFamily: "inherit" }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
               </div>
               <div className="modal-footer">
                 <button type="button" className="btn btn-secondary" onClick={() => { setShowEditModal(false); setAutoFillSource(null); }}>Annuler</button>
@@ -4989,67 +5322,431 @@ function App() {
 
       {/* Scrape Progress Modal */}
       {scrapeModalOpen && (
-        <div className="modal-overlay">
-          <div className="modal-container" style={{ maxWidth: "450px" }}>
-            <div className="modal-header">
-              <h3>{scrapeModalTitle}</h3>
-              <button 
-                className="modal-close" 
-                onClick={() => setScrapeModalOpen(false)}
-                disabled={isScrapingMedia}
-              >
-                ×
-              </button>
+        <div 
+          className="modal-overlay"
+          style={isScrapeModalMinimized ? {
+            position: "fixed",
+            top: "auto",
+            left: "auto",
+            right: "20px",
+            bottom: "20px",
+            width: "auto",
+            height: "auto",
+            backgroundColor: "transparent",
+            pointerEvents: "none",
+            zIndex: 1000,
+            display: "flex"
+          } : {}}
+        >
+          <div 
+            className="modal-container" 
+            style={isScrapeModalMinimized ? {
+              width: "320px",
+              maxWidth: "320px",
+              pointerEvents: "auto",
+              boxShadow: "var(--shadow-lg)",
+              border: "1px solid var(--border-color)",
+              borderRadius: "8px",
+              backgroundColor: "var(--bg-secondary)",
+              display: "flex",
+              flexDirection: "column"
+            } : { 
+              maxWidth: isImageValidationMode ? "650px" : isPdfValidationMode ? "550px" : "450px" 
+            }}
+          >
+            <div className="modal-header" style={isScrapeModalMinimized ? { padding: "0.6rem 0.8rem" } : {}}>
+              <h3 style={isScrapeModalMinimized ? { fontSize: "13px" } : {}}>
+                {isScrapeModalMinimized ? `⏳ Scraping : ${selectedProduct?.sku || ""}` : scrapeModalTitle}
+              </h3>
+              <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+                {isScrapeModalMinimized ? (
+                  <button
+                    title="Agrandir"
+                    type="button"
+                    style={{ background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer", fontSize: "14px", padding: "2px 6px" }}
+                    onClick={() => setIsScrapeModalMinimized(false)}
+                  >
+                    🗖
+                  </button>
+                ) : (
+                  <button
+                    title="Réduire"
+                    type="button"
+                    style={{ background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer", fontSize: "14px", padding: "2px 6px" }}
+                    onClick={() => setIsScrapeModalMinimized(true)}
+                  >
+                    ➖
+                  </button>
+                )}
+                <button 
+                  className="modal-close" 
+                  onClick={handleCancelScrape}
+                  style={isScrapeModalMinimized ? { fontSize: "16px", padding: "2px 6px" } : {}}
+                >
+                  ×
+                </button>
+              </div>
             </div>
-            <div className="modal-body" style={{ padding: "1.5rem" }}>
-              <div className="scrape-steps-list" style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
-                {scrapeSteps.map((step, idx) => {
-                  let statusIcon = "⏳";
-                  let statusClass = "step-pending";
-                  if (step.status === "active") {
-                    statusIcon = "🌀";
-                    statusClass = "step-active";
-                  } else if (step.status === "success") {
-                    statusIcon = "✔️";
-                    statusClass = "step-success";
-                  } else if (step.status === "error") {
-                    statusIcon = "❌";
-                    statusClass = "step-error";
-                  }
-                  return (
-                    <div key={idx} className={`scrape-step ${statusClass}`} style={{ display: "flex", alignItems: "flex-start", gap: "0.8rem" }}>
-                      <span className="step-icon" style={{ fontSize: "1.2rem", lineHeight: 1 }}>{statusIcon}</span>
-                      <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", flex: 1, minWidth: 0 }}>
-                        <span className="step-label" style={{ fontWeight: step.status === "active" ? "600" : "500", color: step.status === "pending" ? "var(--text-muted)" : "var(--text-primary)" }}>
-                          {step.label}
+
+            {!isScrapeModalMinimized ? (
+              <>
+                <div className="modal-body" style={{ padding: "1.5rem" }}>
+                  {isImageValidationMode ? (
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.8rem" }}>
+                        <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+                          Sélectionnez les images à importer. Chargez uniquement celles qui correspondent.
                         </span>
-                        {step.details && (
-                          <span className="step-details" style={{ fontSize: "11px", color: step.status === "error" ? "var(--danger)" : "var(--text-secondary)", wordBreak: "break-all", whiteSpace: "normal", display: "block" }}>
-                            {step.details}
-                          </span>
-                        )}
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ padding: "0.2rem 0.5rem", fontSize: "11px" }}
+                          onClick={() => {
+                            if (selectedImageUrls.length === scrapedImageCandidates.length) {
+                              setSelectedImageUrls([]);
+                            } else {
+                              setSelectedImageUrls(scrapedImageCandidates.map(c => c.url));
+                            }
+                          }}
+                        >
+                          {selectedImageUrls.length === scrapedImageCandidates.length ? "Tout décocher" : "Tout cocher"}
+                        </button>
+                      </div>
+
+                      <div 
+                        style={{ 
+                          display: "grid", 
+                          gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", 
+                          gap: "0.8rem", 
+                          maxHeight: "350px", 
+                          overflowY: "auto", 
+                          padding: "0.5rem", 
+                          border: "1px solid var(--border-color)", 
+                          borderRadius: "6px",
+                          backgroundColor: "rgba(0,0,0,0.05)"
+                        }}
+                      >
+                        {scrapedImageCandidates.map((candidate, idx) => {
+                          const isChecked = selectedImageUrls.includes(candidate.url);
+                          return (
+                            <div
+                              key={idx}
+                              onClick={() => {
+                                setSelectedImageUrls(prev => 
+                                  isChecked ? prev.filter(u => u !== candidate.url) : [...prev, candidate.url]
+                                );
+                              }}
+                              style={{
+                                border: isChecked ? "2px solid var(--accent)" : "1px solid var(--border-color)",
+                                borderRadius: "6px",
+                                overflow: "hidden",
+                                backgroundColor: "var(--bg-secondary)",
+                                cursor: "pointer",
+                                display: "flex",
+                                flexDirection: "column",
+                                position: "relative",
+                                transition: "all 0.2s ease"
+                              }}
+                            >
+                              <div style={{ position: "relative", width: "100%", paddingBottom: "100%", overflow: "hidden", backgroundColor: "#fff" }}>
+                                <img
+                                  src={candidate.url}
+                                  alt={candidate.title || "Scraped candidate"}
+                                  referrerPolicy="no-referrer"
+                                  style={{
+                                    position: "absolute",
+                                    top: 0,
+                                    left: 0,
+                                    width: "100%",
+                                    height: "100%",
+                                    objectFit: "contain"
+                                  }}
+                                />
+                                <div
+                                  style={{
+                                    position: "absolute",
+                                    top: "4px",
+                                    right: "4px",
+                                    width: "18px",
+                                    height: "18px",
+                                    borderRadius: "50%",
+                                    border: "1px solid var(--border-color)",
+                                    backgroundColor: isChecked ? "var(--accent)" : "rgba(255,255,255,0.8)",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    color: "#fff",
+                                    fontSize: "10px",
+                                    fontWeight: "bold",
+                                    zIndex: 10
+                                  }}
+                                >
+                                  {isChecked && "✓"}
+                                </div>
+                              </div>
+                              <div style={{ padding: "0.3rem", fontSize: "10px", display: "flex", flexDirection: "column", gap: "0.1rem", minHeight: "44px", borderTop: "1px solid var(--border-color)", justifyContent: "space-between" }}>
+                                <span style={{ fontWeight: "600", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {candidate.domain}
+                                </span>
+                                {candidate.title && (
+                                  <span 
+                                    title={candidate.title}
+                                    style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", fontSize: "9px", lineHeight: "1.1" }}
+                                  >
+                                    {candidate.title}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
-                  );
-                })}
-              </div>
+                  ) : isPdfValidationMode ? (
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.8rem" }}>
+                        <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+                          Sélectionnez la notice PDF technique à importer pour cette référence.
+                        </span>
+                      </div>
 
-              {scrapeError && (
-                <div className="wizard-error" style={{ marginTop: "1.5rem", marginBottom: 0 }}>
-                  {scrapeError}
+                      <div 
+                        className="scrape-candidates-list"
+                        style={{ 
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "0.6rem", 
+                          maxHeight: "260px", 
+                          overflowY: "auto", 
+                          padding: "0.5rem", 
+                          border: "1px solid var(--border-color)", 
+                          borderRadius: "6px",
+                          backgroundColor: "rgba(0,0,0,0.05)"
+                        }}
+                      >
+                        {scrapedPdfCandidates.map((candidate, idx) => {
+                          const isSelected = selectedPdfUrl === candidate.url;
+                          return (
+                            <div
+                              key={idx}
+                              className="candidate-item"
+                              onClick={() => {
+                                setSelectedPdfUrl(candidate.url);
+                                setSelectedPdfType(sanitizeTitleForDocType(candidate.title, selectedProduct?.sku || ""));
+                              }}
+                              style={{
+                                border: isSelected ? "2px solid var(--accent)" : "1px solid var(--border-color)",
+                                borderRadius: "6px",
+                                padding: "0.8rem",
+                                backgroundColor: isSelected ? "var(--accent-light)" : "var(--bg-secondary)",
+                                cursor: "pointer",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "0.8rem",
+                                transition: "all 0.2s ease"
+                              }}
+                            >
+                              <input
+                                type="radio"
+                                name="selectedPdf"
+                                checked={isSelected}
+                                onChange={() => {
+                                  setSelectedPdfUrl(candidate.url);
+                                  setSelectedPdfType(sanitizeTitleForDocType(candidate.title, selectedProduct?.sku || ""));
+                                }}
+                                style={{ width: "auto", cursor: "pointer" }}
+                              />
+                              <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, gap: "0.2rem" }}>
+                                <span style={{ fontWeight: "600", color: "var(--text-primary)", fontSize: "12px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
+                                  {candidate.title || "Fiche Technique / Notice"}
+                                </span>
+                                <span style={{ fontSize: "10px", color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                                  🌐 {candidate.domain}
+                                  <span 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openPath(candidate.url);
+                                    }} 
+                                    style={{ color: "var(--accent)", textDecoration: "underline", marginLeft: "0.5rem", cursor: "pointer" }}
+                                  >
+                                    Ouvrir le lien source
+                                  </span>
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Qualification du type de document */}
+                      <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                        <label style={{ fontSize: "11px", fontWeight: "600", color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                          Type / Suffixe du document :
+                          <input 
+                            type="text"
+                            value={selectedPdfType}
+                            onChange={(e) => {
+                              setSelectedPdfType(e.target.value.toLowerCase().replace(/[^a-z0-9àéèçùœ\s-_/]/g, ""));
+                            }}
+                            placeholder="Ex: fiche_technique, notice, schema..."
+                            style={{
+                              width: "100%",
+                              padding: "0.5rem 0.75rem",
+                              borderRadius: "4px",
+                              border: "1px solid var(--border-color)",
+                              backgroundColor: "var(--bg-primary)",
+                              color: "var(--text-primary)",
+                              fontSize: "13px",
+                              outline: "none"
+                            }}
+                          />
+                        </label>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginTop: "0.2rem" }}>
+                          {[
+                            { label: "Fiche technique", value: "fiche_technique" },
+                            { label: "Notice / Manuel", value: "notice_manuel" },
+                            { label: "Schéma / Plan", value: "schema_plan" },
+                            { label: "Certificat", value: "certificat" }
+                          ].map((chip) => {
+                            const isActive = selectedPdfType === chip.value;
+                            return (
+                              <button
+                                key={chip.value}
+                                type="button"
+                                onClick={() => setSelectedPdfType(chip.value)}
+                                style={{
+                                  padding: "0.25rem 0.6rem",
+                                  borderRadius: "12px",
+                                  border: isActive ? "1px solid var(--accent)" : "1px solid var(--border-color)",
+                                  backgroundColor: isActive ? "var(--accent)" : "var(--bg-secondary)",
+                                  color: isActive ? "#ffffff" : "var(--text-primary)",
+                                  fontSize: "11px",
+                                  cursor: "pointer",
+                                  transition: "all 0.15s ease",
+                                  outline: "none"
+                                }}
+                              >
+                                {chip.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="scrape-steps-list" style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
+                      {scrapeSteps.map((step, idx) => {
+                        let statusIcon = "⏳";
+                        let statusClass = "step-pending";
+                        if (step.status === "active") {
+                          statusIcon = "🌀";
+                          statusClass = "step-active";
+                        } else if (step.status === "success") {
+                          statusIcon = "✔️";
+                          statusClass = "step-success";
+                        } else if (step.status === "error") {
+                          statusIcon = "❌";
+                          statusClass = "step-error";
+                        }
+                        return (
+                          <div key={idx} className={`scrape-step ${statusClass}`} style={{ display: "flex", alignItems: "flex-start", gap: "0.8rem" }}>
+                            <span className="step-icon" style={{ fontSize: "1.2rem", lineHeight: 1 }}>{statusIcon}</span>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", flex: 1, minWidth: 0 }}>
+                              <span className="step-label" style={{ fontWeight: step.status === "active" ? "600" : "500", color: step.status === "pending" ? "var(--text-muted)" : "var(--text-primary)" }}>
+                                {step.label}
+                              </span>
+                              {step.details && (
+                                <span className="step-details" style={{ fontSize: "11px", color: step.status === "error" ? "var(--danger)" : "var(--text-secondary)", wordBreak: "break-all", whiteSpace: "normal", display: "block" }}>
+                                  {step.details}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {scrapeError && (
+                    <div className="wizard-error" style={{ marginTop: "1.5rem", marginBottom: 0 }}>
+                      {scrapeError}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-            <div className="modal-footer">
-              <button 
-                type="button" 
-                className="btn" 
-                onClick={() => setScrapeModalOpen(false)}
-                disabled={isScrapingMedia}
+                <div className="modal-footer">
+                  {isImageValidationMode ? (
+                    <>
+                      <button 
+                        type="button" 
+                        className="btn btn-secondary" 
+                        onClick={handleCancelScrape}
+                        disabled={isSavingImages}
+                      >
+                        Annuler
+                      </button>
+                      <button 
+                        type="button" 
+                        className="btn btn-primary" 
+                        disabled={selectedImageUrls.length === 0 || isSavingImages}
+                        onClick={handleSaveSelectedImages}
+                      >
+                        {isSavingImages ? "Importation..." : `Valider l'importation (${selectedImageUrls.length})`}
+                      </button>
+                    </>
+                  ) : isPdfValidationMode ? (
+                    <>
+                      <button 
+                        type="button" 
+                        className="btn btn-secondary" 
+                        onClick={handleCancelScrape}
+                        disabled={isSavingPdf}
+                      >
+                        Annuler
+                      </button>
+                      <button 
+                        type="button" 
+                        className="btn btn-primary" 
+                        disabled={!selectedPdfUrl || isSavingPdf}
+                        onClick={handleSaveSelectedPdf}
+                      >
+                        {isSavingPdf ? "Importation..." : "Valider l'importation"}
+                      </button>
+                    </>
+                  ) : (
+                    <button 
+                      type="button" 
+                      className="btn" 
+                      onClick={handleCancelScrape}
+                    >
+                      {isScrapingMedia ? "Annuler" : "Fermer"}
+                    </button>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div 
+                onClick={() => setIsScrapeModalMinimized(false)}
+                style={{ 
+                  padding: "0.8rem 1rem", 
+                  fontSize: "12px", 
+                  color: "var(--text-secondary)", 
+                  cursor: "pointer", 
+                  backgroundColor: "var(--bg-tertiary)",
+                  borderBottomLeftRadius: "8px",
+                  borderBottomRightRadius: "8px",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center"
+                }}
               >
-                {isScrapingMedia ? "Recherche en cours..." : "Fermer"}
-              </button>
-            </div>
+                <span>
+                  {isImageValidationMode 
+                    ? `Validation : ${selectedImageUrls.length} / ${scrapedImageCandidates.length} image(s)` 
+                    : "Recherche en cours..."}
+                </span>
+                <span style={{ fontSize: "11px", color: "var(--accent)", fontWeight: "600" }}>Restaurer 🗖</span>
+              </div>
+            )}
           </div>
         </div>
       )}

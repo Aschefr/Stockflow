@@ -712,6 +712,10 @@ table.spreadsheet tr.batch-selected {
 .audit-badge-create { border-left-color: #10b981; }
 .audit-badge-update { border-left-color: #3b82f6; }
 .audit-badge-scrape { border-left-color: #f59e0b; }
+.audit-badge-delete { border-left-color: #ef4444; }
+.audit-badge-media-add { border-left-color: #10b981; }
+.audit-badge-media-delete { border-left-color: #ef4444; }
+.audit-badge-media-rename { border-left-color: #3b82f6; }
 
 .audit-meta {
   display: flex;

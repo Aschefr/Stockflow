@@ -269,6 +269,38 @@ fn create_product(
                         Some("Code VPC"), Some(&old_vpc), Some(&new_vpc), final_scrape_price_url.as_deref(),
                     );
                 }
+
+                // Comparer les dimensions, poids et notes dans les attributs
+                if let Ok(old_attrs) = serde_json::from_str::<serde_json::Value>(&old.attributes) {
+                    let fields_to_check = vec![
+                        ("largeur", "Largeur"),
+                        ("hauteur", "Hauteur"),
+                        ("profondeur", "Profondeur"),
+                        ("poids", "Poids"),
+                        ("notes", "Notes"),
+                    ];
+                    for (key, display_name) in fields_to_check {
+                        let old_val = old_attrs.get(key).map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::Null => "".to_string(),
+                            other => other.to_string(),
+                        }).unwrap_or_default().trim().to_string();
+                        let new_val = final_attributes.get(key).map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::Null => "".to_string(),
+                            other => other.to_string(),
+                        }).unwrap_or_default().trim().to_string();
+                        
+                        if old_val != new_val {
+                            let _ = events::write_audit_file(
+                                &network_path, &clean_sku, &trigramme, "UPDATE",
+                                Some(display_name), Some(&old_val), Some(&new_val), final_scrape_price_url.as_deref(),
+                            );
+                        }
+                    }
+                }
             } else {
                 // Nouveau produit -> audit de création
                 let _ = events::write_audit_file(
@@ -367,6 +399,17 @@ fn delete_product(
         "sku": clean_sku,
     });
 
+    let _ = events::write_audit_file(
+        &network_path,
+        &clean_sku,
+        &trigramme,
+        "DELETE",
+        None,
+        None,
+        None,
+        None,
+    );
+
     events::write_event_file(&network_path, "PRODUCT_DELETE", &trigramme, payload)
 }
 
@@ -417,7 +460,8 @@ fn upload_media(
     sku: String,
     media_type: String, // "image" ou "pdf"
     file_name: String,
-    file_data: Vec<u8>
+    file_data: Vec<u8>,
+    trigramme: String,
 ) -> Result<String, String> {
     let dest_dir = if media_type == "image" {
         std::path::Path::new(&network_path).join("images")
@@ -435,6 +479,17 @@ fn upload_media(
     } else {
         format!("documents/{}/{}", sku, file_name)
     };
+    
+    let _ = events::write_audit_file(
+        &network_path,
+        &sku,
+        &trigramme,
+        "UPLOAD_MEDIA",
+        Some(&media_type),
+        Some(&relative_path),
+        None,
+        None,
+    );
     
     Ok(relative_path)
 }
@@ -732,6 +787,7 @@ fn delete_media(
     sku: String,
     media_type: String,
     file_path: String,
+    trigramme: String,
 ) -> Result<(), String> {
     let full_path = std::path::Path::new(&network_path).join(&file_path);
     if !full_path.exists() {
@@ -747,6 +803,17 @@ fn delete_media(
     }
     
     std::fs::remove_file(&full_path).map_err(|e| format!("Erreur lors de la suppression : {}", e))?;
+    
+    let _ = events::write_audit_file(
+        &network_path,
+        &sku,
+        &trigramme,
+        "DELETE_MEDIA",
+        Some(&media_type),
+        Some(&file_path),
+        None,
+        None,
+    );
     
     if let Some(db_path) = events::get_db_path() {
         if let Ok(conn) = Connection::open(db_path) {
@@ -793,6 +860,7 @@ fn rename_media(
     media_type: String,
     old_path: String,
     new_name: String,
+    trigramme: String,
 ) -> Result<String, String> {
     let old_full = std::path::Path::new(&network_path).join(&old_path);
     if !old_full.exists() {
@@ -820,6 +888,17 @@ fn rename_media(
     let new_relative = new_full.strip_prefix(&network_path)
         .map(|p| p.to_string_lossy().to_string().replace("\\", "/"))
         .map_err(|e| e.to_string())?;
+
+    let _ = events::write_audit_file(
+        &network_path,
+        &sku,
+        &trigramme,
+        "RENAME_MEDIA",
+        Some(&media_type),
+        Some(&old_path),
+        Some(&new_relative),
+        None,
+    );
 
     if let Some(db_path) = events::get_db_path() {
         if let Ok(conn) = Connection::open(db_path) {
@@ -895,7 +974,68 @@ async fn scrape_images(window: tauri::Window, sku: String, query: String, networ
 }
 
 #[tauri::command]
+async fn search_image_candidates(
+    window: tauri::Window,
+    sku: String,
+    brand: Option<String>,
+    label: Option<String>,
+) -> Result<Vec<scraper::ScrapedImageCandidate>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config_internal().ok_or("Configuration introuvable")?;
+        let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+        let brand_str = brand.as_deref().unwrap_or("");
+        let label_str = label.as_deref().unwrap_or("");
+        scraper::search_image_candidates_internal(&window, &sku, &url, brand_str, label_str)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_selected_images(
+    sku: String,
+    urls: Vec<String>,
+    network_path: String,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config_internal().ok_or("Configuration introuvable")?;
+        let conv = config.image_rename_convention.clone().unwrap_or_else(|| "{SKU}_{Index}.jpg".to_string());
+        scraper::save_selected_images_internal(&sku, urls, &conv, &network_path)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn search_pdf_candidates(
+    window: tauri::Window,
+    sku: String,
+    brand: Option<String>,
+    label: Option<String>,
+) -> Result<Vec<scraper::ScrapedPdfCandidate>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config_internal().ok_or("Configuration introuvable")?;
+        let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+        let brand_str = brand.as_deref().unwrap_or("");
+        let label_str = label.as_deref().unwrap_or("");
+        scraper::search_pdf_candidates_internal(&window, &sku, &url, brand_str, label_str)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_selected_pdf(
+    sku: String,
+    url: String,
+    network_path: String,
+    trigramme: String,
+    doc_type: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config_internal().ok_or("Configuration introuvable")?;
+        let conv = config.pdf_rename_convention.clone().unwrap_or_else(|| "{SKU}_datasheet.pdf".to_string());
+        scraper::save_selected_pdf_internal(&sku, &url, &conv, &network_path, &trigramme, doc_type.as_deref())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn scrape_product_details(
+    app_handle: tauri::AppHandle,
     vpc_site: String, 
     vpc_code: String, 
     sku: String,
@@ -903,7 +1043,7 @@ async fn scrape_product_details(
     label: Option<String>,
 ) -> Result<scraper::ScrapedProductDetails, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut details = scraper::scrape_product_details_internal(&vpc_site, &vpc_code, &sku, brand.as_deref(), label.as_deref())?;
+        let mut details = scraper::scrape_product_details_internal(&app_handle, &vpc_site, &vpc_code, &sku, brand.as_deref(), label.as_deref())?;
         if let Some(config) = load_config_internal() {
             if config.price_tax_type.as_deref() == Some("TTC") {
                 details.price = details.price * 1.20;
@@ -1105,6 +1245,56 @@ async fn find_reseller_via_searxng(
         
         for r in results {
             if let Some(link) = r["url"].as_str() {
+                let title = r["title"].as_str().unwrap_or("").to_lowercase();
+                let snippet = r["content"].as_str().or_else(|| r["snippet"].as_str()).unwrap_or("").to_lowercase();
+                let url_lower = link.to_lowercase();
+                
+                let sku_clean = sku.to_lowercase().replace(" ", "").replace("-", "").replace("(", "").replace(")", "");
+                let brand_clean = brand.as_deref().unwrap_or("").to_lowercase().trim().to_string();
+                
+                let mut is_relevant = false;
+                
+                // 1. Exact match on clean SKU
+                if !sku_clean.is_empty() && sku_clean.len() >= 3 && (title.contains(&sku_clean) || url_lower.contains(&sku_clean) || snippet.contains(&sku_clean)) {
+                    is_relevant = true;
+                }
+                
+                // 2. Match on digits of SKU + Brand
+                if !is_relevant && !brand_clean.is_empty() && brand_clean != "inconnue" && brand_clean != "inconnu" {
+                    let digits: String = sku_clean.chars().filter(|c| c.is_ascii_digit()).collect();
+                    if !digits.is_empty() && digits.len() >= 3 {
+                        let has_brand = title.contains(&brand_clean) || url_lower.contains(&brand_clean) || snippet.contains(&brand_clean);
+                        let has_digits = title.contains(&digits) || url_lower.contains(&digits) || snippet.contains(&digits);
+                        if has_brand && has_digits {
+                            is_relevant = true;
+                        }
+                    }
+                }
+                
+                // 3. Match on label parts if label is provided
+                if !is_relevant {
+                    if let Some(ref l) = label {
+                        let label_clean = l.to_lowercase();
+                        let digits: String = sku_clean.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if !digits.is_empty() && (title.contains(&digits) || url_lower.contains(&digits)) {
+                            let label_words: Vec<&str> = label_clean.split_whitespace().filter(|w| w.len() >= 4).collect();
+                            let mut matches = 0;
+                            for w in &label_words {
+                                if title.contains(w) || snippet.contains(w) {
+                                    matches += 1;
+                                }
+                            }
+                            if matches >= 2 {
+                                is_relevant = true;
+                            }
+                        }
+                    }
+                }
+                
+                if !is_relevant {
+                    continue;
+                }
+
                 if let Some((provider, code)) = parse_vpc_url(link, &sku, &config.vpc_urls) {
                     return Ok(Some(DetectedReseller {
                         provider,
@@ -1247,6 +1437,7 @@ fn save_file_dialog(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+
     // Planificateur de sauvegarde automatique
     std::thread::spawn(|| {
         loop {
@@ -1284,6 +1475,10 @@ pub fn run() {
             scrape_price,
             scrape_pdf,
             scrape_images,
+            search_image_candidates,
+            save_selected_images,
+            search_pdf_candidates,
+            save_selected_pdf,
             ensure_directory,
             scrape_product_details,
             get_product_audit_log,

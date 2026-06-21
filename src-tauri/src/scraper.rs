@@ -6,8 +6,74 @@ use rusqlite::Connection;
 use reqwest::blocking::Client;
 use std::time::Duration;
 use tauri::Emitter;
+use tauri::Manager;
 
 static LAST_RS_REQUEST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+static WEBVIEW_PDF_CACHE: std::sync::Mutex<Option<(String, Vec<(String, String)>)>> = std::sync::Mutex::new(None);
+
+fn get_random_user_agent() -> &'static str {
+    let uas = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+    ];
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize;
+    uas[nanos % uas.len()]
+}
+
+fn apply_stealth_headers(builder: reqwest::blocking::RequestBuilder, url: &str) -> reqwest::blocking::RequestBuilder {
+    let mut builder = builder
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+        .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+        .header("Cache-Control", "max-age=0")
+        .header("Sec-Ch-Ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
+        .header("Sec-Ch-Ua-Mobile", "?0")
+        .header("Sec-Ch-Ua-Platform", "\"Windows\"")
+        .header("Sec-Fetch-Dest", "document")
+        .header("Sec-Fetch-Mode", "navigate")
+        .header("Sec-Fetch-Site", "none")
+        .header("Sec-Fetch-User", "?1")
+        .header("Upgrade-Insecure-Requests", "1");
+
+    // Add a natural Referer header based on the target URL domain
+    if let Ok(parsed_url) = reqwest::Url::parse(url) {
+        if let Some(host) = parsed_url.host_str() {
+            let referer = format!("https://{}/", host);
+            builder = builder.header("Referer", referer);
+        }
+    }
+    builder
+}
+
+fn human_delay() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    // Seed a simple LCG to get some random-like variation
+    let mut next = nanos;
+    let mut rand_double = || {
+        next = next.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (next as f64) / (u64::MAX as f64)
+    };
+    
+    let delay = 2.0 + rand_double() * 5.0; // 2.0 to 7.0 seconds
+    let long_pause_chance = rand_double();
+    let sleep_duration = if long_pause_chance < 0.10 {
+        // 10% chance of longer pause of 15-30 seconds
+        let long_delay = 15.0 + rand_double() * 15.0;
+        Duration::from_secs_f64(long_delay)
+    } else {
+        Duration::from_secs_f64(delay)
+    };
+    std::thread::sleep(sleep_duration);
+}
+
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ScrapeLock {
@@ -381,7 +447,7 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
     
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .user_agent(get_random_user_agent())
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -454,16 +520,7 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
     // Si c'est un produit RS, tenter d'abord de scrapper le prix
     if provider.to_lowercase().contains("rs") {
         if let Some(ref r_code) = rs_code {
-            // Anti-spam temporisation (1500 ms)
-            if let Ok(mut last_req) = LAST_RS_REQUEST.lock() {
-                if let Some(last) = *last_req {
-                    let elapsed = last.elapsed();
-                    if elapsed < Duration::from_millis(1500) {
-                        std::thread::sleep(Duration::from_millis(1500) - elapsed);
-                    }
-                }
-                *last_req = Some(std::time::Instant::now());
-            }
+            human_delay();
 
             let mut rs_domain = "fr.rs-online.com".to_string();
             if let Some(custom) = vpc_urls.get(provider) {
@@ -475,24 +532,17 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
             let direct_url = if rs_domain.contains("rsdelivers") {
                 format!("https://{}/product/a/a/a/{}", rs_domain, r_code)
             } else {
-                format!("https://{}/web/p/{}", rs_domain, r_code)
+                format!("https://{}/web/c/?searchTerm={}", rs_domain, r_code)
             };
             let rs_client = Client::builder()
                 .timeout(Duration::from_secs(10))
-                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36")
-                .http1_only()
+                .user_agent(get_random_user_agent())
                 .build()
                 .unwrap_or_else(|_| client.clone());
 
-            if let Ok(res) = rs_client.get(&direct_url)
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-                .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
-                .header("Sec-Fetch-Dest", "document")
-                .header("Sec-Fetch-Mode", "navigate")
-                .header("Sec-Fetch-Site", "none")
-                .header("Sec-Fetch-User", "?1")
-                .header("Upgrade-Insecure-Requests", "1")
-                .send() {
+            let req_builder = rs_client.get(&direct_url);
+            let req_builder = apply_stealth_headers(req_builder, &direct_url);
+            if let Ok(res) = req_builder.send() {
                 
                 if res.status().is_success() {
                     if let Ok(html) = res.text() {
@@ -534,6 +584,7 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
             }
         }
     } else if provider.to_lowercase().contains("conrad") {
+        human_delay();
         let mut conrad_domain = "www.conrad.fr".to_string();
         if let Some(custom) = vpc_urls.get(provider) {
             if !custom.trim().is_empty() {
@@ -543,11 +594,13 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
         let direct_url = format!("https://{}/fr/search.html?search={}", conrad_domain, vpc_code);
         let conrad_client = Client::builder()
             .timeout(Duration::from_secs(10))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .user_agent(get_random_user_agent())
             .build()
             .unwrap_or_else(|_| client.clone());
 
-        if let Ok(res) = conrad_client.get(&direct_url).send() {
+        let req_builder = conrad_client.get(&direct_url);
+        let req_builder = apply_stealth_headers(req_builder, &direct_url);
+        if let Ok(res) = req_builder.send() {
             if res.status().is_success() {
                 if let Ok(html) = res.text() {
                     let json_ld_blocks = re_find_json_ld(&html);
@@ -601,6 +654,7 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
 
     if provider.to_lowercase().contains("farnell") {
         if let Some(key) = api_keys.and_then(|keys| keys.get(provider).or_else(|| keys.get("Farnell"))) {
+            human_delay();
             if let Ok(details) = scrape_farnell_api(sku, key) {
                 price = Some(details.price);
                 
@@ -613,10 +667,11 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
                 update_product_attribute(sku, "scrape_price_url", &format!("https://{}/w/c/?st={}", farnell_domain, sku));
             }
         } else {
-            println!("âš ï¸ Avertissement : Pas de clé API pour Farnell. Requêtes directes limitées.");
+            println!("âš ï¸  Avertissement : Pas de clé API pour Farnell. Requêtes directes limitées.");
         }
     } else if provider.to_lowercase().contains("mouser") {
         if let Some(key) = api_keys.and_then(|keys| keys.get(provider).or_else(|| keys.get("Mouser"))) {
+            human_delay();
             if let Ok(details) = scrape_mouser_api(sku, key) {
                 price = Some(details.price);
                 
@@ -629,7 +684,7 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
                 update_product_attribute(sku, "scrape_price_url", &format!("https://{}/Search/Refine?Keyword={}", mouser_domain, sku));
             }
         } else {
-            println!("âš ï¸ Avertissement : Pas de clé API pour Mouser. Requêtes directes limitées.");
+            println!("âš ï¸  Avertissement : Pas de clé API pour Mouser. Requêtes directes limitées.");
         }
     }
 
@@ -649,8 +704,11 @@ pub fn scrape_price_internal(sku: &str, provider: &str, network_path: &str, trig
             } else {
                 format!("{} {} price", product.as_ref().map(|p| p.brand.as_str()).unwrap_or(""), sku)
             };
+            human_delay();
             let search_url = format!("{}/search?q={}&format=json", s_url.trim_end_matches('/'), urlencoding::encode(&q));
-            if let Ok(res) = client.get(&search_url).send() {
+            let req_builder = client.get(&search_url);
+            let req_builder = apply_stealth_headers(req_builder, &search_url);
+            if let Ok(res) = req_builder.send() {
                 if res.status().is_success() {
                     if let Ok(json) = res.json::<serde_json::Value>() {
                         if let Some(results) = json["results"].as_array() {
@@ -837,6 +895,13 @@ struct DownloadedPdf {
     last_modified: DateTime<Utc>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScrapedPdfCandidate {
+    pub url: String,
+    pub title: String,
+    pub domain: String,
+}
+
 fn parse_last_modified_or_url_year(headers: &reqwest::header::HeaderMap, url: &str) -> DateTime<Utc> {
     if let Some(lm) = headers.get(reqwest::header::LAST_MODIFIED) {
         if let Ok(lm_str) = lm.to_str() {
@@ -898,34 +963,27 @@ fn get_vpc_prioritized_domain(attributes_str: &str) -> Option<String> {
 /// Tente de charger une page en HTTP/2 standard.
 /// Retourne None si le serveur répond 403/429 ou timeout (anti-bot détecté).
 fn fetch_vpc_page(client: &Client, url: &str) -> Option<String> {
-    let res = client.get(url)
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.7")
-        .send();
+    human_delay();
+    let req = client.get(url);
+    let req = apply_stealth_headers(req, url);
+    let res = req.send();
     match res {
         Ok(r) if r.status().is_success() => r.text().ok(),
         _ => None,
     }
 }
 
-/// Fallback HTTP/1 avec headers navigateur complets (contourne Cloudflare/Akamai).
+/// Fallback avec headers navigateur complets (contourne Cloudflare/Akamai).
 fn fetch_vpc_page_http1(url: &str) -> Option<String> {
+    human_delay();
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
-        .http1_only()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+        .user_agent(get_random_user_agent())
         .build()
         .ok()?;
-    let res = client.get(url)
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-        .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
-        .header("Cache-Control", "max-age=0")
-        .header("Sec-Fetch-Dest", "document")
-        .header("Sec-Fetch-Mode", "navigate")
-        .header("Sec-Fetch-Site", "none")
-        .header("Sec-Fetch-User", "?1")
-        .header("Upgrade-Insecure-Requests", "1")
-        .send();
+    let req = client.get(url);
+    let req = apply_stealth_headers(req, url);
+    let res = req.send();
     match res {
         Ok(r) if r.status().is_success() => r.text().ok(),
         _ => None,
@@ -947,7 +1005,7 @@ fn build_vpc_product_url(vpc_site: &str, vpc_code: &str, vpc_urls: &std::collect
         if domain.contains("rsdelivers") {
             Some(format!("https://{}/product/a/a/a/{}", domain, code))
         } else {
-            Some(format!("https://{}/web/p/{}", domain, code))
+            Some(format!("https://{}/web/c/?searchTerm={}", domain, code))
         }
     } else if site_lower.contains("farnell") {
         let domain = vpc_urls.get(vpc_site)
@@ -1090,7 +1148,7 @@ pub fn scrape_pdf_internal(
 
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .user_agent(get_random_user_agent())
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -1288,7 +1346,10 @@ pub fn scrape_pdf_internal(
                 searxng_url.trim_end_matches('/'),
                 urlencoding::encode(&q)
             );
-            if let Ok(res) = client.get(&search_url).send() {
+            human_delay();
+            let req_builder = client.get(&search_url);
+            let req_builder = apply_stealth_headers(req_builder, &search_url);
+            if let Ok(res) = req_builder.send() {
                 if res.status().is_success() {
                     if let Ok(json) = res.json::<serde_json::Value>() {
                         if let Some(results) = json["results"].as_array() {
@@ -1348,7 +1409,10 @@ pub fn scrape_pdf_internal(
             details: Some(link.clone()),
         });
 
-        match client.get(link).send() {
+        human_delay();
+        let req_builder = client.get(link);
+        let req_builder = apply_stealth_headers(req_builder, link);
+        match req_builder.send() {
             Ok(res) if res.status().is_success() => {
                 let headers = res.headers().clone();
                 // Validation Content-Type : rejeter les réponses HTML (pages d'erreur)
@@ -1562,50 +1626,452 @@ pub fn scrape_pdf_internal(
     Ok(first_relative_path)
 }
 
-// 3. Scraping d'images
-pub fn scrape_images_internal(
+pub fn search_pdf_candidates_internal(
     window: &tauri::Window,
     sku: &str,
     searxng_url: &str,
-    _query_legacy: &str,  // conservé pour compatibilité, non utilisé
-    rename_convention: &str,
-    network_path: &str,
     brand_hint: &str,
     label_hint: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<ScrapedPdfCandidate>, String> {
     let p = get_product_details(sku)?;
 
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .user_agent(get_random_user_agent())
         .build()
         .map_err(|e| e.to_string())?;
 
-    let clean_sku = crate::db::sanitize_sku(&p.sku);
-    let clean_brand = sanitize_folder_name(&p.brand);
-    let images_dir = Path::new(network_path).join("images");
-    fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+    let config = crate::config::load_config_internal();
+    let vpc_urls = config.as_ref().map(|c| c.vpc_urls.clone()).unwrap_or_default();
 
-    // Tailles des images existantes pour ce SKU (déduplication)
-    let mut existing_sizes: Vec<u64> = Vec::new();
-    let sku_upper = clean_sku.to_uppercase();
-    if let Ok(entries) = fs::read_dir(&images_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    let name_up = name.to_uppercase();
-                    // Exclure les miniatures de la comparaison
-                    if !name_up.starts_with("THUMB_") &&
-                       (name_up.starts_with(&format!("{}_", sku_upper)) || name_up.starts_with(&format!("{}.", sku_upper))) {
-                        if let Ok(meta) = fs::metadata(&path) {
-                            existing_sizes.push(meta.len());
+    let mut candidate_links: Vec<(String, String)> = Vec::new(); // (URL, Link Text/Title)
+
+    // Étape 1 & 2 : Source directe VPC
+    let attrs: serde_json::Value = serde_json::from_str(&p.attributes).unwrap_or(serde_json::json!({}));
+    let (vpc_site, vpc_code) = {
+        let mut site = String::new();
+        let mut code = String::new();
+        if let Some(vpc_map) = attrs["vpc"].as_object() {
+            if let Some((k, v)) = vpc_map.iter().next() {
+                site = k.clone();
+                code = v.as_str().unwrap_or("").to_string();
+            }
+        }
+        (site, code)
+    };
+
+    let vpc_domain_for_query = if !vpc_site.is_empty() {
+        build_vpc_product_url(&vpc_site, &vpc_code, &vpc_urls)
+            .as_deref()
+            .map(|u| {
+                u.replace("https://", "").replace("http://", "")
+                    .split('/').next().unwrap_or("").to_string()
+            })
+    } else {
+        None
+    };
+
+    if !vpc_site.is_empty() && !vpc_code.is_empty() {
+        if let Some(vpc_url) = build_vpc_product_url(&vpc_site, &vpc_code, &vpc_urls) {
+            let mut found_in_webview = false;
+            if let Ok(cache) = WEBVIEW_PDF_CACHE.lock() {
+                if let Some((ref cached_url, ref pdfs)) = *cache {
+                    if cached_url == &vpc_url {
+                        for (url, title) in pdfs {
+                            candidate_links.push((url.clone(), title.clone()));
+                        }
+                        found_in_webview = true;
+                    }
+                }
+            }
+            
+            if !found_in_webview {
+                let _ = window.emit("pdf-download-progress", ScrapeEventPayload {
+                    message: format!("Étape 1 : Scraping WebView de {}...", vpc_site),
+                    details: Some(vpc_url.clone()),
+                });
+                if let Ok(_) = scrape_url_via_webview(&window.app_handle(), &vpc_url) {
+                    if let Ok(cache) = WEBVIEW_PDF_CACHE.lock() {
+                        if let Some((ref cached_url, ref pdfs)) = *cache {
+                            if cached_url == &vpc_url {
+                                for (url, title) in pdfs {
+                                    candidate_links.push((url.clone(), title.clone()));
+                                }
+                                found_in_webview = true;
+                            }
                         }
                     }
                 }
             }
+
+            if !found_in_webview {
+                let _ = window.emit("pdf-download-progress", ScrapeEventPayload {
+                    message: format!("Étape 1 : Recherche directe {} pour {}", vpc_site, vpc_code),
+                    details: Some(vpc_url.clone()),
+                });
+
+            if vpc_site.to_lowercase().contains("rs") {
+                if let Ok(mut last_req) = LAST_RS_REQUEST.lock() {
+                    if let Some(last) = *last_req {
+                        let elapsed = last.elapsed();
+                        if elapsed < Duration::from_millis(1500) {
+                            std::thread::sleep(Duration::from_millis(1500) - elapsed);
+                        }
+                    }
+                    *last_req = Some(std::time::Instant::now());
+                }
+            }
+
+            let html_opt = fetch_vpc_page(&client, &vpc_url)
+                .or_else(|| {
+                    let _ = window.emit("pdf-download-progress", ScrapeEventPayload {
+                        message: "Étape 2 : Repli HTTP/1 (anti-bot)...".to_string(),
+                        details: None,
+                    });
+                    if vpc_site.to_lowercase().contains("rs") {
+                        let rs_code = vpc_code.trim().replace("-", "").replace(" ", "");
+                        let ma_url = format!("https://ma.rsdelivers.com/product/a/a/a/{}", rs_code);
+                        fetch_vpc_page_http1(&ma_url).or_else(|| fetch_vpc_page_http1(&vpc_url))
+                    } else {
+                        fetch_vpc_page_http1(&vpc_url)
+                    }
+                });
+
+            if let Some(html) = html_opt {
+                let json_ld_blocks = re_find_json_ld(&html);
+                let mut json_ld_pdfs = Vec::new();
+                for block in json_ld_blocks {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&block) {
+                        collect_pdf_urls_from_json(&data, &mut json_ld_pdfs);
+                    }
+                }
+                for url in json_ld_pdfs {
+                    if !candidate_links.iter().any(|(u, _)| u == &url) {
+                        let text = extract_link_text(&html, &url);
+                        let clean_text = if text.is_empty() { "Fiche Technique".to_string() } else { text };
+                        candidate_links.push((url, clean_text));
+                    }
+                }
+
+                let html_lower = html.to_lowercase();
+                let mut pos = 0;
+                while let Some(rel_start) = html_lower[pos..].find("http") {
+                    let abs_start = pos + rel_start;
+                    let end = html.as_bytes()[abs_start..]
+                        .iter()
+                        .position(|&c| c == b'"' || c == b'\'' || c == b' ' || c == b'<' || c == b'>' || c == b'\\' || c == b'}' || c == b']' || c == b'\n')
+                        .map(|p| abs_start + p)
+                        .unwrap_or(html.len());
+                    let url_raw = html[abs_start..end].replace('\\', "");
+                    let url_lower = url_raw.to_lowercase();
+                    if url_lower.contains(".pdf") && !url_lower.contains("javascript") {
+                        if !candidate_links.iter().any(|(u, _)| u == &url_raw) {
+                            let text = extract_link_text(&html, &url_raw);
+                            let clean_text = if text.is_empty() { "Fiche Technique".to_string() } else { text };
+                            candidate_links.push((url_raw, clean_text));
+                        }
+                    }
+                    pos = end.max(abs_start + 1);
+                }
+            }
+            }
         }
     }
+
+    if candidate_links.is_empty() {
+        let brand = if !brand_hint.is_empty() { brand_hint } else { &p.brand };
+        let label = if !label_hint.is_empty() { label_hint } else { "" };
+        let mpn = &p.mpn;
+        
+        let target_domain = if vpc_site.to_lowercase().contains("rs") {
+            Some("docs.rs-online.com".to_string())
+        } else {
+            vpc_domain_for_query.clone()
+        };
+
+        let mut queries = Vec::new();
+
+        if !vpc_code.is_empty() {
+            if let Some(ref dom) = target_domain {
+                queries.push(format!("site:{} \"{}\"", dom, vpc_code));
+                queries.push(format!("site:{} {}", dom, vpc_code));
+            }
+            queries.push(format!("\"{}\" pdf", vpc_code));
+        }
+
+        if !mpn.trim().is_empty() {
+            let clean_mpn = mpn.trim();
+            let mpn_quoted = if clean_mpn.contains(' ') || clean_mpn.contains('/') || clean_mpn.contains('\\') {
+                clean_mpn.to_string()
+            } else {
+                format!("\"{}\"", clean_mpn)
+            };
+            let brand_part = if !brand.is_empty() && brand != "INCONNU" {
+                brand.to_string()
+            } else {
+                "".to_string()
+            };
+            if let Some(ref dom) = target_domain {
+                queries.push(format!("site:{} {} {}", dom, mpn_quoted, brand_part));
+            }
+            queries.push(format!("{} {} pdf", brand_part, mpn_quoted));
+        }
+
+        queries.push(build_searxng_query_pdf(mpn, brand, label, target_domain.as_deref()));
+        queries.push(build_searxng_query_pdf(mpn, brand, label, None));
+
+        let mut unique_queries = Vec::new();
+        for q in queries {
+            let q_trimmed = q.trim().to_string();
+            if !q_trimmed.is_empty() && !unique_queries.contains(&q_trimmed) {
+                unique_queries.push(q_trimmed);
+            }
+        }
+
+        for q in unique_queries {
+            let _ = window.emit("pdf-download-progress", ScrapeEventPayload {
+                message: format!("Étape 3 : Recherche SearxNG ({})", q),
+                details: None,
+            });
+
+            let search_url = format!(
+                "{}/search?q={}&format=json",
+                searxng_url.trim_end_matches('/'),
+                urlencoding::encode(&q)
+            );
+            human_delay();
+            let req_builder = client.get(&search_url);
+            let req_builder = apply_stealth_headers(req_builder, &search_url);
+            if let Ok(res) = req_builder.send() {
+                if res.status().is_success() {
+                    if let Ok(json) = res.json::<serde_json::Value>() {
+                        if let Some(results) = json["results"].as_array() {
+                            for r in results {
+                                if let Some(link) = r["url"].as_str() {
+                                    let ll = link.to_lowercase();
+                                    if ll.contains(".pdf") || ll.contains("filetype=pdf") || ll.contains("format=pdf") {
+                                        let title = r["title"].as_str().unwrap_or("").to_string();
+                                        candidate_links.push((link.to_string(), title));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !candidate_links.is_empty() {
+                break;
+            }
+        }
+    }
+
+    if candidate_links.is_empty() {
+        return Err("Aucun fichier PDF trouvé.".to_string());
+    }
+
+    candidate_links.dedup_by(|a, b| a.0 == b.0);
+
+    // Prioriser par domaine VPC
+    if let Some(domain) = get_vpc_prioritized_domain(&p.attributes) {
+        let domain_lower = domain.to_lowercase();
+        candidate_links.sort_by(|a, b| {
+            let a_lower = a.0.to_lowercase();
+            let b_lower = b.0.to_lowercase();
+            let a_has = a_lower.contains(&domain_lower)
+                || (domain_lower.contains("rs-online") && (a_lower.contains("rsdelivers.com") || a_lower.contains("rswww.com") || a_lower.contains("cloudinary.com")));
+            let b_has = b_lower.contains(&domain_lower)
+                || (domain_lower.contains("rs-online") && (b_lower.contains("rsdelivers.com") || b_lower.contains("rswww.com") || b_lower.contains("cloudinary.com")));
+            match (a_has, b_has) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            }
+        });
+    }
+
+    let candidates: Vec<ScrapedPdfCandidate> = candidate_links.into_iter().map(|(url, title)| {
+        let domain = url.replace("https://", "").replace("http://", "")
+            .split('/').next().unwrap_or("").to_string();
+        ScrapedPdfCandidate {
+            url,
+            title,
+            domain,
+        }
+    }).collect();
+
+    Ok(candidates)
+}
+
+pub fn save_selected_pdf_internal(
+    sku: &str,
+    url: &str,
+    rename_convention: &str,
+    network_path: &str,
+    trigramme: &str,
+    doc_type_override: Option<&str>,
+) -> Result<String, String> {
+    let p = get_product_details(sku)?;
+    let clean_sku = sku.to_uppercase();
+
+    check_scrape_lock(network_path, sku, trigramme)?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent(get_random_user_agent())
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let req_builder = client.get(url);
+    let req_builder = apply_stealth_headers(req_builder, url);
+    
+    let res = req_builder.send().map_err(|e| {
+        release_scrape_lock(network_path);
+        format!("Échec connexion : {}", e)
+    })?;
+    if !res.status().is_success() {
+        release_scrape_lock(network_path);
+        return Err(format!("Le serveur distant a renvoyé une erreur : {}", res.status()));
+    }
+
+    let headers = res.headers().clone();
+    let ct = headers.get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let is_pdf_ct = ct.contains("pdf") || ct.contains("octet-stream");
+
+    let bytes = res.bytes().map_err(|e| {
+        release_scrape_lock(network_path);
+        format!("Erreur de téléchargement : {}", e)
+    })?;
+    if bytes.len() < 100 {
+        release_scrape_lock(network_path);
+        return Err("Le fichier téléchargé est vide ou invalide.".to_string());
+    }
+
+    let is_pdf_magic = bytes.starts_with(b"%PDF-");
+    if !is_pdf_ct && !is_pdf_magic {
+        release_scrape_lock(network_path);
+        return Err("Le fichier distant n'est pas un fichier PDF valide.".to_string());
+    }
+
+    let doc_type = if let Some(over) = doc_type_override {
+        let clean = over.trim().replace(" ", "_").replace("/", "_").replace("\\", "_");
+        if clean.is_empty() { "document".to_string() } else { clean }
+    } else {
+        detect_doc_type(url, "Fiche Technique")
+    };
+
+    let ext = "pdf";
+    let formatted_name = rename_convention
+        .replace("{SKU}", &clean_sku)
+        .replace("{Brand}", &sanitize_folder_name(&p.brand))
+        .replace("{MPN}", &sanitize_folder_name(&p.mpn))
+        .replace("{Type}", &doc_type);
+
+    let final_name = if formatted_name.to_lowercase().ends_with(".pdf") {
+        formatted_name
+    } else {
+        format!("{}.{}", formatted_name, ext)
+    };
+
+    let clean_brand = sanitize_folder_name(&p.brand);
+    let clean_cat = sanitize_folder_name(&p.category);
+    let clean_subcat = sanitize_folder_name(&p.sub_category);
+
+    let dest_dir = Path::new(network_path)
+        .join("documents")
+        .join(&clean_brand)
+        .join(&clean_cat)
+        .join(&clean_subcat)
+        .join(&clean_sku);
+
+    if let Err(e) = fs::create_dir_all(&dest_dir) {
+        release_scrape_lock(network_path);
+        return Err(format!("Impossible de créer le dossier de destination : {}", e));
+    }
+
+    let final_path = dest_dir.join(&final_name);
+    if let Err(e) = fs::write(&final_path, &bytes) {
+        release_scrape_lock(network_path);
+        return Err(format!("Échec écriture du fichier notice : {}", e));
+    }
+
+    let relative_path = format!(
+        "documents/{}/{}/{}/{}/{}",
+        clean_brand, clean_cat, clean_subcat, clean_sku, final_name
+    );
+
+    if let Some(db_path) = crate::events::get_db_path() {
+        if let Ok(conn) = Connection::open(&db_path) {
+            let _ = conn.execute(
+                "UPDATE products SET pdf_path = ? WHERE sku = ?",
+                (&relative_path, &clean_sku),
+            );
+
+            let _ = crate::events::write_audit_file(
+                network_path, &clean_sku, trigramme, "SCRAPE_PDF",
+                Some(&doc_type), Some(""), Some(&relative_path), Some(url),
+            );
+        }
+    }
+
+    if url.starts_with("http") {
+        update_product_attribute(&clean_sku, "scrape_doc_url", url);
+    }
+
+    release_scrape_lock(network_path);
+    Ok(relative_path)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScrapedImageCandidate {
+    pub url: String,
+    pub title: Option<String>,
+    pub domain: String,
+}
+
+fn get_domain_from_url(url_str: &str) -> String {
+    if let Ok(parsed) = reqwest::Url::parse(url_str) {
+        parsed.host_str().unwrap_or("").to_string()
+    } else {
+        "".to_string()
+    }
+}
+
+fn add_candidate(
+    candidates: &mut Vec<ScrapedImageCandidate>,
+    candidate_urls: &mut Vec<String>,
+    url: String,
+    title: Option<String>,
+) {
+    let clean_url = url.trim().to_string();
+    if clean_url.is_empty() || candidate_urls.contains(&clean_url) {
+        return;
+    }
+    let domain = get_domain_from_url(&clean_url);
+    candidate_urls.push(clean_url.clone());
+    candidates.push(ScrapedImageCandidate {
+        url: clean_url,
+        title,
+        domain,
+    });
+}
+
+pub fn search_image_candidates_internal(
+    window: &tauri::Window,
+    sku: &str,
+    searxng_url: &str,
+    brand_hint: &str,
+    label_hint: &str,
+) -> Result<Vec<ScrapedImageCandidate>, String> {
+    let p = get_product_details(sku)?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(get_random_user_agent())
+        .build()
+        .map_err(|e| e.to_string())?;
 
     let config = crate::config::load_config_internal();
     let vpc_urls = config.as_ref().map(|c| c.vpc_urls.clone()).unwrap_or_default();
@@ -1624,13 +2090,13 @@ pub fn scrape_images_internal(
         (site, code)
     };
 
+    let mut candidates: Vec<ScrapedImageCandidate> = Vec::new();
     let mut candidate_urls: Vec<String> = Vec::new();
 
-    // â”€â”€ Étape 1 & 2 : Source directe VPC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Étape 1 & 2 : Source directe VPC ──────────────────────────────────
     let rs_code = get_rs_stock_code(&p.attributes);
 
     if let Some(ref r_code) = rs_code {
-        // RS spécifique : extraire les URLs Cloudinary depuis la page produit
         let ma_url = format!("https://ma.rsdelivers.com/product/a/a/a/{}", r_code);
         let _ = window.emit("image-scrape-progress", ScrapeEventPayload {
             message: format!("Étape 1 : Images directes RS Cloudinary ({})", r_code),
@@ -1647,7 +2113,6 @@ pub fn scrape_images_internal(
             });
 
         if let Some(html) = html_opt {
-            // A. Structurée JSON-LD
             let json_ld_blocks = re_find_json_ld(&html);
             let mut json_ld_images = Vec::new();
             for block in json_ld_blocks {
@@ -1656,12 +2121,9 @@ pub fn scrape_images_internal(
                 }
             }
             for url in json_ld_images {
-                if !candidate_urls.contains(&url) {
-                    candidate_urls.push(url);
-                }
+                add_candidate(&mut candidates, &mut candidate_urls, url, Some("RS Components (JSON-LD)".to_string()));
             }
 
-            // B. HTML Cloudinary fallback
             let prefix = "https://res.cloudinary.com/rsc/image/upload/";
             let mut pos = 0;
             while let Some(start_idx) = html[pos..].find(prefix) {
@@ -1672,31 +2134,24 @@ pub fn scrape_images_internal(
                     .map(|p| abs_start + p)
                     .unwrap_or(html.len());
                 let mut url_str = html[abs_start..end].replace('\\', "");
-                // Accepter toute URL Cloudinary de la page (plus uniquement celles contenant r_code)
                 if !url_str.to_lowercase().ends_with(".jpg") && !url_str.to_lowercase().ends_with(".jpeg") && !url_str.to_lowercase().ends_with(".png") {
                     url_str.push_str(".jpg");
                 }
-                if !candidate_urls.contains(&url_str) {
-                    candidate_urls.push(url_str);
-                }
+                add_candidate(&mut candidates, &mut candidate_urls, url_str, Some("RS Components (Cloudinary)".to_string()));
                 pos = end.max(abs_start + 1);
             }
         }
 
-        // URLs Cloudinary générées (patterns Y et F pour indices 1 à 5)
         for idx in 1..=5 {
             for prefix_char in &["Y", "F"] {
                 let url = format!(
                     "https://res.cloudinary.com/rsc/image/upload/b_rgb:FFFFFF,c_pad,dpr_1.0,f_auto,q_auto,w_700/c_pad,w_700/{}{}-{:02}.jpg",
                     prefix_char, r_code, idx
                 );
-                if !candidate_urls.contains(&url) {
-                    candidate_urls.push(url);
-                }
+                add_candidate(&mut candidates, &mut candidate_urls, url, Some(format!("RS Components Cloudinary #{}{}", prefix_char, idx)));
             }
         }
     } else if !vpc_site.is_empty() && !vpc_code.is_empty() {
-        // Autres VPC (Farnell, Mouser, Conrad) : extraire les images depuis la page produit
         if let Some(vpc_url) = build_vpc_product_url(&vpc_site, &vpc_code, &vpc_urls) {
             let _ = window.emit("image-scrape-progress", ScrapeEventPayload {
                 message: format!("Étape 1 : Images directes {} pour {}", vpc_site, vpc_code),
@@ -1705,7 +2160,6 @@ pub fn scrape_images_internal(
             let html_opt = fetch_vpc_page(&client, &vpc_url)
                 .or_else(|| fetch_vpc_page_http1(&vpc_url));
             if let Some(html) = html_opt {
-                // A. Structurée JSON-LD
                 let json_ld_blocks = re_find_json_ld(&html);
                 let mut json_ld_images = Vec::new();
                 for block in json_ld_blocks {
@@ -1714,12 +2168,9 @@ pub fn scrape_images_internal(
                     }
                 }
                 for url in json_ld_images {
-                    if !candidate_urls.contains(&url) {
-                        candidate_urls.push(url);
-                    }
+                    add_candidate(&mut candidates, &mut candidate_urls, url, Some(format!("{} (JSON-LD)", vpc_site)));
                 }
 
-                // B. HTML fallback
                 for pattern in &["https://"] {
                     let mut pos = 0;
                     while let Some(start_idx) = html[pos..].find(pattern) {
@@ -1737,9 +2188,7 @@ pub fn scrape_images_internal(
                             && !url_lower.contains("icon")
                             && !url_lower.contains("logo")
                         {
-                            if !candidate_urls.contains(&url_str) {
-                                candidate_urls.push(url_str);
-                            }
+                            add_candidate(&mut candidates, &mut candidate_urls, url_str, Some(format!("{} (Page)", vpc_site)));
                         }
                         pos = end.max(abs_start + 1);
                     }
@@ -1748,8 +2197,8 @@ pub fn scrape_images_internal(
         }
     }
 
-    // â”€â”€ Étape 3 : Fallback SearxNG enrichi si pas assez de candidats â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    if candidate_urls.len() < 3 {
+    // ── Étape 3 : Fallback SearxNG enrichi ───────────────────────────────
+    if candidates.len() < 3 {
         let brand = if !brand_hint.is_empty() { brand_hint } else { &p.brand };
         let label = if !label_hint.is_empty() { label_hint } else { "" };
         let searxng_query = build_searxng_query_images(&p.mpn, brand, label);
@@ -1765,15 +2214,17 @@ pub fn scrape_images_internal(
             urlencoding::encode(&searxng_query)
         );
 
-        if let Ok(response) = client.get(&url).send() {
+        human_delay();
+        let req_builder = client.get(&url);
+        let req_builder = apply_stealth_headers(req_builder, &url);
+        if let Ok(response) = req_builder.send() {
             if response.status().is_success() {
                 if let Ok(json) = response.json::<serde_json::Value>() {
                     if let Some(results) = json["results"].as_array() {
-                        let mut candidates: Vec<serde_json::Value> = results.clone();
-                        // Trier par domaine VPC en priorité
+                        let mut searxng_candidates = results.clone();
                         if let Some(domain) = get_vpc_prioritized_domain(&p.attributes) {
                             let domain_lower = domain.to_lowercase();
-                            candidates.sort_by(|a, b| {
+                            searxng_candidates.sort_by(|a, b| {
                                 let a_url = a["img_src"].as_str().unwrap_or("").to_lowercase();
                                 let b_url = b["img_src"].as_str().unwrap_or("").to_lowercase();
                                 match (a_url.contains(&domain_lower), b_url.contains(&domain_lower)) {
@@ -1783,11 +2234,10 @@ pub fn scrape_images_internal(
                                 }
                             });
                         }
-                        for r in &candidates {
+                        for r in &searxng_candidates {
                             if let Some(link) = r["img_src"].as_str() {
-                                if !candidate_urls.contains(&link.to_string()) {
-                                    candidate_urls.push(link.to_string());
-                                }
+                                let title = r["title"].as_str().or(r["content"].as_str()).map(|s| s.to_string());
+                                add_candidate(&mut candidates, &mut candidate_urls, link.to_string(), title);
                             }
                         }
                     }
@@ -1796,19 +2246,67 @@ pub fn scrape_images_internal(
         }
     }
 
+    Ok(candidates)
+}
+
+pub fn save_selected_images_internal(
+    sku: &str,
+    urls: Vec<String>,
+    rename_convention: &str,
+    network_path: &str,
+) -> Result<Vec<String>, String> {
+    let p = get_product_details(sku)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(get_random_user_agent())
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let clean_sku = crate::db::sanitize_sku(&p.sku);
+    let clean_brand = sanitize_folder_name(&p.brand);
+    let images_dir = Path::new(network_path).join("images");
+    fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+
+    // Tailles des images existantes pour ce SKU (déduplication)
+    let mut existing_sizes: Vec<u64> = Vec::new();
+    let sku_upper = clean_sku.to_uppercase();
+    if let Ok(entries) = fs::read_dir(&images_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    let name_up = name.to_uppercase();
+                    if !name_up.starts_with("THUMB_") &&
+                       (name_up.starts_with(&format!("{}_", sku_upper)) || name_up.starts_with(&format!("{}.", sku_upper))) {
+                        if let Ok(meta) = fs::metadata(&path) {
+                            existing_sizes.push(meta.len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let attrs: serde_json::Value = serde_json::from_str(&p.attributes).unwrap_or(serde_json::json!({}));
+    let vpc_site = {
+        let mut site = String::new();
+        if let Some(vpc_map) = attrs["vpc"].as_object() {
+            if let Some((k, _)) = vpc_map.iter().next() {
+                site = k.clone();
+            }
+        }
+        site
+    };
+
     let mut downloaded = Vec::new();
     let mut count = 0;
 
-    for img_url in &candidate_urls {
-        if count >= 5 { break; }
-
-        let _ = window.emit("image-scrape-progress", ScrapeEventPayload {
-            message: format!("Téléchargement image {}/5...", count + 1),
-            details: Some(img_url.clone()),
-        });
-
+    for img_url in &urls {
         // Téléchargement avec vérification Content-Type
-        let res = match client.get(img_url).send() {
+        human_delay();
+        let req_builder = client.get(img_url);
+        let req_builder = apply_stealth_headers(req_builder, img_url);
+        let res = match req_builder.send() {
             Ok(r) if r.status().is_success() => r,
             _ => continue,
         };
@@ -1816,7 +2314,6 @@ pub fn scrape_images_internal(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        // Accepter image/* ou octet-stream
         if !ct.is_empty() && !ct.contains("image") && !ct.contains("octet-stream") {
             continue;
         }
@@ -1825,7 +2322,7 @@ pub fn scrape_images_internal(
             _ => continue,
         };
 
-        // Déduplication par taille (originaux seulement, hors miniatures)
+        // Déduplication par taille
         let candidate_size = img_bytes.len() as u64;
         if existing_sizes.iter().any(|&s| s == candidate_size) {
             continue;
@@ -1875,7 +2372,7 @@ pub fn scrape_images_internal(
     }
 
     if downloaded.is_empty() {
-        return Err("Impossible de télécharger ou valider les images trouvées.".to_string());
+        return Err("Aucune image n'a pu être téléchargée ou validée.".to_string());
     }
 
     // Mettre à jour l'image principale du SKU si aucune n'est définie
@@ -1894,12 +2391,22 @@ pub fn scrape_images_internal(
         }
     }
 
-    let _ = window.emit("image-scrape-progress", ScrapeEventPayload {
-        message: format!("{} image(s) sauvegardée(s) avec succès.", downloaded.len()),
-        details: None,
-    });
-
     Ok(downloaded)
+}
+
+pub fn scrape_images_internal(
+    window: &tauri::Window,
+    sku: &str,
+    searxng_url: &str,
+    _query_legacy: &str,
+    rename_convention: &str,
+    network_path: &str,
+    brand_hint: &str,
+    label_hint: &str,
+) -> Result<Vec<String>, String> {
+    let candidates = search_image_candidates_internal(window, sku, searxng_url, brand_hint, label_hint)?;
+    let urls: Vec<String> = candidates.into_iter().take(5).map(|c| c.url).collect();
+    save_selected_images_internal(sku, urls, rename_convention, network_path)
 }
 
 
@@ -2044,7 +2551,232 @@ fn scrape_mouser_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, 
     Err("Mouser API call failed or product not found".to_string())
 }
 
+fn debug_log(msg: &str) {
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("d:\\Code Projects\\Stockflow\\scratch\\webview_debug.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%H:%M:%S.%3f"), msg);
+    }
+}
+
+pub fn scrape_url_via_webview(
+    app_handle: &tauri::AppHandle,
+    url: &str,
+) -> Result<ScrapedProductDetails, String> {
+    let _ = fs::remove_file("d:\\Code Projects\\Stockflow\\scratch\\webview_debug.log");
+    debug_log(&format!("Starting webview scraping for URL: {}", url));
+    let label = format!("scraper_{}", uuid::Uuid::new_v4().simple());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let app_handle_clone = app_handle.clone();
+    let url_clone = url.to_string();
+    
+    debug_log("Requesting webview creation on main thread...");
+    let _ = app_handle.run_on_main_thread(move || {
+        let webview_res = tauri::WebviewWindowBuilder::new(
+            &app_handle_clone,
+            &label,
+            tauri::WebviewUrl::External(url_clone.parse().unwrap())
+        )
+        .visible(false)
+        .build();
+        let _ = tx.send(webview_res);
+    });
+    
+    let webview = match rx.recv() {
+        Ok(Ok(wv)) => {
+            debug_log("Webview created successfully");
+            wv
+        }
+        Ok(Err(e)) => {
+            debug_log(&format!("Failed to build WebviewWindow: {}", e));
+            return Err(e.to_string());
+        }
+        Err(e) => {
+            debug_log(&format!("Failed to receive WebviewWindow builder result: {}", e));
+            return Err(e.to_string());
+        }
+    };
+        
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(12);
+    let mut scrape_result: Option<Result<ScrapedProductDetails, String>> = None;
+    
+    let eval_js = r#"
+(function() {
+    try {
+        if (document.readyState !== 'complete' && document.readyState !== 'interactive') {
+            return;
+        }
+
+        const pdfs = [];
+        document.querySelectorAll('a').forEach(a => {
+            const href = a.getAttribute('href');
+            if (href && (href.toLowerCase().includes('.pdf') || href.toLowerCase().includes('filetype=pdf') || href.toLowerCase().includes('format=pdf'))) {
+                let absUrl = href;
+                try { absUrl = new URL(href, document.baseURI || window.location.href).toString(); } catch(_) {}
+                const title = a.textContent.trim() || 'Fiche Technique';
+                pdfs.push({ url: absUrl, title: title });
+            }
+        });
+
+        let brand = '';
+        let label = '';
+        let price = 0.0;
+        let mpn = '';
+
+        document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
+            try {
+                const json = JSON.parse(script.textContent || '{}');
+                const blocks = Array.isArray(json) ? json : [json];
+                for (const data of blocks) {
+                    const items = data['@graph'] && Array.isArray(data['@graph']) ? data['@graph'] : [data];
+                    for (const item of items) {
+                        if (item['@type'] === 'Product' || (Array.isArray(item['@type']) && item['@type'].includes('Product'))) {
+                            if (item.name) label = item.name;
+                            if (item.brand) {
+                                brand = typeof item.brand === 'string' ? item.brand : (item.brand.name || '');
+                            }
+                            if (item.mpn) mpn = String(item.mpn);
+                            if (item.offers) {
+                                const offers = Array.isArray(item.offers) ? item.offers[0] : item.offers;
+                                const pVal = offers.lowPrice || offers.price;
+                                if (pVal) price = parseFloat(String(pVal).replace(',', '.'));
+                            }
+                        }
+                    }
+                }
+            } catch(_) {}
+        });
+
+        if (!label) {
+            label = document.querySelector('h1')?.textContent?.trim() || '';
+        }
+
+        // If page is blank, wait longer
+        if (!label && document.querySelectorAll('a').length < 10) {
+            return;
+        }
+
+        const res = {
+            brand: brand.trim(),
+            label: label.trim(),
+            price: price,
+            mpn: mpn.trim(),
+            pdfs: pdfs
+        };
+
+        window.location.hash = '#scraped:' + encodeURIComponent(JSON.stringify(res));
+    } catch(e) {
+        window.location.hash = '#scraped_err:' + encodeURIComponent(e.toString());
+    }
+})();
+"#;
+ 
+    while start.elapsed() < timeout {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        let webview_clone = webview.clone();
+        let eval_js_clone = eval_js.to_string();
+        debug_log(&format!("Evaluating JS inside webview... Elapsed: {:?}", start.elapsed()));
+        let _ = app_handle.run_on_main_thread(move || {
+            let _ = webview_clone.eval(&eval_js_clone);
+        });
+        
+        let (url_tx, url_rx) = std::sync::mpsc::channel();
+        let webview_clone_url = webview.clone();
+        let _ = app_handle.run_on_main_thread(move || {
+            let _ = url_tx.send(webview_clone_url.url());
+        });
+        
+        match url_rx.recv() {
+            Ok(Ok(url_val)) => {
+                let url_str = url_val.to_string();
+                debug_log(&format!("Webview URL read: '{}'", url_str));
+                
+                if let Some(pos) = url_str.find("#scraped:") {
+                    let encoded = &url_str[pos + "#scraped:".len()..];
+                    if let Ok(decoded) = urlencoding::decode(encoded) {
+                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&decoded) {
+                            let brand = json_val["brand"].as_str().unwrap_or("").to_string();
+                            let label = json_val["label"].as_str().unwrap_or("").to_string();
+                            let price = json_val["price"].as_f64().unwrap_or(0.0);
+                            let mpn = json_val["mpn"].as_str().unwrap_or("").to_string();
+                            
+                            let mut pdf_candidates = Vec::new();
+                            if let Some(pdfs_arr) = json_val["pdfs"].as_array() {
+                                for p_val in pdfs_arr {
+                                    let u = p_val["url"].as_str().unwrap_or("").to_string();
+                                    let t = p_val["title"].as_str().unwrap_or("").to_string();
+                                    if !u.is_empty() {
+                                        pdf_candidates.push((u, t));
+                                    }
+                                }
+                            }
+                            
+                            debug_log(&format!("Successfully parsed scraped details. Brand: '{}', MPN: '{}', PDFs: {}", brand, mpn, pdf_candidates.len()));
+                            let details = ScrapedProductDetails {
+                                sku: String::new(),
+                                mpn,
+                                brand,
+                                label,
+                                price,
+                                pack_size: 0,
+                                dimensions: None,
+                                weight: None,
+                                source_url: Some(url.to_string()),
+                                fallback_info: Some("Scraping WebView réussi".to_string()),
+                                is_deterministic_fallback: Some(true),
+                            };
+                            
+                            if !pdf_candidates.is_empty() {
+                                if let Ok(mut cache) = WEBVIEW_PDF_CACHE.lock() {
+                                    *cache = Some((url.to_string(), pdf_candidates));
+                                }
+                            }
+                            
+                            scrape_result = Some(Ok(details));
+                            break;
+                        }
+                    }
+                } else if let Some(pos) = url_str.find("#scraped_err:") {
+                    let encoded = &url_str[pos + "#scraped_err:".len()..];
+                    let error_msg = urlencoding::decode(encoded).unwrap_or_else(|_| "Unknown error".into()).into_owned();
+                    debug_log(&format!("Scraping error read from URL: {}", error_msg));
+                    scrape_result = Some(Err(error_msg));
+                    break;
+                }
+            }
+            Ok(Err(e)) => {
+                debug_log(&format!("Failed to read webview URL (Tauri error): {}", e));
+            }
+            Err(e) => {
+                debug_log(&format!("Failed to receive webview URL: {}", e));
+            }
+        }
+    }
+
+    let webview_clone3 = webview.clone();
+    let _ = app_handle.run_on_main_thread(move || {
+        let _ = webview_clone3.close();
+    });
+
+    match scrape_result {
+        Some(res) => {
+            debug_log("Returning scrape result");
+            res
+        }
+        None => {
+            debug_log("Scraping timed out");
+            Err("Timeout du scraping WebView".to_string())
+        }
+    }
+}
+
 pub fn scrape_product_details_internal(
+    app_handle: &tauri::AppHandle,
     vpc_site: &str,
     vpc_code: &str,
     sku: &str,
@@ -2080,8 +2812,7 @@ pub fn scrape_product_details_internal(
 
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36")
-        .http1_only()
+        .user_agent(get_random_user_agent())
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -2109,34 +2840,18 @@ pub fn scrape_product_details_internal(
     if !is_general {
         rs_code = code_to_use.trim().replace("-", "").replace(" ", "");
 
-        // Temporisation anti-spam pour RS (1500 ms)
-        if let Ok(mut last_req) = LAST_RS_REQUEST.lock() {
-            if let Some(last) = *last_req {
-                let elapsed = last.elapsed();
-                if elapsed < Duration::from_millis(1500) {
-                    std::thread::sleep(Duration::from_millis(1500) - elapsed);
-                }
-            }
-            *last_req = Some(std::time::Instant::now());
-        }
-
         let direct_url = if rs_domain.contains("rsdelivers") {
             format!("https://{}/product/a/a/a/{}", rs_domain, rs_code)
         } else {
-            format!("https://{}/web/p/{}", rs_domain, rs_code)
+            format!("https://{}/web/c/?searchTerm={}", rs_domain, rs_code)
         };
 
         final_url = direct_url.clone();
 
-        if let Ok(res) = client.get(&direct_url)
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-            .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
-            .header("Sec-Fetch-Dest", "document")
-            .header("Sec-Fetch-Mode", "navigate")
-            .header("Sec-Fetch-Site", "none")
-            .header("Sec-Fetch-User", "?1")
-            .header("Upgrade-Insecure-Requests", "1")
-            .send() {
+        human_delay();
+        let req_builder = client.get(&direct_url);
+        let req_builder = apply_stealth_headers(req_builder, &direct_url);
+        if let Ok(res) = req_builder.send() {
             if res.status().is_success() {
                 if let Ok(html) = res.text() {
                     html_opt = Some(html);
@@ -2147,14 +2862,23 @@ pub fn scrape_product_details_internal(
         // Fusion Niveaux 2 & 3 : Si le scraping direct a échoué (403 bloqué par Akamai/Cloudflare sur fr.rs-online.com), 
         // on lance la double recherche (Direct Morocco structuré et SearxNG FR) pour appliquer la règle de décision intelligente.
         if html_opt.is_none() {
+            if let Ok(details) = scrape_url_via_webview(app_handle, &direct_url) {
+                let mut d = details;
+                d.sku = sku.to_string();
+                return Ok(d);
+            }
+        }
+
+        if html_opt.is_none() {
             let mut ma_price = None;
             let mut ma_html = None;
 
             // 1. Tenter ma.rsdelivers.com (Direct, structurellement fiable)
             let ma_url = format!("https://ma.rsdelivers.com/product/a/a/a/{}", rs_code);
-            if let Ok(res) = client.get(&ma_url)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36")
-                .send() {
+            human_delay();
+            let req_builder = client.get(&ma_url);
+            let req_builder = apply_stealth_headers(req_builder, &ma_url);
+            if let Ok(res) = req_builder.send() {
                 if res.status().is_success() {
                     if let Ok(html) = res.text() {
                         let json_ld_blocks = re_find_json_ld(&html);
@@ -2186,8 +2910,11 @@ pub fn scrape_product_details_internal(
             if let Some(s_url) = config.as_ref().and_then(|c| c.searxng_url.as_ref()) {
                 let clean_sku: String = rs_code.chars().filter(|c| c.is_ascii_digit()).collect();
                 let q = format!("site:fr.rs-online.com ({} OR {}) (\"prix\" OR \"EUR\" OR \"€\")", rs_code, clean_sku);
+                human_delay();
                 let search_url = format!("{}/search?q={}&format=json", s_url.trim_end_matches('/'), urlencoding::encode(&q));
-                if let Ok(res) = client.get(&search_url).send() {
+                let req_builder = client.get(&search_url);
+                let req_builder = apply_stealth_headers(req_builder, &search_url);
+                if let Ok(res) = req_builder.send() {
                     if res.status().is_success() {
                         if let Ok(json) = res.json::<serde_json::Value>() {
                             if let Some(results) = json["results"].as_array() {
@@ -2465,7 +3192,10 @@ pub fn scrape_product_details_internal(
         };
 
         let search_url = format!("{}/search?q={}&format=json", s_url.trim_end_matches('/'), urlencoding::encode(&q));
-        if let Ok(res) = client.get(&search_url).send() {
+        human_delay();
+        let req_builder = client.get(&search_url);
+        let req_builder = apply_stealth_headers(req_builder, &search_url);
+        if let Ok(res) = req_builder.send() {
             if res.status().is_success() {
                 if let Ok(json) = res.json::<serde_json::Value>() {
                     if let Some(results) = json["results"].as_array() {
@@ -2497,7 +3227,10 @@ pub fn scrape_product_details_internal(
                                 let mut found_via_direct_fetch = false;
 
                                 if !url.is_empty() && (url.starts_with("http://") || url.starts_with("https://")) {
-                                    if let Ok(res) = client.get(&url).send() {
+                                    human_delay();
+                                    let req_builder = client.get(&url);
+                                    let req_builder = apply_stealth_headers(req_builder, &url);
+                                    if let Ok(res) = req_builder.send() {
                                         if res.status().is_success() {
                                             if let Ok(html) = res.text() {
                                                 let json_ld_blocks = re_find_json_ld(&html);
