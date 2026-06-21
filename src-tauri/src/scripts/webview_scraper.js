@@ -162,6 +162,7 @@
             const priceRegex = /\b\d+(?:[\s,.]\d{2})\b/g;
             const foundHTs = [];
             const foundTTCs = [];
+            const foundUnknowns = [];
             
             const allTextNodes = [];
             const walkDOM = (node) => {
@@ -205,17 +206,21 @@
                                 if (!foundTTCs.includes(val)) foundTTCs.push(val);
                             } else if (context.includes('ht') || context.includes('excl') || context.includes('hors taxe') || context.includes('net')) {
                                 if (!foundHTs.includes(val)) foundHTs.push(val);
-                            } else if (window.location.hostname.includes('rs-online') || window.location.hostname.includes('rsdelivers')) {
-                                // Par défaut sur RS, si aucun contexte TTC n'est trouvé, c'est HT
-                                if (!foundHTs.includes(val)) foundHTs.push(val);
+                            } else {
+                                if (!foundUnknowns.includes(val)) foundUnknowns.push(val);
                             }
                         }
                     }
                 }
             }
 
+            // S'assurer qu'un prix trouvé dans une catégorie n'est pas pollué par l'autre
+            // On ne met dans Unknown que les prix qui n'ont été classés ni HT ni TTC
+            const finalUnknowns = foundUnknowns.filter(v => !foundHTs.includes(v) && !foundTTCs.includes(v));
+
             if (foundHTs.length > 0) priceHT = foundHTs[0];
             if (foundTTCs.length > 0) priceTTC = foundTTCs[0];
+            const priceUnknown = finalUnknowns.length > 0 ? finalUnknowns[0] : null;
             // --- FIN EXTRACTION PRIX GLOBALE OPTIMISÉE ---
 
             // 1. Fallback par conteneur de Sous-total / Subtotal si toujours null
@@ -253,10 +258,11 @@
                 price = priceHT;
             } else if (priceTTC !== null && !isNaN(priceTTC)) {
                 price = priceTTC / 1.20; 
+            } else if (priceUnknown !== null && !isNaN(priceUnknown)) {
+                price = priceUnknown; // Par défaut, on le prend comme brut
             } else if (jsonLdPrice > 0) {
                 const isRs = window.location.hostname.includes('rs-online') || window.location.hostname.includes('rsdelivers');
                 if (isRs) {
-                    // Si RS, le JSON-LD contient en fait le prix HT unitaire
                     price = jsonLdPrice * pack_size;
                 } else {
                     price = jsonLdPrice;
@@ -264,8 +270,8 @@
             }
 
             // Attente si aucun prix n'est trouvé pour l'instant (laisse du temps au JS client de s'exécuter)
-            const priceFound = price > 0 || priceHT !== null || priceTTC !== null;
-            console.log("[Scraper] PriceFound: " + priceFound + ", price: " + price + ", priceHT: " + priceHT + ", priceTTC: " + priceTTC + ", time passed: " + (Date.now() - window.sfStartTime) + "ms");
+            const priceFound = price > 0 || priceHT !== null || priceTTC !== null || priceUnknown !== null;
+            console.log("[Scraper] PriceFound: " + priceFound + ", price: " + price + ", priceHT: " + priceHT + ", priceTTC: " + priceTTC + ", priceUnknown: " + priceUnknown + ", time passed: " + (Date.now() - window.sfStartTime) + "ms");
             if (!priceFound && (Date.now() - window.sfStartTime < 4000)) {
                 console.log("[Scraper] Waiting for price to appear...");
                 return false;
@@ -287,6 +293,14 @@
                     pack_size: pack_size,
                     tax_type: "TTC",
                     label: pack_size > 1 ? `Prix du lot (${pack_size} u.) - TTC` : "Prix unitaire - TTC"
+                });
+            }
+            if (priceUnknown !== null && !isNaN(priceUnknown)) {
+                price_candidates.push({
+                    price: priceUnknown,
+                    pack_size: pack_size,
+                    tax_type: "INCONNU",
+                    label: pack_size > 1 ? `Prix du lot (${pack_size} u.) - INCONNU` : "Prix unitaire - INCONNU"
                 });
             }
             if (jsonLdPrice > 0) {
