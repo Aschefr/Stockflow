@@ -196,15 +196,17 @@
                     if (val > 0) {
                         const valIndex = cleanParentText.indexOf(priceStr);
                         if (valIndex !== -1) {
-                            const start = Math.max(0, valIndex - 40);
-                            const end = Math.min(cleanParentText.length, valIndex + priceStr.length + 40);
+                            const start = Math.max(0, valIndex - 60);
+                            const end = Math.min(cleanParentText.length, valIndex + priceStr.length + 60);
                             const context = cleanParentText.substring(start, end).toLowerCase();
                             
-                            if (context.includes('ht') || context.includes('excl') || context.includes('hors taxe') || context.includes('net')) {
-                                if (!foundHTs.includes(val)) foundHTs.push(val);
-                            } else if (context.includes('ttc') || context.includes('incl') || context.includes('toutes taxes')) {
+                            // Détection explicite de TTC d'abord pour éviter les faux-positifs HT
+                            if (context.includes('ttc') || context.includes('incl') || context.includes('toutes taxes') || context.includes('tva comprise') || context.includes('tva incluse')) {
                                 if (!foundTTCs.includes(val)) foundTTCs.push(val);
+                            } else if (context.includes('ht') || context.includes('excl') || context.includes('hors taxe') || context.includes('net')) {
+                                if (!foundHTs.includes(val)) foundHTs.push(val);
                             } else if (window.location.hostname.includes('rs-online') || window.location.hostname.includes('rsdelivers')) {
+                                // Par défaut sur RS, si aucun contexte TTC n'est trouvé, c'est HT
                                 if (!foundHTs.includes(val)) foundHTs.push(val);
                             }
                         }

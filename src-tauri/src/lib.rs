@@ -1556,9 +1556,9 @@ fn save_screenshot(
         &sku,
         &trigramme,
         "UPLOAD_MEDIA",
-        Some("pdf"), 
-        Some(&relative_path),
+        Some("screenshot"),
         None,
+        Some(&relative_path),
         None,
     );
 
