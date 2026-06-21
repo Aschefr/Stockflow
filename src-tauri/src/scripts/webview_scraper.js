@@ -371,14 +371,16 @@
                                  sendResult(null);
                              }
                          })
-                         .catch(() => {
-                             if (overlay) overlay.style.display = 'flex'; // Restore overlay
-                             sendResult(null);
-                         });
-                     } catch(err) {
-                         sendResult(null);
-                     }
-                 };
+                          .catch((e) => {
+                              console.error("[Scraper html2canvas] Canvas rendering failed:", e);
+                              if (overlay) overlay.style.display = 'flex'; // Restore overlay
+                              sendResult(null);
+                          });
+                      } catch(err) {
+                          console.error("[Scraper html2canvas] Exception in executeHtml2Canvas:", err);
+                          sendResult(null);
+                      }
+                  };
 
                  if (window.html2canvas) {
                      executeHtml2Canvas();

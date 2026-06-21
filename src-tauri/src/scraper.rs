@@ -2684,6 +2684,12 @@ pub async fn evaluate_js_in_webview(
     let tx_clone = tx.clone();
     
     let _ = app_handle.run_on_main_thread(move || {
+        // Lire localement html2canvas.min.js s'il existe dans node_modules pour l'injecter de manière autonome et fiable
+        let local_html2canvas = std::fs::read_to_string("d:\\Code Projects\\Stockflow\\node_modules\\html2canvas\\dist\\html2canvas.min.js")
+            .unwrap_or_default();
+        
+        let combined_script = format!("{};\n{}", local_html2canvas, eval_js_string);
+
         let webview_res = tauri::WebviewWindowBuilder::new(
             &app_handle_clone,
             &label,
@@ -2692,7 +2698,7 @@ pub async fn evaluate_js_in_webview(
         .visible(true)
         .position(-2000.0, -2000.0)
         .inner_size(1280.0, 800.0)
-        .initialization_script(&eval_js_string)
+        .initialization_script(&combined_script)
         .on_navigation(move |nav_url| {
             let url_str = nav_url.as_str();
             if let Some(pos) = url_str.find("#scraped:") {
