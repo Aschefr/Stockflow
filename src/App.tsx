@@ -867,13 +867,16 @@ function App() {
     };
 
     const targetSku = pendingScrapeSku || (pendingScrapeIsEdit ? editProduct.sku : newProduct.sku);
+    console.log("[E2E JS] handleSelectScrapedPrice targetSku:", targetSku, "hasScreenshot:", !!pendingScrapeDetails?.screenshot);
     if (targetSku && config && pendingScrapeDetails?.screenshot) {
       invoke("save_screenshot", {
         networkPath: config.network_path,
         sku: targetSku,
         base64Image: pendingScrapeDetails.screenshot,
         trigramme: config.trigramme
-      }).catch(e => console.error("Failed to save screenshot:", e));
+      })
+      .then(() => console.log("[E2E JS] save_screenshot success!"))
+      .catch(e => console.error("[E2E JS] save_screenshot failed:", e));
     }
 
     if (pendingScrapeSku) {

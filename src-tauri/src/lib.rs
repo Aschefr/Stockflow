@@ -1541,10 +1541,18 @@ fn save_screenshot(
         .join(&clean_subcategory)
         .join(&clean_sku);
 
-    let _ = std::fs::create_dir_all(&dest_dir);
+    println!("[save_screenshot] Destination directory: {:?}", dest_dir);
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        println!("[save_screenshot] Failed to create directories: {:?}", e);
+        return Err(format!("Failed to create directories: {}", e));
+    }
     let dest_path = dest_dir.join("screenshot_source.jpg");
 
-    std::fs::write(&dest_path, decoded).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::write(&dest_path, decoded) {
+        println!("[save_screenshot] Failed to write file: {:?}", e);
+        return Err(format!("Failed to write file: {}", e));
+    }
+    println!("[save_screenshot] Screenshot successfully written to: {:?}", dest_path);
 
     let relative_path = format!(
         "documents/{}/{}/{}/{}/screenshot_source.jpg", 
