@@ -1047,6 +1047,7 @@ async fn scrape_product_details(
         }
         if let Some(ref mut candidates) = details.price_candidates {
             for c in candidates.iter_mut() {
+                c.recommended = Some(if is_ttc { c.tax_type == "TTC" } else { c.tax_type == "HT" });
                 if is_ttc && c.tax_type == "HT" {
                     c.price = parse_float_two_decimals(c.price * 1.20);
                     c.tax_type = "TTC".to_string();

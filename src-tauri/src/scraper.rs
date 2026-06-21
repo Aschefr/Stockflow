@@ -2507,6 +2507,7 @@ pub struct PriceCandidate {
     pub pack_size: i64,
     pub tax_type: String,
     pub label: String,
+    pub recommended: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -2779,6 +2780,7 @@ pub async fn scrape_url_via_webview(
                         pack_size: ps,
                         tax_type: tt,
                         label: lbl,
+                        recommended: pc_val["recommended"].as_bool(),
                     });
                 }
             }

@@ -6191,20 +6191,37 @@ function App() {
                       onClick={() => handleSelectScrapedPrice(candidate)}
                       className="price-candidate-item"
                       style={{
-                        border: "1px solid var(--border-color)",
+                        border: candidate.recommended ? "2px solid var(--accent)" : "1px solid var(--border-color)",
                         borderRadius: "6px",
                         padding: "1rem",
-                        backgroundColor: "var(--bg-tertiary)",
+                        backgroundColor: candidate.recommended ? "rgba(0, 168, 204, 0.08)" : "var(--bg-tertiary)",
                         cursor: "pointer",
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
-                        transition: "all 0.2s ease"
+                        transition: "all 0.2s ease",
+                        position: "relative"
                       }}
                     >
                       <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
-                        <span style={{ fontWeight: "600", fontSize: "14px", color: "var(--accent)" }}>
+                        <span style={{ fontWeight: "600", fontSize: "14px", color: "var(--accent)", display: "flex", alignItems: "center" }}>
                           {candidate.label}
+                          {candidate.recommended && (
+                            <span 
+                              style={{ 
+                                fontSize: "10px", 
+                                color: "var(--success)", 
+                                backgroundColor: "rgba(16, 185, 129, 0.12)", 
+                                padding: "0.15rem 0.4rem", 
+                                borderRadius: "4px", 
+                                marginLeft: "0.5rem",
+                                fontWeight: "bold",
+                                border: "1px solid rgba(16, 185, 129, 0.2)"
+                              }}
+                            >
+                              ★ Recommandé ({priceTaxTypeInput})
+                            </span>
+                          )}
                         </span>
                         <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
                           Type de prix : {candidate.tax_type}
