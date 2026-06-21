@@ -2689,7 +2689,8 @@ pub async fn evaluate_js_in_webview(
             &label,
             tauri::WebviewUrl::External(url_clone.parse().unwrap())
         )
-        .visible(false)
+        .visible(true)
+        .position(-2000.0, -2000.0)
         .initialization_script(&eval_js_string)
         .on_navigation(move |nav_url| {
             let url_str = nav_url.as_str();

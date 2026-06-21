@@ -1055,7 +1055,6 @@ async fn scrape_product_details(
     } else {
         1
     };
-
     if let Some(config) = load_config_internal() {
         let is_ttc = config.price_tax_type.as_deref() == Some("TTC");
         if is_ttc {
@@ -1065,12 +1064,12 @@ async fn scrape_product_details(
             // Evaluer les scores de pertinence pour chaque candidat
             let mut scored_indices: Vec<(usize, i32)> = Vec::new();
             for (idx, c) in candidates.iter().enumerate() {
-                let original_tax_matches = if is_ttc { c.tax_type == "TTC" } else { c.tax_type == "HT" };
-                if !original_tax_matches {
-                    continue;
+                let mut score = 0;
+                // Favorise la correspondance avec le type de taxe attendu par l'utilisateur
+                if (is_ttc && c.tax_type == "TTC") || (!is_ttc && c.tax_type == "HT") {
+                    score += 50;
                 }
                 
-                let mut score = 0;
                 // Correspondance de la taille du lot
                 if c.pack_size == target_pack_size {
                     score += 100;
@@ -1097,6 +1096,7 @@ async fn scrape_product_details(
 
             for (idx, c) in candidates.iter_mut().enumerate() {
                 c.recommended = Some(Some(idx) == best_idx);
+                // Normaliser le prix en fonction du paramétrage de l'application
                 if is_ttc && c.tax_type == "HT" {
                     c.price = parse_float_two_decimals(c.price * 1.20);
                     c.tax_type = "TTC".to_string();
@@ -1109,7 +1109,6 @@ async fn scrape_product_details(
     }
     Ok(details)
 }
-
 fn parse_float_two_decimals(val: f64) -> f64 {
     (val * 100.0).round() / 100.0
 }

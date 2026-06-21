@@ -140,70 +140,105 @@
             let priceHT = null;
             let priceTTC = null;
 
-            // 1. Recherche via les conteneurs de Sous-total / Subtotal
-            const allElements = document.querySelectorAll('*');
-            for (const el of allElements) {
-                if (el.children.length === 0) {
-                    const text = el.textContent || '';
-                    if (text.includes('Sous-total') || text.includes('Subtotal')) {
-                        // Récupérer le pack size depuis le texte
-                        // ex: "Sous-total (1 paquet de 10 unités)*"
-                        const packMatch = text.match(/(?:paquet|lot|pack|box|boite|boîte) de\s*(\d+)/i);
-                        if (packMatch) {
-                            const val = parseInt(packMatch[1], 10);
-                            if (val > 0) pack_size = val;
-                        }
+            // Analyse du texte complet pour extraire la taille du lot
+            const bodyText = document.body.innerText || '';
+            const packPatterns = [
+                /(?:paquet|lot|pack|box|boite|boîte|sac|pochette) de\s*(\d+)\s*(?:unités|pièces|items|units|u)?/i,
+                /conditionnement\s*:\s*(\d+)/i,
+                /(\d+)\s*(?:unités|pièces|units|items)\s+par\s+(?:paquet|lot|pack|boite|boîte)/i
+            ];
+            for (const pattern of packPatterns) {
+                const m = bodyText.match(pattern);
+                if (m) {
+                    const val = parseInt(m[1], 10);
+                    if (val > 0) {
+                        pack_size = val;
+                        break;
+                    }
+                }
+            }
 
-                        const parent = el.parentElement;
-                        if (parent) {
-                            const parentText = parent.textContent || '';
-                            // ex: "60,07 € HT" ou "72,08 € TTC"
-                            const htMatch = parentText.match(/([\d\s,.]+)\s*(?:€|EUR)?\s*HT/i);
-                            if (htMatch) {
-                                priceHT = parseFloat(htMatch[1].replace(/\s/g, '').replace(',', '.'));
+            // --- DEBUT EXTRACTION PRIX GLOBALE OPTIMISÉE ---
+            // Recherche robuste des prix HT (excl. VAT / HT) dans le texte de la page
+            const htRegexes = [
+                /(\d+(?:[\s,.]\d+)*)\s*(?:€|EUR)?\s*(?:HT|excl\.\s*VAT)\b/gi,
+                /(?:HT|excl\.\s*VAT)\s*(?:€|EUR)?\s*(\d+(?:[\s,.]\d+)*)\b/gi
+            ];
+            const foundHTs = [];
+            for (const rx of htRegexes) {
+                let m;
+                while ((m = rx.exec(bodyText)) !== null) {
+                    const priceStr = m[1] || m[2];
+                    if (priceStr) {
+                        const val = parseFloat(priceStr.replace(/\s/g, '').replace(',', '.'));
+                        if (val > 0 && !foundHTs.includes(val)) foundHTs.push(val);
+                    }
+                }
+            }
+
+            // Recherche robuste des prix TTC (incl. VAT / TTC) dans le texte de la page
+            const ttcRegexes = [
+                /(\d+(?:[\s,.]\d+)*)\s*(?:€|EUR)?\s*(?:TTC|incl\.\s*VAT)\b/gi,
+                /(?:TTC|incl\.\s*VAT)\s*(?:€|EUR)?\s*(\d+(?:[\s,.]\d+)*)\b/gi
+            ];
+            const foundTTCs = [];
+            for (const rx of ttcRegexes) {
+                let m;
+                while ((m = rx.exec(bodyText)) !== null) {
+                    const priceStr = m[1] || m[2];
+                    if (priceStr) {
+                        const val = parseFloat(priceStr.replace(/\s/g, '').replace(',', '.'));
+                        if (val > 0 && !foundTTCs.includes(val)) foundTTCs.push(val);
+                    }
+                }
+            }
+
+            // Prendre les premières occurrences trouvées
+            if (foundHTs.length > 0) priceHT = foundHTs[0];
+            if (foundTTCs.length > 0) priceTTC = foundTTCs[0];
+
+            // 1. Fallback par conteneur de Sous-total / Subtotal si toujours null
+            if (priceHT === null && priceTTC === null) {
+                const allElements = document.querySelectorAll('*');
+                for (const el of allElements) {
+                    if (el.children.length === 0) {
+                        const text = el.textContent || '';
+                        if (text.includes('Sous-total') || text.includes('Subtotal')) {
+                            const packMatch = text.match(/(?:paquet|lot|pack|box|boite|boîte) de\s*(\d+)/i);
+                            if (packMatch) {
+                                const val = parseInt(packMatch[1], 10);
+                                if (val > 0) pack_size = val;
                             }
-                            const ttcMatch = parentText.match(/([\d\s,.]+)\s*(?:€|EUR)?\s*TTC/i);
-                            if (ttcMatch) {
-                                priceTTC = parseFloat(ttcMatch[1].replace(/\s/g, '').replace(',', '.'));
+
+                            const parent = el.parentElement;
+                            if (parent) {
+                                const parentText = parent.textContent || '';
+                                const htMatch = parentText.match(/([\d\s,.]+)\s*(?:€|EUR)?\s*HT/i);
+                                if (htMatch) {
+                                    priceHT = parseFloat(htMatch[1].replace(/\s/g, '').replace(',', '.'));
+                                }
+                                const ttcMatch = parentText.match(/([\d\s,.]+)\s*(?:€|EUR)?\s*TTC/i);
+                                if (ttcMatch) {
+                                    priceTTC = parseFloat(ttcMatch[1].replace(/\s/g, '').replace(',', '.'));
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // 2. Si non trouvé via Sous-total, analyser le texte global pour la taille du lot
-            if (pack_size === 1) {
-                const bodyText = document.body.innerText || '';
-                const packPatterns = [
-                    /(?:paquet|lot|pack|box|boite|boîte|sac|pochette) de\s*(\d+)\s*(?:unités|pièces|items|units|u)?/i,
-                    /conditionnement\s*:\s*(\d+)/i,
-                    /(\d+)\s*(?:unités|pièces|units|items)\s+par\s+(?:paquet|lot|pack|boite|boîte)/i
-                ];
-                for (const pattern of packPatterns) {
-                    const m = bodyText.match(pattern);
-                    if (m) {
-                        const val = parseInt(m[1], 10);
-                        if (val > 0) {
-                            pack_size = val;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // 3. Détermination du prix final HT attendu par le backend
+            // 2. Détermination du prix final HT
             if (priceHT !== null && !isNaN(priceHT)) {
                 price = priceHT;
             } else if (priceTTC !== null && !isNaN(priceTTC)) {
-                price = priceTTC / 1.20; // Conversion TTC vers HT (TVA 20%)
+                price = priceTTC / 1.20; 
             } else if (jsonLdPrice > 0) {
-                // Si on a récupéré le prix du JSON-LD (généralement le prix unitaire TTC sur RS)
                 const isRs = window.location.hostname.includes('rs-online') || window.location.hostname.includes('rsdelivers');
                 if (isRs) {
-                    // RS affiche le prix unitaire TTC en JSON-LD, on le convertit en prix de lot HT :
-                    price = (jsonLdPrice / 1.20) * pack_size;
+                    // Si RS, le JSON-LD contient en fait le prix HT unitaire
+                    price = jsonLdPrice * pack_size;
                 } else {
-                    price = jsonLdPrice; // Autre site, on fait confiance au JSON-LD
+                    price = jsonLdPrice;
                 }
             }
 
@@ -222,7 +257,7 @@
                     price: priceHT,
                     pack_size: pack_size,
                     tax_type: "HT",
-                    label: `Prix du lot (${pack_size} u.)`
+                    label: pack_size > 1 ? `Prix du lot (${pack_size} u.)` : "Prix unitaire"
                 });
             }
             if (priceTTC !== null && !isNaN(priceTTC)) {
@@ -230,28 +265,23 @@
                     price: priceTTC,
                     pack_size: pack_size,
                     tax_type: "TTC",
-                    label: `Prix du lot (${pack_size} u.)`
+                    label: pack_size > 1 ? `Prix du lot (${pack_size} u.)` : "Prix unitaire"
                 });
             }
             if (jsonLdPrice > 0) {
+                // RS JSON-LD price is unit price (excluding VAT)
                 price_candidates.push({
                     price: jsonLdPrice,
                     pack_size: 1,
-                    tax_type: "HT", // Généralement HT dans le LD-JSON
+                    tax_type: "HT",
                     label: "Prix unitaire (JSON-LD)"
                 });
                 if (pack_size > 1) {
                     price_candidates.push({
-                        price: parseFloat(jsonLdPrice.toFixed(4)),
-                        pack_size: 1,
-                        tax_type: "HT",
-                        label: "Prix unitaire (calculé)"
-                    });
-                    price_candidates.push({
                         price: parseFloat((jsonLdPrice * pack_size).toFixed(2)),
                         pack_size: pack_size,
                         tax_type: "HT",
-                        label: `Prix du lot (${pack_size} u.) (calculé)`
+                        label: `Prix du lot (${pack_size} u.) (calculé JSON-LD)`
                     });
                 }
             }
