@@ -345,29 +345,47 @@
             };
 
             // Fonction pour charger html2canvas et générer la capture d'écran de la page
-            const captureAndSend = () => {
-                const sendResult = (screenshotData) => {
-                    res.screenshot = screenshotData;
-                    console.log("[Scraper] tryScrape SUCCESS! Setting hash: " + JSON.stringify(res));
-                    window.location.href = 'https://scraped/#scraped:' + encodeURIComponent(JSON.stringify(res));
-                };
+             const captureAndSend = () => {
+                 const sendResult = (screenshotData) => {
+                     res.screenshot = screenshotData;
+                     console.log("[Scraper] tryScrape SUCCESS! Setting hash: " + JSON.stringify(res));
+                     window.location.href = 'https://scraped/#scraped:' + encodeURIComponent(JSON.stringify(res));
+                 };
 
-                if (window.html2canvas) {
-                    window.html2canvas(document.body, { logging: false, useCORS: true, allowTaint: true })
-                        .then(canvas => sendResult(canvas.toDataURL('image/jpeg', 0.6)))
-                        .catch(() => sendResult(null));
-                } else {
-                    const script = document.createElement('script');
-                    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
-                    script.onload = () => {
-                        window.html2canvas(document.body, { logging: false, useCORS: true, allowTaint: true })
-                            .then(canvas => sendResult(canvas.toDataURL('image/jpeg', 0.6)))
-                            .catch(() => sendResult(null));
-                    };
-                    script.onerror = () => sendResult(null);
-                    document.head.appendChild(script);
-                }
-            };
+                 const executeHtml2Canvas = () => {
+                     try {
+                         window.html2canvas(document.body, { 
+                             logging: false, 
+                             useCORS: true, 
+                             allowTaint: true,
+                             scale: 1,
+                             backgroundColor: '#ffffff'
+                         })
+                         .then(canvas => {
+                             try {
+                                 sendResult(canvas.toDataURL('image/jpeg', 0.6));
+                             } catch(err) {
+                                 sendResult(null);
+                             }
+                         })
+                         .catch(() => sendResult(null));
+                     } catch(err) {
+                         sendResult(null);
+                     }
+                 };
+
+                 if (window.html2canvas) {
+                     executeHtml2Canvas();
+                 } else {
+                     const script = document.createElement('script');
+                     script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                     script.onload = () => {
+                         setTimeout(executeHtml2Canvas, 500);
+                     };
+                     script.onerror = () => sendResult(null);
+                     document.head.appendChild(script);
+                 }
+             };
 
             captureAndSend();
             return true;

@@ -2691,6 +2691,7 @@ pub async fn evaluate_js_in_webview(
         )
         .visible(true)
         .position(-2000.0, -2000.0)
+        .inner_size(1280.0, 800.0)
         .initialization_script(&eval_js_string)
         .on_navigation(move |nav_url| {
             let url_str = nav_url.as_str();
