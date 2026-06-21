@@ -1040,14 +1040,63 @@ async fn scrape_product_details(
     label: Option<String>,
 ) -> Result<scraper::ScrapedProductDetails, String> {
     let mut details = scraper::scrape_product_details_internal(&app_handle, &vpc_site, &vpc_code, &sku, brand.as_deref(), label.as_deref()).await?;
+    
+    // Récupérer la taille de lot du produit en base pour évaluer la pertinence
+    let target_pack_size = if let Some(db_path) = events::get_db_path() {
+        if let Ok(conn) = Connection::open(db_path) {
+            conn.query_row(
+                "SELECT pack_size FROM products WHERE sku = ?",
+                [&sku],
+                |row| row.get::<_, i64>(0)
+            ).unwrap_or(1)
+        } else {
+            1
+        }
+    } else {
+        1
+    };
+
     if let Some(config) = load_config_internal() {
         let is_ttc = config.price_tax_type.as_deref() == Some("TTC");
         if is_ttc {
             details.price = details.price * 1.20;
         }
         if let Some(ref mut candidates) = details.price_candidates {
-            for c in candidates.iter_mut() {
-                c.recommended = Some(if is_ttc { c.tax_type == "TTC" } else { c.tax_type == "HT" });
+            // Evaluer les scores de pertinence pour chaque candidat
+            let mut scored_indices: Vec<(usize, i32)> = Vec::new();
+            for (idx, c) in candidates.iter().enumerate() {
+                let original_tax_matches = if is_ttc { c.tax_type == "TTC" } else { c.tax_type == "HT" };
+                if !original_tax_matches {
+                    continue;
+                }
+                
+                let mut score = 0;
+                // Correspondance de la taille du lot
+                if c.pack_size == target_pack_size {
+                    score += 100;
+                } else if target_pack_size > 1 && c.pack_size == 1 {
+                    score -= 50; // Pénalité pour les prix unitaires si on gère un lot
+                }
+                
+                // Valeurs directes vs calculées
+                if c.label.contains("calculé") {
+                    score -= 20;
+                }
+                
+                // Priorité aux blocs non-JSON-LD pour le grattage de page si dispo
+                if c.label.contains("JSON-LD") {
+                    score -= 10;
+                }
+
+                scored_indices.push((idx, score));
+            }
+
+            // Trier par score décroissant
+            scored_indices.sort_by(|a, b| b.1.cmp(&a.1));
+            let best_idx = scored_indices.first().map(|&(idx, _)| idx);
+
+            for (idx, c) in candidates.iter_mut().enumerate() {
+                c.recommended = Some(Some(idx) == best_idx);
                 if is_ttc && c.tax_type == "HT" {
                     c.price = parse_float_two_decimals(c.price * 1.20);
                     c.tax_type = "TTC".to_string();
