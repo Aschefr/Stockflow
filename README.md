@@ -65,3 +65,9 @@ StockFlow a été conçu pour éliminer les problèmes classiques de corruption 
 ---
 
 *Pour en savoir plus sur la compilation, l'installation ou la contribution au code de l'application, veuillez consulter le [Guide de Développement](file:///d:/Code%20Projects/Stockflow/DEVELOPER.md).*
+
+---
+
+## 📄 Licence
+
+Ce projet est sous licence MIT. Voir le fichier [LICENSE](LICENSE) pour plus de détails.
