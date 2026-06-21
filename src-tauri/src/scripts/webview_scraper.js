@@ -13,10 +13,9 @@
             const style = document.createElement('style');
             style.id = 'sf-scrape-style';
             style.textContent = `
-                body > :not(#sf-scrape-overlay) {
-                    filter: blur(5px) !important;
-                    pointer-events: none !important;
-                }
+                 body > :not(#sf-scrape-overlay) {
+                     pointer-events: none !important;
+                 }
                 #sf-scrape-overlay {
                     position: fixed !important;
                     top: 0 !important;
@@ -354,6 +353,9 @@
 
                  const executeHtml2Canvas = () => {
                      try {
+                         const overlay = document.getElementById('sf-scrape-overlay');
+                         if (overlay) overlay.style.display = 'none'; // Temporarily hide the loader overlay for capture
+                         
                          window.html2canvas(document.body, { 
                              logging: false, 
                              useCORS: true, 
@@ -362,13 +364,17 @@
                              backgroundColor: '#ffffff'
                          })
                          .then(canvas => {
+                             if (overlay) overlay.style.display = 'flex'; // Restore overlay
                              try {
                                  sendResult(canvas.toDataURL('image/jpeg', 0.6));
                              } catch(err) {
                                  sendResult(null);
                              }
                          })
-                         .catch(() => sendResult(null));
+                         .catch(() => {
+                             if (overlay) overlay.style.display = 'flex'; // Restore overlay
+                             sendResult(null);
+                         });
                      } catch(err) {
                          sendResult(null);
                      }
