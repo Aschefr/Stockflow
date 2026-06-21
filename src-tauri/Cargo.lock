@@ -3974,6 +3974,7 @@ dependencies = [
 name = "tauri-app"
 version = "1.4.2"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "image",
  "lazy_static",

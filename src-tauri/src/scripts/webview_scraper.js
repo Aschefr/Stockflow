@@ -222,7 +222,7 @@
                     price: priceHT,
                     pack_size: pack_size,
                     tax_type: "HT",
-                    label: `Prix du lot (${pack_size} u.) - HT`
+                    label: `Prix du lot (${pack_size} u.)`
                 });
             }
             if (priceTTC !== null && !isNaN(priceTTC)) {
@@ -230,31 +230,28 @@
                     price: priceTTC,
                     pack_size: pack_size,
                     tax_type: "TTC",
-                    label: `Prix du lot (${pack_size} u.) - TTC`
+                    label: `Prix du lot (${pack_size} u.)`
                 });
             }
             if (jsonLdPrice > 0) {
-                const isRs = window.location.hostname.includes('rs-online') || window.location.hostname.includes('rsdelivers');
                 price_candidates.push({
                     price: jsonLdPrice,
                     pack_size: 1,
-                    tax_type: isRs ? "TTC" : "HT", // Sur RS c'est TTC par défaut, sinon supposé HT
-                    label: isRs ? "Prix unitaire - TTC (JSON-LD)" : "Prix - HT (JSON-LD)"
+                    tax_type: "HT", // Généralement HT dans le LD-JSON
+                    label: "Prix unitaire (JSON-LD)"
                 });
                 if (pack_size > 1) {
-                    // Si on a une taille de lot > 1, proposer les conversions calculées unitaires et lot
-                    const unitHT = isRs ? (jsonLdPrice / 1.20) : jsonLdPrice;
                     price_candidates.push({
-                        price: parseFloat(unitHT.toFixed(4)),
+                        price: parseFloat(jsonLdPrice.toFixed(4)),
                         pack_size: 1,
                         tax_type: "HT",
-                        label: "Prix unitaire - HT (calculé)"
+                        label: "Prix unitaire (calculé)"
                     });
                     price_candidates.push({
-                        price: parseFloat((unitHT * pack_size).toFixed(2)),
+                        price: parseFloat((jsonLdPrice * pack_size).toFixed(2)),
                         pack_size: pack_size,
                         tax_type: "HT",
-                        label: `Prix du lot (${pack_size} u.) - HT (calculé)`
+                        label: `Prix du lot (${pack_size} u.) (calculé)`
                     });
                 }
             }
@@ -282,8 +279,32 @@
                 price_candidates: price_candidates
             };
 
-            console.log("[Scraper] tryScrape SUCCESS! Setting hash: " + JSON.stringify(res));
-            window.location.href = 'https://scraped/#scraped:' + encodeURIComponent(JSON.stringify(res));
+            // Fonction pour charger html2canvas et générer la capture d'écran de la page
+            const captureAndSend = () => {
+                const sendResult = (screenshotData) => {
+                    res.screenshot = screenshotData;
+                    console.log("[Scraper] tryScrape SUCCESS! Setting hash: " + JSON.stringify(res));
+                    window.location.href = 'https://scraped/#scraped:' + encodeURIComponent(JSON.stringify(res));
+                };
+
+                if (window.html2canvas) {
+                    window.html2canvas(document.body, { logging: false, useCORS: true, allowTaint: true })
+                        .then(canvas => sendResult(canvas.toDataURL('image/jpeg', 0.6)))
+                        .catch(() => sendResult(null));
+                } else {
+                    const script = document.createElement('script');
+                    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                    script.onload = () => {
+                        window.html2canvas(document.body, { logging: false, useCORS: true, allowTaint: true })
+                            .then(canvas => sendResult(canvas.toDataURL('image/jpeg', 0.6)))
+                            .catch(() => sendResult(null));
+                    };
+                    script.onerror = () => sendResult(null);
+                    document.head.appendChild(script);
+                }
+            };
+
+            captureAndSend();
             return true;
         } catch (e) {
             window.location.href = 'https://scraped/#scraped_err:' + encodeURIComponent('Erreur tryScrape: ' + e.toString() + ' | ' + e.stack);

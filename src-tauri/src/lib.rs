@@ -1496,6 +1496,124 @@ fn save_file_dialog(
     }
 }
 
+#[tauri::command]
+fn save_screenshot(
+    network_path: String,
+    sku: String,
+    base64_image: String,
+    trigramme: String,
+) -> Result<(), String> {
+    let base64_data = if let Some(pos) = base64_image.find(",") {
+        &base64_image[pos + 1..]
+    } else {
+        &base64_image
+    };
+
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(base64_data)
+        .map_err(|e| e.to_string())?;
+
+    let db_path = events::get_db_path().ok_or("Base de données cache introuvable")?;
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    
+    let sku_upper = sku.to_uppercase();
+    let (brand, category, sub_category) = conn.query_row(
+        "SELECT brand, category, sub_category FROM products WHERE sku = ?",
+        [&sku_upper],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            ))
+        }
+    ).unwrap_or((String::new(), String::new(), String::new()));
+
+    let clean_brand = csv_importer::sanitize_folder_name(&brand, "INCONNU");
+    let clean_category = csv_importer::sanitize_folder_name(&category, "INCONNU");
+    let clean_subcategory = csv_importer::sanitize_folder_name(&sub_category, "INCONNU");
+    let clean_sku = db::sanitize_sku(&sku);
+
+    let dest_dir = std::path::Path::new(&network_path)
+        .join("documents")
+        .join(&clean_brand)
+        .join(&clean_category)
+        .join(&clean_subcategory)
+        .join(&clean_sku);
+
+    let _ = std::fs::create_dir_all(&dest_dir);
+    let dest_path = dest_dir.join("screenshot_source.jpg");
+
+    std::fs::write(&dest_path, decoded).map_err(|e| e.to_string())?;
+
+    let relative_path = format!(
+        "documents/{}/{}/{}/{}/screenshot_source.jpg", 
+        clean_brand, clean_category, clean_subcategory, clean_sku
+    );
+
+    let _ = events::write_audit_file(
+        &network_path,
+        &sku,
+        &trigramme,
+        "UPLOAD_MEDIA",
+        Some("pdf"), 
+        Some(&relative_path),
+        None,
+        None,
+    );
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_sku_screenshot_path(network_path: String, sku: String) -> Result<Option<String>, String> {
+    let db_path = events::get_db_path().ok_or("Base de données cache introuvable")?;
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    
+    let sku_upper = sku.to_uppercase();
+    let (pdf_path_opt, brand, category, sub_category) = conn.query_row(
+        "SELECT pdf_path, brand, category, sub_category FROM products WHERE sku = ?",
+        [&sku_upper],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            ))
+        }
+    ).unwrap_or((None, String::new(), String::new(), String::new()));
+
+    let pdfs_dir = if let Some(ref path) = pdf_path_opt {
+        let full_path = std::path::Path::new(&network_path).join(path);
+        if full_path.is_file() {
+            full_path.parent().unwrap_or(std::path::Path::new("")).to_path_buf()
+        } else {
+            full_path
+        }
+    } else {
+        let clean_brand = csv_importer::sanitize_folder_name(&brand, "INCONNU");
+        let clean_category = csv_importer::sanitize_folder_name(&category, "INCONNU");
+        let clean_subcategory = csv_importer::sanitize_folder_name(&sub_category, "INCONNU");
+        let clean_sku = db::sanitize_sku(&sku);
+        std::path::Path::new(&network_path)
+            .join("documents")
+            .join(&clean_brand)
+            .join(&clean_category)
+            .join(&clean_subcategory)
+            .join(&clean_sku)
+    };
+
+    let screenshot_path = pdfs_dir.join("screenshot_source.jpg");
+    if screenshot_path.exists() {
+        if let Ok(relative) = screenshot_path.strip_prefix(&network_path) {
+            return Ok(Some(relative.to_string_lossy().to_string().replace("\\", "/")));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
 
@@ -1553,7 +1671,9 @@ pub fn run() {
             save_bom,
             delete_bom,
             save_file_dialog,
-            select_image_file
+            select_image_file,
+            save_screenshot,
+            get_sku_screenshot_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

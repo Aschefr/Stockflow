@@ -2526,6 +2526,7 @@ pub struct ScrapedProductDetails {
     pub json_ld_blocks: Option<Vec<String>>,
     pub cloudinary_urls: Option<Vec<String>>,
     pub price_candidates: Option<Vec<PriceCandidate>>,
+    pub screenshot: Option<String>,
 }
 
 pub async fn scrape_farnell_api(sku: &str, api_key: &str) -> Result<ScrapedProductDetails, String> {
@@ -2579,6 +2580,7 @@ pub async fn scrape_farnell_api(sku: &str, api_key: &str) -> Result<ScrapedProdu
                     cloudinary_urls: None,
                     json_ld_blocks: None,
                     price_candidates: None,
+                    screenshot: None,
                 });
             }
         }
@@ -2644,6 +2646,7 @@ pub async fn scrape_mouser_api(sku: &str, api_key: &str) -> Result<ScrapedProduc
                     cloudinary_urls: None,
                     json_ld_blocks: None,
                     price_candidates: None,
+                    screenshot: None,
                 });
             }
         }
@@ -2795,6 +2798,8 @@ pub async fn scrape_url_via_webview(
             }
         }
 
+        let screenshot = json_val["screenshot"].as_str().map(|s| s.to_string());
+
         Ok(ScrapedProductDetails {
             sku: String::new(),
             mpn,
@@ -2810,6 +2815,7 @@ pub async fn scrape_url_via_webview(
             cloudinary_urls,
             json_ld_blocks,
             price_candidates,
+            screenshot,
         })
     } else {
         Err("Erreur parsing JSON webview".to_string())
@@ -3161,6 +3167,7 @@ pub async fn scrape_product_details_internal(
                 cloudinary_urls: None,
                 json_ld_blocks: Some(json_ld_blocks),
                 price_candidates: None,
+                screenshot: None,
             });
         }
     }
@@ -3405,6 +3412,7 @@ pub async fn scrape_product_details_internal(
                                     cloudinary_urls: None,
                                     json_ld_blocks: None,
                                     price_candidates: None,
+                                    screenshot: None,
                                 });
                             }
                         }
@@ -3436,6 +3444,7 @@ pub async fn scrape_product_details_internal(
         cloudinary_urls: None,
         json_ld_blocks: None,
         price_candidates: None,
+        screenshot: None,
     })
 }
 

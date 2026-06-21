@@ -821,6 +821,7 @@ function App() {
   // Selected Product Medias
   const [productImages, setProductImages] = useState<string[]>([]);
   const [productPdfs, setProductPdfs] = useState<string[]>([]);
+  const [productScreenshotPath, setProductScreenshotPath] = useState<string | null>(null);
   const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -864,6 +865,16 @@ function App() {
       if (v === null || v === undefined) return "";
       return v.toString().replace(/\./g, ",");
     };
+
+    const targetSku = pendingScrapeSku || (pendingScrapeIsEdit ? editProduct.sku : newProduct.sku);
+    if (targetSku && config && pendingScrapeDetails?.screenshot) {
+      invoke("save_screenshot", {
+        networkPath: config.network_path,
+        sku: targetSku,
+        base64Image: pendingScrapeDetails.screenshot,
+        trigramme: config.trigramme
+      }).catch(e => console.error("Failed to save screenshot:", e));
+    }
 
     if (pendingScrapeSku) {
       // Scraping depuis la sidebar (mise à jour directe en DB)
@@ -1562,6 +1573,8 @@ function App() {
           setProductImages(imgs);
           const pdfs: string[] = await invoke("list_sku_pdfs", { networkPath: appConfig.network_path, sku: updated.sku });
           setProductPdfs(pdfs);
+          const screenshot: string | null = await invoke("get_sku_screenshot_path", { networkPath: appConfig.network_path, sku: updated.sku });
+          setProductScreenshotPath(screenshot);
           // Rafraîchir historique et audit log en temps réel
           try {
             const history: ProductHistoryItem[] = await invoke("get_product_history", { sku: updated.sku });
@@ -1777,6 +1790,8 @@ function App() {
         setProductImages(imgs);
         const pdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: prod.sku });
         setProductPdfs(pdfs);
+        const screenshot: string | null = await invoke("get_sku_screenshot_path", { networkPath: config.network_path, sku: prod.sku });
+        setProductScreenshotPath(screenshot);
       }
     } catch (err) {
       console.error(err);
@@ -4222,6 +4237,20 @@ function App() {
                                 >
                                   Lien source
                                 </button>
+                                {productScreenshotPath && (
+                                  <>
+                                    {" | "}
+                                    <button
+                                      type="button"
+                                      className="btn-link"
+                                      style={{ background: "none", border: "none", color: "var(--success)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
+                                      onClick={() => openPath(`${config.network_path}/${productScreenshotPath}`.replace(/\//g, "\\"))}
+                                      title="Consulter la capture d'écran de la page source"
+                                    >
+                                      📸 Capture
+                                    </button>
+                                  </>
+                                )}
                               </div>
                             )}
                             {imageUrl && (
