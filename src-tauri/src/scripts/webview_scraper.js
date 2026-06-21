@@ -158,44 +158,63 @@
                 }
             }
 
-            // --- DEBUT EXTRACTION PRIX GLOBALE OPTIMISÉE ---
-            // Recherche robuste des prix HT (excl. VAT / HT) dans le texte de la page
-            const htRegexes = [
-                /(\d+(?:[\s,.]\d+)*)\s*(?:€|EUR)?\s*(?:HT|excl\.\s*VAT)\b/gi,
-                /(?:HT|excl\.\s*VAT)\s*(?:€|EUR)?\s*(\d+(?:[\s,.]\d+)*)\b/gi
-            ];
+            // --- DEBUT EXTRACTION PRIX GLOBALE OPTIMISÉE ET CONTEXTUELLE ---
+            const priceRegex = /\b\d+(?:[\s,.]\d{2})\b/g;
             const foundHTs = [];
-            for (const rx of htRegexes) {
-                let m;
-                while ((m = rx.exec(bodyText)) !== null) {
-                    const priceStr = m[1] || m[2];
-                    if (priceStr) {
-                        const val = parseFloat(priceStr.replace(/\s/g, '').replace(',', '.'));
-                        if (val > 0 && !foundHTs.includes(val)) foundHTs.push(val);
-                    }
-                }
-            }
-
-            // Recherche robuste des prix TTC (incl. VAT / TTC) dans le texte de la page
-            const ttcRegexes = [
-                /(\d+(?:[\s,.]\d+)*)\s*(?:€|EUR)?\s*(?:TTC|incl\.\s*VAT)\b/gi,
-                /(?:TTC|incl\.\s*VAT)\s*(?:€|EUR)?\s*(\d+(?:[\s,.]\d+)*)\b/gi
-            ];
             const foundTTCs = [];
-            for (const rx of ttcRegexes) {
-                let m;
-                while ((m = rx.exec(bodyText)) !== null) {
-                    const priceStr = m[1] || m[2];
-                    if (priceStr) {
-                        const val = parseFloat(priceStr.replace(/\s/g, '').replace(',', '.'));
-                        if (val > 0 && !foundTTCs.includes(val)) foundTTCs.push(val);
+            
+            const allTextNodes = [];
+            const walkDOM = (node) => {
+                if (node.nodeType === Node.TEXT_NODE) {
+                    const text = node.nodeValue.trim();
+                    if (text && /\d/.test(text)) {
+                        allTextNodes.push({ text, parent: node.parentElement });
+                    }
+                } else {
+                    for (let child = node.firstChild; child; child = child.nextSibling) {
+                        if (child.nodeName !== 'SCRIPT' && child.nodeName !== 'STYLE' && child.id !== 'sf-scrape-overlay') {
+                            walkDOM(child);
+                        }
+                    }
+                }
+            };
+            
+            if (document.body) {
+                walkDOM(document.body);
+            }
+
+            for (const nodeInfo of allTextNodes) {
+                const text = nodeInfo.text;
+                const parentText = nodeInfo.parent ? (nodeInfo.parent.innerText || '') : '';
+                const cleanParentText = parentText.replace(/\s+/g, ' ');
+                
+                let match;
+                priceRegex.lastIndex = 0;
+                while ((match = priceRegex.exec(text)) !== null) {
+                    const priceStr = match[0];
+                    const val = parseFloat(priceStr.replace(/\s/g, '').replace(',', '.'));
+                    if (val > 0) {
+                        const valIndex = cleanParentText.indexOf(priceStr);
+                        if (valIndex !== -1) {
+                            const start = Math.max(0, valIndex - 40);
+                            const end = Math.min(cleanParentText.length, valIndex + priceStr.length + 40);
+                            const context = cleanParentText.substring(start, end).toLowerCase();
+                            
+                            if (context.includes('ht') || context.includes('excl') || context.includes('hors taxe') || context.includes('net')) {
+                                if (!foundHTs.includes(val)) foundHTs.push(val);
+                            } else if (context.includes('ttc') || context.includes('incl') || context.includes('toutes taxes')) {
+                                if (!foundTTCs.includes(val)) foundTTCs.push(val);
+                            } else if (window.location.hostname.includes('rs-online') || window.location.hostname.includes('rsdelivers')) {
+                                if (!foundHTs.includes(val)) foundHTs.push(val);
+                            }
+                        }
                     }
                 }
             }
 
-            // Prendre les premières occurrences trouvées
             if (foundHTs.length > 0) priceHT = foundHTs[0];
             if (foundTTCs.length > 0) priceTTC = foundTTCs[0];
+            // --- FIN EXTRACTION PRIX GLOBALE OPTIMISÉE ---
 
             // 1. Fallback par conteneur de Sous-total / Subtotal si toujours null
             if (priceHT === null && priceTTC === null) {
@@ -257,7 +276,7 @@
                     price: priceHT,
                     pack_size: pack_size,
                     tax_type: "HT",
-                    label: pack_size > 1 ? `Prix du lot (${pack_size} u.)` : "Prix unitaire"
+                    label: pack_size > 1 ? `Prix du lot (${pack_size} u.) - HT` : "Prix unitaire - HT"
                 });
             }
             if (priceTTC !== null && !isNaN(priceTTC)) {
@@ -265,7 +284,7 @@
                     price: priceTTC,
                     pack_size: pack_size,
                     tax_type: "TTC",
-                    label: pack_size > 1 ? `Prix du lot (${pack_size} u.)` : "Prix unitaire"
+                    label: pack_size > 1 ? `Prix du lot (${pack_size} u.) - TTC` : "Prix unitaire - TTC"
                 });
             }
             if (jsonLdPrice > 0) {
@@ -274,14 +293,14 @@
                     price: jsonLdPrice,
                     pack_size: 1,
                     tax_type: "HT",
-                    label: "Prix unitaire (JSON-LD)"
+                    label: "Prix unitaire (JSON-LD) - HT"
                 });
                 if (pack_size > 1) {
                     price_candidates.push({
                         price: parseFloat((jsonLdPrice * pack_size).toFixed(2)),
                         pack_size: pack_size,
                         tax_type: "HT",
-                        label: `Prix du lot (${pack_size} u.) (calculé JSON-LD)`
+                        label: `Prix du lot (${pack_size} u.) (calculé JSON-LD) - HT`
                     });
                 }
             }
