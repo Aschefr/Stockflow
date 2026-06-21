@@ -944,9 +944,7 @@ fn force_release_lock(network_path: String) {
 
 #[tauri::command]
 async fn scrape_price(sku: String, provider: String, network_path: String, trigramme: String) -> Result<f64, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        scraper::scrape_price_internal(&sku, &provider, &network_path, &trigramme)
-    }).await.map_err(|e| e.to_string())?
+    scraper::scrape_price_internal(&sku, &provider, &network_path, &trigramme).await
 }
 
 #[tauri::command]
@@ -963,14 +961,12 @@ async fn scrape_pdf(window: tauri::Window, sku: String, query: String, network_p
 
 #[tauri::command]
 async fn scrape_images(window: tauri::Window, sku: String, query: String, network_path: String, brand: Option<String>, label: Option<String>) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let config = load_config_internal().ok_or("Configuration introuvable")?;
-        let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
-        let conv = config.image_rename_convention.clone().unwrap_or_else(|| "{SKU}_{Index}.jpg".to_string());
-        let brand_str = brand.as_deref().unwrap_or("");
-        let label_str = label.as_deref().unwrap_or("");
-        scraper::scrape_images_internal(&window, &sku, &url, &query, &conv, &network_path, brand_str, label_str)
-    }).await.map_err(|e| e.to_string())?
+    let config = load_config_internal().ok_or("Configuration introuvable")?;
+    let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+    let conv = config.image_rename_convention.clone().unwrap_or_else(|| "{SKU}_{Index}.jpg".to_string());
+    let brand_str = brand.as_deref().unwrap_or("");
+    let label_str = label.as_deref().unwrap_or("");
+    scraper::scrape_images_internal(&window, &sku, &url, &query, &conv, &network_path, brand_str, label_str).await
 }
 
 #[tauri::command]
@@ -980,13 +976,11 @@ async fn search_image_candidates(
     brand: Option<String>,
     label: Option<String>,
 ) -> Result<Vec<scraper::ScrapedImageCandidate>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let config = load_config_internal().ok_or("Configuration introuvable")?;
-        let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
-        let brand_str = brand.as_deref().unwrap_or("");
-        let label_str = label.as_deref().unwrap_or("");
-        scraper::search_image_candidates_internal(&window, &sku, &url, brand_str, label_str)
-    }).await.map_err(|e| e.to_string())?
+    let config = load_config_internal().ok_or("Configuration introuvable")?;
+    let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+    let brand_str = brand.as_deref().unwrap_or("");
+    let label_str = label.as_deref().unwrap_or("");
+    scraper::search_image_candidates_internal(&window, &sku, &url, brand_str, label_str).await
 }
 
 #[tauri::command]
@@ -1042,15 +1036,13 @@ async fn scrape_product_details(
     brand: Option<String>,
     label: Option<String>,
 ) -> Result<scraper::ScrapedProductDetails, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut details = scraper::scrape_product_details_internal(&app_handle, &vpc_site, &vpc_code, &sku, brand.as_deref(), label.as_deref())?;
-        if let Some(config) = load_config_internal() {
-            if config.price_tax_type.as_deref() == Some("TTC") {
-                details.price = details.price * 1.20;
-            }
+    let mut details = scraper::scrape_product_details_internal(&app_handle, &vpc_site, &vpc_code, &sku, brand.as_deref(), label.as_deref()).await?;
+    if let Some(config) = load_config_internal() {
+        if config.price_tax_type.as_deref() == Some("TTC") {
+            details.price = details.price * 1.20;
         }
-        Ok(details)
-    }).await.map_err(|e| e.to_string())?
+    }
+    Ok(details)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
