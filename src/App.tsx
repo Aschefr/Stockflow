@@ -324,6 +324,20 @@ function App() {
   const [autoFillSource, setAutoFillSource] = useState<string | null>(null);
   const [autoFillFallbackInfo, setAutoFillFallbackInfo] = useState<string | null>(null);
 
+  // Cache for the last successful scrape to prevent redundant requests
+  const [cachedScrapeResult, setCachedScrapeResult] = useState<{
+    sku: string;
+    vpcSite: string;
+    vpcCode: string;
+    details: any;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!showEditModal && !showAddModal) {
+      setCachedScrapeResult(null);
+    }
+  }, [showEditModal, showAddModal]);
+
   // Helper function to scrape and auto-fill either a specific field or all fields
   async function handleAutoFill(isEdit: boolean, targetField?: string) {
     setAutoFillSource(null);
@@ -379,13 +393,30 @@ function App() {
     setScrapeModalOpen(true);
 
     try {
-      const details: any = await invoke("scrape_product_details", {
-        vpcSite: vpcSite || "mpn",
-        vpcCode: vpcCode,
-        sku: codeToUse,
-        brand: brand || null,
-        label: label || null
-      });
+      const currentVpcSite = vpcSite || "mpn";
+      const cacheKeyMatches = cachedScrapeResult &&
+        cachedScrapeResult.sku === codeToUse &&
+        cachedScrapeResult.vpcSite === currentVpcSite &&
+        cachedScrapeResult.vpcCode === vpcCode;
+
+      let details: any;
+      if (cacheKeyMatches) {
+        details = cachedScrapeResult.details;
+      } else {
+        details = await invoke("scrape_product_details", {
+          vpcSite: currentVpcSite,
+          vpcCode: vpcCode,
+          sku: codeToUse,
+          brand: brand || null,
+          label: label || null
+        });
+        setCachedScrapeResult({
+          sku: codeToUse,
+          vpcSite: currentVpcSite,
+          vpcCode: vpcCode,
+          details
+        });
+      }
 
       if (details.source_url) {
         setAutoFillSource(details.source_url);
@@ -451,7 +482,7 @@ function App() {
         return next;
       });
 
-      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length > 1;
+      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length >= 1;
       if (hasMultiplePriceCandidates && (targetField === "price" || targetField === "pack_size")) {
         setPendingScrapeDetails(details);
         setPendingScrapeIsEdit(isEdit);
@@ -551,13 +582,31 @@ function App() {
       const brand = isEdit ? editProduct.brand : newProduct.brand;
       const label = isEdit ? editProduct.label : newProduct.label;
       
-      const details: any = await invoke("scrape_product_details", {
-        vpcSite: vpcSite,
-        vpcCode: vpcCode,
-        sku: sku,
-        brand: brand || null,
-        label: label || null
-      });
+      const codeToUse = autofillCodeInput;
+      const currentVpcSite = vpcSite || "mpn";
+      const cacheKeyMatches = cachedScrapeResult &&
+        cachedScrapeResult.sku === codeToUse &&
+        cachedScrapeResult.vpcSite === currentVpcSite &&
+        cachedScrapeResult.vpcCode === vpcCode;
+
+      let details: any;
+      if (cacheKeyMatches) {
+        details = cachedScrapeResult.details;
+      } else {
+        details = await invoke("scrape_product_details", {
+          vpcSite: currentVpcSite,
+          vpcCode: vpcCode,
+          sku: sku,
+          brand: brand || null,
+          label: label || null
+        });
+        setCachedScrapeResult({
+          sku: codeToUse,
+          vpcSite: currentVpcSite,
+          vpcCode: vpcCode,
+          details
+        });
+      }
 
       if (details.source_url) {
         setAutoFillSource(details.source_url);
@@ -585,7 +634,7 @@ function App() {
         return next;
       });
 
-      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length > 1;
+      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length >= 1;
       if (hasMultiplePriceCandidates) {
         setPendingScrapeDetails(details);
         setPendingScrapeIsEdit(isEdit);
@@ -1190,7 +1239,7 @@ function App() {
         return next;
       });
 
-      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length > 1;
+      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length >= 1;
       if (hasMultiplePriceCandidates) {
         setPendingScrapeDetails(details);
         setPendingScrapeIsEdit(false);

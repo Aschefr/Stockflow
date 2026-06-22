@@ -352,30 +352,30 @@
                  };
 
                  const executeHtml2Canvas = () => {
-                     try {
-                         const overlay = document.getElementById('sf-scrape-overlay');
-                         if (overlay) overlay.style.display = 'none'; // Temporarily hide the loader overlay for capture
-                         
-                         window.html2canvas(document.body, { 
-                             logging: false, 
-                             useCORS: true, 
-                             allowTaint: true,
-                             scale: 1,
-                             backgroundColor: '#ffffff'
-                         })
-                         .then(canvas => {
-                             if (overlay) overlay.style.display = 'flex'; // Restore overlay
-                             try {
-                                 sendResult(canvas.toDataURL('image/jpeg', 0.6));
-                             } catch(err) {
-                                 sendResult(null);
-                             }
-                         })
-                          .catch((e) => {
-                              console.error("[Scraper html2canvas] Canvas rendering failed:", e);
-                              if (overlay) overlay.style.display = 'flex'; // Restore overlay
-                              sendResult(null);
-                          });
+                      try {
+                          const overlay = document.getElementById('sf-scrape-overlay');
+                          if (overlay) overlay.remove();
+                          const style = document.getElementById('sf-scrape-style');
+                          if (style) style.remove();
+                          
+                          window.html2canvas(document.body, { 
+                              logging: false, 
+                              useCORS: true, 
+                              allowTaint: true,
+                              scale: 1,
+                              backgroundColor: '#ffffff'
+                          })
+                          .then(canvas => {
+                              try {
+                                  sendResult(canvas.toDataURL('image/jpeg', 0.6));
+                              } catch(err) {
+                                  sendResult(null);
+                              }
+                          })
+                           .catch((e) => {
+                               console.error("[Scraper html2canvas] Canvas rendering failed:", e);
+                               sendResult(null);
+                           });
                       } catch(err) {
                           console.error("[Scraper html2canvas] Exception in executeHtml2Canvas:", err);
                           sendResult(null);

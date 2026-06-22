@@ -2830,6 +2830,107 @@ pub async fn scrape_url_via_webview(
     }
 }
 
+fn extract_dimensions_and_weight_from_html(
+    html: &str,
+    json_ld_blocks: &[String],
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    let mut width_val: Option<String> = None;
+    let mut height_val: Option<String> = None;
+    let mut depth_val: Option<String> = None;
+    let mut weight_val: Option<String> = None;
+
+    for block in json_ld_blocks {
+        if let Ok(data) = serde_json::from_str::<serde_json::Value>(block) {
+            if data.get("@type").and_then(|v| v.as_str()) == Some("Product") {
+                if let Some(w) = data.get("width") {
+                    if let Some(w_name) = w.get("name").and_then(|v| v.as_str()) {
+                        width_val = Some(w_name.replace("mm", "").trim().to_string());
+                    }
+                }
+                if let Some(h) = data.get("height") {
+                    if let Some(h_name) = h.get("name").and_then(|v| v.as_str()) {
+                        height_val = Some(h_name.replace("mm", "").trim().to_string());
+                    }
+                }
+                if let Some(d) = data.get("depth") {
+                    if let Some(d_name) = d.get("name").and_then(|v| v.as_str()) {
+                        depth_val = Some(d_name.replace("mm", "").trim().to_string());
+                    }
+                }
+                if let Some(w_val) = data.get("weight") {
+                    if let Some(w_name) = w_val.get("name").and_then(|v| v.as_str()) {
+                        weight_val = Some(w_name.replace("g", "").replace("kg", "").trim().to_string());
+                    }
+                }
+
+                if let Some(props) = data.get("additionalProperty").and_then(|v| v.as_array()) {
+                    for p in props {
+                        if let Some(name) = p.get("name").and_then(|v| v.as_str()) {
+                            if let Some(val) = p.get("value").and_then(|v| v.as_str()) {
+                                let clean_val = val.replace("mm", "").replace("g", "").replace("kg", "").trim().to_string();
+                                match name.to_lowercase().as_str() {
+                                    "largeur" | "width" => width_val = Some(clean_val),
+                                    "hauteur" | "height" => height_val = Some(clean_val),
+                                    "profondeur" | "depth" => depth_val = Some(clean_val),
+                                    "poids" | "weight" => weight_val = Some(clean_val),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if width_val.is_none() {
+        if let Some(idx) = html.find("\"attributeName\":\"Largeur") {
+            let after = &html[idx..];
+            if let Some(val_idx) = after.find("\"value\":\"") {
+                let after_val = &after[val_idx + 9..];
+                if let Some(end_val) = after_val.find('"') {
+                    width_val = Some(after_val[..end_val].trim().to_string());
+                }
+            }
+        }
+    }
+    if height_val.is_none() {
+        if let Some(idx) = html.find("\"attributeName\":\"Hauteur") {
+            let after = &html[idx..];
+            if let Some(val_idx) = after.find("\"value\":\"") {
+                let after_val = &after[val_idx + 9..];
+                if let Some(end_val) = after_val.find('"') {
+                    height_val = Some(after_val[..end_val].trim().to_string());
+                }
+            }
+        }
+    }
+    if depth_val.is_none() {
+        if let Some(idx) = html.find("\"attributeName\":\"Profondeur") {
+            let after = &html[idx..];
+            if let Some(val_idx) = after.find("\"value\":\"") {
+                let after_val = &after[val_idx + 9..];
+                if let Some(end_val) = after_val.find('"') {
+                    depth_val = Some(after_val[..end_val].trim().to_string());
+                }
+            }
+        }
+    }
+    if weight_val.is_none() {
+        if let Some(idx) = html.find("\"attributeName\":\"Poids") {
+            let after = &html[idx..];
+            if let Some(val_idx) = after.find("\"value\":\"") {
+                let after_val = &after[val_idx + 9..];
+                if let Some(end_val) = after_val.find('"') {
+                    weight_val = Some(after_val[..end_val].trim().to_string());
+                }
+            }
+        }
+    }
+
+    (width_val, height_val, depth_val, weight_val)
+}
+
 pub async fn scrape_product_details_internal(
     app_handle: &tauri::AppHandle,
     vpc_site: &str,
@@ -3025,11 +3126,6 @@ pub async fn scrape_product_details_internal(
         let mut brand = "Inconnue".to_string();
         let mut mpn = code_to_use.to_string();
         
-        let mut width_val: Option<String> = None;
-        let mut height_val: Option<String> = None;
-        let mut depth_val: Option<String> = None;
-        let mut weight_val: Option<String> = None;
-
         for block in &json_ld_blocks {
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(block) {
                 if data.get("@type").and_then(|v| v.as_str()) == Some("Product") {
@@ -3058,91 +3154,11 @@ pub async fn scrape_product_details_internal(
                             }
                         }
                     }
-                    if let Some(w) = data.get("width") {
-                        if let Some(w_name) = w.get("name").and_then(|v| v.as_str()) {
-                            width_val = Some(w_name.replace("mm", "").trim().to_string());
-                        }
-                    }
-                    if let Some(h) = data.get("height") {
-                        if let Some(h_name) = h.get("name").and_then(|v| v.as_str()) {
-                            height_val = Some(h_name.replace("mm", "").trim().to_string());
-                        }
-                    }
-                    if let Some(d) = data.get("depth") {
-                        if let Some(d_name) = d.get("name").and_then(|v| v.as_str()) {
-                            depth_val = Some(d_name.replace("mm", "").trim().to_string());
-                        }
-                    }
-                    if let Some(w_val) = data.get("weight") {
-                        if let Some(w_name) = w_val.get("name").and_then(|v| v.as_str()) {
-                            weight_val = Some(w_name.replace("g", "").replace("kg", "").trim().to_string());
-                        }
-                    }
-
-                    if let Some(props) = data.get("additionalProperty").and_then(|v| v.as_array()) {
-                        for p in props {
-                            if let Some(name) = p.get("name").and_then(|v| v.as_str()) {
-                                if let Some(val) = p.get("value").and_then(|v| v.as_str()) {
-                                    let clean_val = val.replace("mm", "").replace("g", "").replace("kg", "").trim().to_string();
-                                    match name.to_lowercase().as_str() {
-                                        "largeur" | "width" => width_val = Some(clean_val),
-                                        "hauteur" | "height" => height_val = Some(clean_val),
-                                        "profondeur" | "depth" => depth_val = Some(clean_val),
-                                        "poids" | "weight" => weight_val = Some(clean_val),
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
 
-        if width_val.is_none() {
-            if let Some(idx) = html.find("\"attributeName\":\"Largeur") {
-                let after = &html[idx..];
-                if let Some(val_idx) = after.find("\"value\":\"") {
-                    let after_val = &after[val_idx + 9..];
-                    if let Some(end_val) = after_val.find('"') {
-                        width_val = Some(after_val[..end_val].trim().to_string());
-                    }
-                }
-            }
-        }
-        if height_val.is_none() {
-            if let Some(idx) = html.find("\"attributeName\":\"Hauteur") {
-                let after = &html[idx..];
-                if let Some(val_idx) = after.find("\"value\":\"") {
-                    let after_val = &after[val_idx + 9..];
-                    if let Some(end_val) = after_val.find('"') {
-                        height_val = Some(after_val[..end_val].trim().to_string());
-                    }
-                }
-            }
-        }
-        if depth_val.is_none() {
-            if let Some(idx) = html.find("\"attributeName\":\"Profondeur") {
-                let after = &html[idx..];
-                if let Some(val_idx) = after.find("\"value\":\"") {
-                    let after_val = &after[val_idx + 9..];
-                    if let Some(end_val) = after_val.find('"') {
-                        depth_val = Some(after_val[..end_val].trim().to_string());
-                    }
-                }
-            }
-        }
-        if weight_val.is_none() {
-            if let Some(idx) = html.find("\"attributeName\":\"Poids") {
-                let after = &html[idx..];
-                if let Some(val_idx) = after.find("\"value\":\"") {
-                    let after_val = &after[val_idx + 9..];
-                    if let Some(end_val) = after_val.find('"') {
-                        weight_val = Some(after_val[..end_val].trim().to_string());
-                    }
-                }
-            }
-        }
+        let (width_val, height_val, depth_val, weight_val) = extract_dimensions_and_weight_from_html(&html, &json_ld_blocks);
 
         let dimensions = if width_val.is_some() || height_val.is_some() || depth_val.is_some() {
             Some(format!(
@@ -3252,9 +3268,6 @@ pub async fn scrape_product_details_internal(
                             let snippet = r["content"].as_str().unwrap_or("").to_string();
                             let url = r["url"].as_str().unwrap_or("").to_string();
 
-                            let title_lower = title.to_lowercase();
-                            let snippet_lower = snippet.to_lowercase();
-
                             let has_code_in_url = (!sku_lower.is_empty() && url.contains(&sku_lower))
                                 || (!vpc_lower.is_empty() && url.contains(&vpc_lower))
                                 || (!clean_sku.is_empty() && url.contains(&clean_sku))
@@ -3273,6 +3286,8 @@ pub async fn scrape_product_details_internal(
                                 let mut brand = "Inconnue".to_string();
                                 let mut clean_label = title.clone();
                                 let mut found_via_direct_fetch = false;
+                                let mut final_dimensions = None;
+                                let mut final_weight = None;
 
                                 if !url.is_empty() && (url.starts_with("http://") || url.starts_with("https://")) {
                                     human_delay_async().await;
@@ -3282,8 +3297,8 @@ pub async fn scrape_product_details_internal(
                                         if res.status().is_success() {
                                             if let Ok(html) = res.text().await {
                                                 let json_ld_blocks = re_find_json_ld(&html);
-                                                for block in json_ld_blocks {
-                                                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&block) {
+                                                for block in &json_ld_blocks {
+                                                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(block) {
                                                         if data.get("@type").and_then(|v| v.as_str()) == Some("Product") {
                                                             if let Some(n) = data.get("name").and_then(|v| v.as_str()) {
                                                                 clean_label = n.to_string();
@@ -3312,6 +3327,18 @@ pub async fn scrape_product_details_internal(
                                                         }
                                                     }
                                                 }
+                                                
+                                                let (w_val, h_val, d_val, wt_val) = extract_dimensions_and_weight_from_html(&html, &json_ld_blocks);
+                                                if w_val.is_some() || h_val.is_some() || d_val.is_some() {
+                                                    final_dimensions = Some(format!(
+                                                        "{}x{}x{}",
+                                                        w_val.unwrap_or_else(|| "0".to_string()),
+                                                        h_val.unwrap_or_else(|| "0".to_string()),
+                                                        d_val.unwrap_or_else(|| "0".to_string())
+                                                    ));
+                                                }
+                                                final_weight = wt_val;
+
                                                 if !found_via_direct_fetch {
                                                     let clean_text = strip_html_tags(&html);
                                                     if let Some(p_val) = extract_price_from_text(&clean_text) {
@@ -3412,8 +3439,8 @@ pub async fn scrape_product_details_internal(
                                     brand,
                                     price,
                                     pack_size: 1,
-                                    dimensions: None,
-                                    weight: None,
+                                    dimensions: final_dimensions,
+                                    weight: final_weight,
                                     source_url: Some(clean_url.clone()),
                                     fallback_info: Some(format!("L'URL utilisateur a échoué. Repli via SearxNG sur {}", clean_url)),
                                     is_deterministic_fallback: Some(false),
