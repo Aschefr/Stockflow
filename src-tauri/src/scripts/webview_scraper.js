@@ -2,8 +2,25 @@
     if (window !== window.top) {
         return;
     }
+    if (window.sfScraperStarted) {
+        return;
+    }
+    window.sfScraperStarted = true;
     if (!window.sfStartTime) {
         window.sfStartTime = Date.now();
+    }
+    function isSafeToClick(el) {
+        if (!el || typeof el.click !== 'function') {
+            return false;
+        }
+        const tag = (el.tagName || '').toUpperCase();
+        if (tag === 'A') {
+            const href = el.getAttribute('href');
+            if (typeof href === 'string' && href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+                return false;
+            }
+        }
+        return true;
     }
     function injectOverlay() {
         if (!document.body || document.getElementById('sf-scrape-overlay')) {
@@ -63,6 +80,286 @@
         } catch (_) {}
     }
 
+    function dismissCookieBanners() {
+        try {
+            function querySelectorAllShadow(selector, node = document) {
+                let list = Array.from(node.querySelectorAll(selector));
+                node.querySelectorAll('*').forEach(el => {
+                    if (el.shadowRoot) {
+                        list = list.concat(querySelectorAllShadow(selector, el.shadowRoot));
+                    }
+                });
+                return list;
+            }
+
+            const selectors = [
+                '#onetrust-accept-btn-handler',
+                '#coiPage-acceptAll',
+                '#consent_prompt_submit',
+                'button[id*="accept" i]',
+                'button[class*="accept" i]',
+                'button[id*="consent" i]',
+                'button[class*="consent" i]',
+                '[id*="cookie" i] button',
+                '[class*="cookie" i] button',
+                'a[class*="cookie" i]',
+                'a[id*="cookie" i]'
+            ];
+            selectors.forEach(sel => {
+                try {
+                    querySelectorAllShadow(sel).forEach(btn => {
+                        if (isSafeToClick(btn)) {
+                            console.log("[Scraper] Clicking cookie button via selector:", sel);
+                            btn.click();
+                        }
+                    });
+                } catch(_) {}
+            });
+            const buttonTextRegex = /accept(?:er)?(?:\s+tout)?|agree|allow\s+all|autoriser(?:\s+tout)?/i;
+            querySelectorAllShadow('button, a, span, div').forEach(el => {
+                if (el.tagName === 'BUTTON' || el.tagName === 'A' || el.classList.contains('btn') || el.classList.contains('button')) {
+                    if (buttonTextRegex.test(el.textContent.trim()) && isSafeToClick(el)) {
+                        console.log("[Scraper] Clicking cookie button via text match:", el.textContent.trim());
+                        el.click();
+                    }
+                }
+            });
+
+            // Clic sur les boutons de sélection de type de client (ex: Conrad)
+            // IMPORTANT: Ne cliquer que les boutons dans des modales/banners, jamais les liens de navigation
+            const clientTypeTexts = [
+                'je suis un client professionnel',
+                'je suis un client particulier',
+                'client professionnel',
+                'client particulier',
+                'continuer en tant que professionnel',
+                'continuer en tant que particulier'
+            ];
+            querySelectorAllShadow('button, [role="button"]').forEach(el => {
+                const text = el.textContent.trim().toLowerCase();
+                // Vérifier que le texte correspond exactement à une phrase connue
+                if (clientTypeTexts.some(ct => text === ct)) {
+                    // Vérifier que l'élément est dans un contexte de modale/overlay/banner
+                    const parent = el.closest('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="overlay" i], [class*="banner" i], [class*="popup" i], [class*="dialog" i], [id*="modal" i], [id*="overlay" i], [id*="banner" i], [id*="popup" i], [id*="dialog" i]');
+                    if (parent) {
+                        console.log("[Scraper] Clicking client type selector in modal:", text);
+                        try {
+                            el.click();
+                        } catch (_) {}
+                    }
+                }
+            });
+        } catch(_) {}
+    }
+
+    function expandTabsSequentially() {
+        try {
+            // Défilement automatique pour déclencher le lazy load
+            if (!window.sfHasScrolled) {
+                window.scrollTo({ top: document.body.scrollHeight / 3, behavior: 'auto' });
+                window.sfHasScrolled = true;
+            }
+
+            const keywords = [
+                'caractéristiques', 'specification', 'specs', 'technical data', 
+                'détails du produit', 'product details', 'fiche technique', 
+                'attributes', 'spécifications', 'technical details',
+                'documentation', 'téléchargement', 'download', 'datasheet',
+                'conformité', 'compliance', 'legislation', 'législation', 'detail',
+                'documents technique'
+            ];
+
+            const selectors = [
+                '[role="tab"]',
+                'button[aria-expanded="false"]',
+                '.accordion-header',
+                '.tab-title',
+                '.specs-tab',
+                '.pdp-tab',
+                '#pdp-specs-tab',
+                'a[href*="technical-datasheets" i]',
+                'button[class*="spec" i]',
+                'button[id*="spec" i]',
+                '.technical-specifications',
+                '#specifications',
+                'button[id*="characteristics" i]',
+                'button[class*="characteristics" i]'
+            ];
+
+            // Collecter tous les candidats potentiels de boutons/onglets
+            const candidates = [];
+            
+            selectors.forEach(sel => {
+                try {
+                    document.querySelectorAll(sel).forEach(el => {
+                        if (isSafeToClick(el) && !candidates.includes(el)) {
+                            candidates.push(el);
+                        }
+                    });
+                } catch(_) {}
+            });
+
+            document.querySelectorAll('button, a, span, div, h2, h3, li').forEach(el => {
+                try {
+                    const text = el.textContent.trim().toLowerCase();
+                    const className = el.className || '';
+                    const hasTabClass = typeof className === 'string' && (className.toLowerCase().includes('tab') || className.toLowerCase().includes('accordion'));
+                    
+                    if (el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'LI' || hasTabClass || el.getAttribute('role') === 'tab') {
+                        if (keywords.some(k => text.includes(k)) && isSafeToClick(el) && !candidates.includes(el)) {
+                            candidates.push(el);
+                        }
+                    }
+                } catch(_) {}
+            });
+
+            const isActiveTab = (el) => {
+                const ariaSelected = el.getAttribute('aria-selected') || (el.parentElement ? el.parentElement.getAttribute('aria-selected') : null);
+                const ariaExpanded = el.getAttribute('aria-expanded') || (el.parentElement ? el.parentElement.getAttribute('aria-expanded') : null);
+                if (ariaSelected === 'true' || ariaExpanded === 'true') return true;
+
+                const checkClass = (str) => {
+                    if (typeof str !== 'string') return false;
+                    const lower = str.toLowerCase();
+                    return /\b(active|selected|expanded|open|is-open)\b/i.test(lower) 
+                        || lower.includes('-active') 
+                        || lower.includes('-selected');
+                };
+
+                if (checkClass(el.className)) return true;
+                if (el.parentElement && checkClass(el.parentElement.className)) return true;
+                return false;
+            };
+
+            // Filtrer pour ne garder que ceux qui ne sont pas déjà actifs/ouverts
+            const unclickedTabs = candidates.filter(el => {
+                // Si on l'a déjà cliqué dans cette session de scraping, on l'ignore pour éviter de boucler à l'infini
+                if (el.sfClicked) return false;
+                if (isActiveTab(el)) return false;
+                return true;
+            });
+
+            console.log("[Scraper] Found unclicked tabs count:", unclickedTabs.length);
+
+            // On clique sur le premier onglet non encore cliqué
+            if (unclickedTabs.length > 0) {
+                const tabToClick = unclickedTabs[0];
+                tabToClick.sfClicked = true;
+                console.log("[Scraper] Clicking tab sequentially:", tabToClick.textContent.trim() || tabToClick.tagName);
+                tabToClick.click();
+                return true; // Indique qu'on a fait une action de clic et qu'on doit attendre
+            }
+        } catch(e) {
+            console.error("[Scraper] Error in expandTabsSequentially:", e);
+        }
+        return false; // Rien n'a été cliqué
+    }
+
+    function extractSpecsInJS() {
+        let width_val = null;
+        let height_val = null;
+        let depth_val = null;
+        let weight_val = null;
+
+        document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
+            try {
+                const json = JSON.parse(script.textContent || '{}');
+                const blocks = Array.isArray(json) ? json : [json];
+                for (const data of blocks) {
+                    const items = data['@graph'] && Array.isArray(data['@graph']) ? data['@graph'] : [data];
+                    for (const item of items) {
+                        if (item['@type'] === 'Product' || (Array.isArray(item['@type']) && item['@type'].includes('Product'))) {
+                            if (item.width && item.width.name) {
+                                width_val = String(item.width.name).replace("mm", "").trim();
+                            }
+                            if (item.height && item.height.name) {
+                                height_val = String(item.height.name).replace("mm", "").trim();
+                            }
+                            if (item.depth && item.depth.name) {
+                                depth_val = String(item.depth.name).replace("mm", "").trim();
+                            }
+                            if (item.weight && item.weight.name) {
+                                weight_val = String(item.weight.name).replace("g", "").replace("kg", "").trim();
+                            }
+                            if (item.additionalProperty && Array.isArray(item.additionalProperty)) {
+                                item.additionalProperty.forEach(p => {
+                                    if (p.name && p.value) {
+                                        const name = p.name.toLowerCase();
+                                        const val = String(p.value).replace("mm", "").replace("g", "").replace("kg", "").trim();
+                                        if (name === "largeur" || name === "width") width_val = val;
+                                        if (name === "hauteur" || name === "height") height_val = val;
+                                        if (name === "profondeur" || name === "depth") depth_val = val;
+                                        if (name === "poids" || name === "weight") weight_val = val;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            } catch(_) {}
+        });
+
+        const outerHtml = document.documentElement.outerHTML;
+        const getAttributeVal = (html, attrName) => {
+            const keyStr = `"attributeName":"${attrName}"`;
+            const idx = html.indexOf(keyStr);
+            if (idx === -1) return null;
+            const after = html.substring(idx);
+            const valIdx = after.indexOf('"value":"');
+            if (valIdx === -1) return null;
+            const afterVal = after.substring(valIdx + 9);
+            const endValIdx = afterVal.indexOf('"');
+            if (endValIdx === -1) return null;
+            return afterVal.substring(0, endValIdx).trim();
+        };
+
+        if (!width_val) width_val = getAttributeVal(outerHtml, 'Largeur');
+        if (!height_val) height_val = getAttributeVal(outerHtml, 'Hauteur');
+        if (!depth_val) depth_val = getAttributeVal(outerHtml, 'Profondeur');
+        if (!weight_val) weight_val = getAttributeVal(outerHtml, 'Poids');
+
+        document.querySelectorAll('td, th, dt, dd, span, li').forEach(el => {
+            try {
+                const text = el.textContent.trim().toLowerCase();
+                const checkSpec = (labelKey, valSetter) => {
+                    if (text.startsWith(labelKey)) {
+                        const nextChar = text.charAt(labelKey.length);
+                        if (!nextChar || !/[a-zà-öø-ÿ0-9]/i.test(nextChar)) {
+                            let valText = '';
+                            if (el.nextElementSibling) {
+                                valText = el.nextElementSibling.textContent.trim();
+                            } else {
+                                valText = el.textContent.substring(labelKey.length).replace(/^[:\s]+/, '').trim();
+                            }
+                            if (valText) {
+                                const numMatch = valText.match(/[-+]?[0-9]*[.,]?[0-9]+/);
+                                if (numMatch) {
+                                    valSetter(numMatch[0]);
+                                }
+                            }
+                        }
+                    }
+                };
+
+                checkSpec('largeur', v => { if (!width_val) width_val = v; });
+                checkSpec('width', v => { if (!width_val) width_val = v; });
+                checkSpec('hauteur', v => { if (!height_val) height_val = v; });
+                checkSpec('height', v => { if (!height_val) height_val = v; });
+                checkSpec('profondeur', v => { if (!depth_val) depth_val = v; });
+                checkSpec('depth', v => { if (!depth_val) depth_val = v; });
+                checkSpec('poids', v => { if (!weight_val) weight_val = v; });
+                checkSpec('weight', v => { if (!weight_val) weight_val = v; });
+            } catch(_) {}
+        });
+
+        return {
+            width: width_val,
+            height: height_val,
+            depth: depth_val,
+            weight: weight_val
+        };
+    }
+
     function tryScrape() {
         try {
             console.log("[Scraper] tryScrape called. readyState: " + document.readyState + ", URL: " + window.location.href);
@@ -71,18 +368,75 @@
                 return false;
             }
 
-            injectOverlay();
+            dismissCookieBanners();
+            
+            const isRs = window.location.hostname.includes('rs-online') || window.location.hostname.includes('rsdelivers');
+            const isSearchPage = isRs && !window.location.pathname.includes('/p/') && !window.location.pathname.includes('/product/');
+            
+            // Construire allTextNodes tôt pour pouvoir l'utiliser dans l'accumulation des dimensions
+            const allTextNodes = [];
+            const walkDOM = (node) => {
+                if (node.nodeType === Node.TEXT_NODE) {
+                    const text = node.nodeValue.trim();
+                    if (text && /\d/.test(text)) {
+                        allTextNodes.push({ text, parent: node.parentElement });
+                    }
+                } else {
+                    for (let child = node.firstChild; child; child = child.nextSibling) {
+                        if (child.nodeName !== 'SCRIPT' && child.nodeName !== 'STYLE' && child.id !== 'sf-scrape-overlay') {
+                            walkDOM(child);
+                        }
+                    }
+                }
+            };
+            if (document.body) {
+                walkDOM(document.body);
+            }
 
-            const pdfs = [];
+            // Accumulation des PDFs
+            window.sfAccumulatedPdfs = window.sfAccumulatedPdfs || [];
             document.querySelectorAll('a').forEach(a => {
                 const href = a.getAttribute('href');
                 if (href && (href.toLowerCase().includes('.pdf') || href.toLowerCase().includes('filetype=pdf') || href.toLowerCase().includes('format=pdf'))) {
                     let absUrl = href;
                     try { absUrl = new URL(href, document.baseURI || window.location.href).toString(); } catch(_) {}
                     const title = a.textContent.trim() || 'Fiche Technique';
-                    pdfs.push({ url: absUrl, title: title });
+                    if (!window.sfAccumulatedPdfs.some(p => p.url === absUrl)) {
+                        window.sfAccumulatedPdfs.push({ url: absUrl, title: title });
+                    }
                 }
             });
+
+            // Accumulation des candidats de dimensions
+            window.sfAccumulatedDimensions = window.sfAccumulatedDimensions || [];
+            const dimRegex = /\b\d+(?:[.,]\d+)?\s*(?:x|×|\*)\s*\d+(?:[.,]\d+)?(?:\s*(?:x|×|\*)\s*\d+(?:[.,]\d+)?)?\s*(?:mm|cm|m|inch|pouces)?\b/gi;
+            allTextNodes.forEach(nodeInfo => {
+                const text = nodeInfo.text;
+                let match;
+                dimRegex.lastIndex = 0;
+                while ((match = dimRegex.exec(text)) !== null) {
+                    const candidate = match[0].trim();
+                    if (candidate.toLowerCase().includes('x') || candidate.toLowerCase().includes('×') || candidate.toLowerCase().includes('*')) {
+                        if (!window.sfAccumulatedDimensions.includes(candidate)) {
+                            window.sfAccumulatedDimensions.push(candidate);
+                        }
+                    }
+                }
+            });
+
+            if (!isSearchPage) {
+                window.sfTabClickCount = window.sfTabClickCount || 0;
+                if (window.sfTabClickCount < 5) {
+                    const clicked = expandTabsSequentially();
+                    if (clicked) {
+                        window.sfTabClickCount++;
+                        console.log("[Scraper] Tab cliqué, attente de chargement... Compteur :", window.sfTabClickCount);
+                        return false; // Réessayer lors du prochain cycle de l'intervalle
+                    }
+                }
+            }
+
+            injectOverlay();
 
             let brand = '';
             let label = '';
@@ -118,9 +472,6 @@
             }
 
             // Si c'est un site RS et qu'on est sur une page de recherche (pas encore redirigé vers le produit /p/ ou /product/)
-            const isRs = window.location.hostname.includes('rs-online') || window.location.hostname.includes('rsdelivers');
-            const isSearchPage = isRs && !window.location.pathname.includes('/p/') && !window.location.pathname.includes('/product/');
-            
             console.log("[Scraper] isSearchPage: " + isSearchPage + ", time passed: " + (Date.now() - window.sfStartTime) + "ms");
             if (isSearchPage && (Date.now() - window.sfStartTime < 6000)) {
                 console.log("[Scraper] Waiting for search redirect...");
@@ -157,31 +508,25 @@
                 }
             }
 
+            // Helper function to robustly clean and parse price strings (supporting thousands separators and different decimal markers)
+            const cleanAndParsePrice = (priceStr) => {
+                let clean = priceStr.replace(/[\s ]/g, ''); // replace all space variations including U+202F
+                if (/,(\d{2})$/.test(clean)) {
+                    clean = clean.replace(/\./g, '');
+                    clean = clean.replace(',', '.');
+                } else if (/\.(\d{2})$/.test(clean)) {
+                    clean = clean.replace(/,/g, '');
+                }
+                return parseFloat(clean);
+            };
+
             // --- DEBUT EXTRACTION PRIX GLOBALE OPTIMISÉE ET CONTEXTUELLE ---
-            const priceRegex = /\b\d+(?:[\s,.]\d{2})\b/g;
+            const priceRegex = /(?:\b\d{1,3}(?:[\s .]\d{3})*(?:[.,]\d{2})\b|\b\d+[.,]\d{2}\b)/g;
             const foundHTs = [];
             const foundTTCs = [];
             const foundUnknowns = [];
             
-            const allTextNodes = [];
-            const walkDOM = (node) => {
-                if (node.nodeType === Node.TEXT_NODE) {
-                    const text = node.nodeValue.trim();
-                    if (text && /\d/.test(text)) {
-                        allTextNodes.push({ text, parent: node.parentElement });
-                    }
-                } else {
-                    for (let child = node.firstChild; child; child = child.nextSibling) {
-                        if (child.nodeName !== 'SCRIPT' && child.nodeName !== 'STYLE' && child.id !== 'sf-scrape-overlay') {
-                            walkDOM(child);
-                        }
-                    }
-                }
-            };
-            
-            if (document.body) {
-                walkDOM(document.body);
-            }
+
 
             for (const nodeInfo of allTextNodes) {
                 const text = nodeInfo.text;
@@ -192,7 +537,7 @@
                 priceRegex.lastIndex = 0;
                 while ((match = priceRegex.exec(text)) !== null) {
                     const priceStr = match[0];
-                    const val = parseFloat(priceStr.replace(/\s/g, '').replace(',', '.'));
+                    const val = cleanAndParsePrice(priceStr);
                     if (val > 0) {
                         const valIndex = cleanParentText.indexOf(priceStr);
                         if (valIndex !== -1) {
@@ -239,13 +584,13 @@
                             if (parent) {
                                 const parentText = parent.textContent || '';
                                 const htMatch = parentText.match(/([\d\s,.]+)\s*(?:€|EUR)?\s*HT/i);
-                                if (htMatch) {
-                                    priceHT = parseFloat(htMatch[1].replace(/\s/g, '').replace(',', '.'));
-                                }
-                                const ttcMatch = parentText.match(/([\d\s,.]+)\s*(?:€|EUR)?\s*TTC/i);
-                                if (ttcMatch) {
-                                    priceTTC = parseFloat(ttcMatch[1].replace(/\s/g, '').replace(',', '.'));
-                                }
+                                 if (htMatch) {
+                                     priceHT = cleanAndParsePrice(htMatch[1]);
+                                 }
+                                 const ttcMatch = parentText.match(/([\d\s,.]+)\s*(?:€|EUR)?\s*TTC/i);
+                                 if (ttcMatch) {
+                                     priceTTC = cleanAndParsePrice(ttcMatch[1]);
+                                 }
                             }
                         }
                     }
@@ -331,16 +676,22 @@
             const matches = htmlText.match(regex) || [];
             matches.forEach(m => cloudinaryUrls.push(m.replace('\\', '')));
 
+            const specs = extractSpecsInJS();
             const res = {
                 brand: brand.trim(),
                 label: label.trim(),
                 price: parseFloat(price.toFixed(2)),
                 pack_size: pack_size,
                 mpn: mpn.trim(),
-                pdfs: pdfs,
+                pdfs: window.sfAccumulatedPdfs || [],
                 json_ld_blocks: jsonLdBlocks,
                 cloudinary_urls: cloudinaryUrls,
-                price_candidates: price_candidates
+                price_candidates: price_candidates,
+                dimension_candidates: window.sfAccumulatedDimensions || [],
+                width: specs.width,
+                height: specs.height,
+                depth: specs.depth,
+                weight: specs.weight
             };
 
             // Fonction pour charger html2canvas et générer la capture d'écran de la page

@@ -22,12 +22,20 @@ fn default_price_tax_type() -> Option<String> {
     Some("HT".to_string())
 }
 
+fn default_max_image_candidates() -> usize {
+    15
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub trigramme: String,
     pub network_path: String,
     #[serde(default)]
     pub searxng_url: Option<String>,
+    #[serde(default)]
+    pub searxng_urls: Vec<String>,
+    #[serde(default = "default_max_image_candidates")]
+    pub max_image_candidates: usize,
     #[serde(default = "default_vpc_sites")]
     pub vpc_sites: Vec<String>,
     #[serde(default = "default_pdf_rename")]

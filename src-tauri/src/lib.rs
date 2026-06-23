@@ -23,6 +23,8 @@ fn save_config(
     trigramme: String,
     network_path: String,
     searxng_url: Option<String>,
+    searxng_urls: Vec<String>,
+    max_image_candidates: usize,
     vpc_sites: Vec<String>,
     pdf_rename_convention: Option<String>,
     image_rename_convention: Option<String>,
@@ -44,6 +46,8 @@ fn save_config(
         trigramme: clean_trigramme,
         network_path: new_path,
         searxng_url: searxng_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        searxng_urls,
+        max_image_candidates,
         vpc_sites,
         pdf_rename_convention: pdf_rename_convention.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         image_rename_convention: image_rename_convention.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
@@ -946,8 +950,8 @@ fn force_release_lock(network_path: String) {
 }
 
 #[tauri::command]
-async fn scrape_price(sku: String, provider: String, network_path: String, trigramme: String) -> Result<f64, String> {
-    scraper::scrape_price_internal(&sku, &provider, &network_path, &trigramme).await
+async fn scrape_price(app_handle: tauri::AppHandle, sku: String, provider: String, network_path: String, trigramme: String) -> Result<f64, String> {
+    scraper::scrape_price_internal(&app_handle, &sku, &provider, &network_path, &trigramme).await
 }
 
 #[tauri::command]
@@ -1006,13 +1010,11 @@ async fn search_pdf_candidates(
     brand: Option<String>,
     label: Option<String>,
 ) -> Result<Vec<scraper::ScrapedPdfCandidate>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let config = load_config_internal().ok_or("Configuration introuvable")?;
-        let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
-        let brand_str = brand.as_deref().unwrap_or("");
-        let label_str = label.as_deref().unwrap_or("");
-        scraper::search_pdf_candidates_internal(&window, &sku, &url, brand_str, label_str)
-    }).await.map_err(|e| e.to_string())?
+    let config = load_config_internal().ok_or("Configuration introuvable")?;
+    let url = config.searxng_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+    let brand_str = brand.as_deref().unwrap_or("");
+    let label_str = label.as_deref().unwrap_or("");
+    scraper::search_pdf_candidates_internal(&window, &sku, &url, brand_str, label_str).await
 }
 
 #[tauri::command]
@@ -1621,6 +1623,46 @@ fn get_sku_screenshot_path(network_path: String, sku: String) -> Result<Option<S
     Ok(None)
 }
 
+#[tauri::command]
+async fn test_searxng_instances(urls: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+        
+    let mut results = std::collections::HashMap::new();
+    for url in urls {
+        let test_url = format!("{}/search?q=test&format=json", url.trim_end_matches('/'));
+        match client.get(&test_url).send().await {
+            Ok(res) => {
+                if res.status().is_success() {
+                    let content_type = res.headers().get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                        
+                    if content_type.contains("json") {
+                        results.insert(url, "✅ Support JSON OK".to_string());
+                    } else {
+                        // Tenter de parser
+                        if res.json::<serde_json::Value>().await.is_ok() {
+                            results.insert(url, "✅ Support JSON OK (Détecté)".to_string());
+                        } else {
+                            results.insert(url, "⚠️ Format JSON non supporté (HTML/Page uniquement)".to_string());
+                        }
+                    }
+                } else {
+                    results.insert(url, format!("❌ Erreur HTTP {}", res.status()));
+                }
+            }
+            Err(e) => {
+                results.insert(url, format!("❌ Inaccessible : {}", e));
+            }
+        }
+    }
+    Ok(results)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
 
@@ -1680,7 +1722,8 @@ pub fn run() {
             save_file_dialog,
             select_image_file,
             save_screenshot,
-            get_sku_screenshot_path
+            get_sku_screenshot_path,
+            test_searxng_instances
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -5,6 +5,21 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.4.3] - 2026-06-23
+
+### Choix Explicite des Dimensions & Parcours d'Onglets Séquentiel
+- **Modale d'Association de Dimensions (Choix Explicite) :**
+  - Ajout d'une nouvelle modale React s'affichant s'il existe des candidats de dimensions suite à un scraping (auto-remplissage ou clic loupe).
+  - L'utilisateur sélectionne l'expression de dimensions trouvée (ex: `150 x 80 x 60 mm`) et mappe explicitement chaque nombre à l'axe correspondant (Largeur, Hauteur, Profondeur) via des sélecteurs déroulants. Il peut également ajuster ou saisir le poids de la pièce.
+  - Intégration du formatage automatique des nombres décimaux en format français (avec virgule).
+- **Parcours Séquentiel et Accumulation des Onglets du Scraper :**
+  - Modification de `webview_scraper.js` pour identifier et cliquer séquentiellement sur tous les onglets inactifs du produit (ex. *Documentation technique*, *Législation*, *Caractéristiques*...) en retardant la fin du scraping de 500 ms à chaque clic.
+  - Implémentation d'une accumulation persistante des notices PDF et dimensions candidats au fil des clics. Même si le site remplace ou détruit les nœuds DOM d'un onglet au passage au suivant, l'ensemble des données extraites est conservé et renvoyé au frontend.
+- **Robustesse du Backend Rust & WebView (Correctifs) :**
+  - Ajout du support de `dimension_candidates` dans la structure `ScrapedProductDetails`.
+  - Correction de la redirection bloquée de RS Online en renvoyant directement l'URL d'origine afin de laisser WebView2 gérer le flux de navigation sans déclencher de restrictions d'accès (Akamai/Cloudflare).
+  - Suppression de la logique de faux prix de repli en cas d'erreur de scraping.
+
 ## [1.4.2] - 2026-06-21
 
 ### Suppression des Boîtes Système & Zéro Warning Compilation

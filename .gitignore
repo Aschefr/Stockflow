@@ -27,3 +27,5 @@ scratch/
 corrections/
 release_bin/
 CLAUDE.md
+playwright-report/
+test-results/

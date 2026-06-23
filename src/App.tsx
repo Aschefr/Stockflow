@@ -9,6 +9,8 @@ interface AppConfig {
   trigramme: string;
   network_path: string;
   searxng_url?: string;
+  searxng_urls?: string[];
+  max_image_candidates?: number;
   vpc_sites: string[];
   pdf_rename_convention?: string;
   image_rename_convention?: string;
@@ -215,6 +217,8 @@ function App() {
   const [imageRenameInput, setImageRenameInput] = useState("");
   const [pdfSizeThresholdInput, setPdfSizeThresholdInput] = useState(5);
   const [priceTaxTypeInput, setPriceTaxTypeInput] = useState<string>("HT");
+  const [searxngUrlsInput, setSearxngUrlsInput] = useState<string>("");
+  const [maxImageCandidatesInput, setMaxImageCandidatesInput] = useState<number>(15);
 
   // Backup configuration states
   const [backupEnabled, setBackupEnabled] = useState<boolean>(false);
@@ -425,25 +429,23 @@ function App() {
 
       setScrapeSteps(prev => {
         const next = [...prev];
-        next[0].status = "success";
-        next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
-        next[1].status = "active";
+        if (next[0]) next[0].status = "success";
+        if (next[0]) next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
+        if (next[1]) next[1].status = "active";
         return next;
       });
 
-      const parsedAttrs = (isEdit ? editProduct.largeur || editProduct.hauteur || editProduct.profondeur || editProduct.poids : false) 
-        ? {
-            largeur: isEdit ? editProduct.largeur : newProduct.largeur,
-            hauteur: isEdit ? editProduct.hauteur : newProduct.hauteur,
-            profondeur: isEdit ? editProduct.profondeur : newProduct.profondeur,
-            poids: isEdit ? editProduct.poids : newProduct.poids
-          }
-        : {
-            largeur: details.dimensions ? details.dimensions.split('x')[0] : undefined,
-            hauteur: details.dimensions ? details.dimensions.split('x')[1] : undefined,
-            profondeur: details.dimensions ? details.dimensions.split('x')[2] : undefined,
-            poids: details.weight || undefined
-          };
+      const formatNum = (v: any) => {
+        if (v === null || v === undefined) return "";
+        return v.toString().replace(/\./g, ",");
+      };
+
+      const parsedAttrs = {
+        largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : "",
+        hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : "",
+        profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : "",
+        poids: details.weight ? formatNum(details.weight) : ""
+      };
 
       let wasFound = true;
       if (targetField) {
@@ -452,10 +454,10 @@ function App() {
         else if (targetField === "price") wasFound = details.price > 0;
         else if (targetField === "pack_size") wasFound = details.pack_size > 0;
         else if (targetField === "mpn") wasFound = !!details.mpn;
-        else if (targetField === "largeur") wasFound = !!parsedAttrs.largeur;
-        else if (targetField === "hauteur") wasFound = !!parsedAttrs.hauteur;
-        else if (targetField === "profondeur") wasFound = !!parsedAttrs.profondeur;
-        else if (targetField === "poids") wasFound = !!parsedAttrs.poids;
+        else if (targetField === "largeur") wasFound = parsedAttrs.largeur !== "";
+        else if (targetField === "hauteur") wasFound = parsedAttrs.hauteur !== "";
+        else if (targetField === "profondeur") wasFound = parsedAttrs.profondeur !== "";
+        else if (targetField === "poids") wasFound = parsedAttrs.poids !== "";
       }
 
       if (!wasFound && targetField) {
@@ -467,8 +469,8 @@ function App() {
         setScrapeError(errMsg);
         setScrapeSteps(prev => {
           const next = [...prev];
-          next[1].status = "error";
-          next[1].details = errMsg;
+          if (next[1]) next[1].status = "error";
+          if (next[1]) next[1].details = errMsg;
           return next;
         });
         return;
@@ -476,17 +478,48 @@ function App() {
 
       setScrapeSteps(prev => {
         const next = [...prev];
-        next[1].status = "success";
-        next[1].details = "Données extraites avec succès";
-        next[2].status = "active";
+        if (next[1]) next[1].status = "success";
+        if (next[1]) next[1].details = "Données extraites avec succès";
+        if (next[2]) next[2].status = "active";
         return next;
       });
 
       const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length >= 1;
-      if (hasMultiplePriceCandidates && (targetField === "price" || targetField === "pack_size")) {
+      if (hasMultiplePriceCandidates && (targetField === "price" || targetField === "pack_size" || !targetField)) {
         setPendingScrapeDetails(details);
         setPendingScrapeIsEdit(isEdit);
         setShowPriceConfirmModal(true);
+        setScrapeModalOpen(false);
+        setAutoFillLoading(prev => ({ ...prev, [fieldKey]: false }));
+        setIsScrapingMedia(false);
+        return;
+      }
+
+      const hasDimensionCandidates = details.dimension_candidates && details.dimension_candidates.length > 0;
+      const isDimensionField = !targetField || targetField === "largeur" || targetField === "hauteur" || targetField === "profondeur" || targetField === "poids";
+      if (hasDimensionCandidates && isDimensionField) {
+        if (isEdit) {
+          setEditProduct(prev => {
+            const next = { ...prev };
+            if (!targetField || targetField === "label") next.label = details.label || prev.label;
+            if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
+            if (!targetField || targetField === "price") next.price = details.price > 0 ? formatNum(details.price) : prev.price;
+            if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size;
+            if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
+            return next;
+          });
+        } else {
+          setNewProduct(prev => {
+            const next = { ...prev };
+            if (!targetField || targetField === "label") next.label = details.label || prev.label;
+            if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
+            if (!targetField || targetField === "price") next.price = details.price > 0 ? formatNum(details.price) : prev.price;
+            if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size;
+            if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
+            return next;
+          });
+        }
+        handleOpenDimensionConfirm(details, isEdit);
         setScrapeModalOpen(false);
         setAutoFillLoading(prev => ({ ...prev, [fieldKey]: false }));
         setIsScrapingMedia(false);
@@ -498,13 +531,13 @@ function App() {
           const next = { ...prev };
           if (!targetField || targetField === "label") next.label = details.label || prev.label;
           if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
-          if (!targetField || targetField === "price") next.price = details.price > 0 ? details.price : prev.price;
-          if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? details.pack_size : prev.pack_size;
+          if (!targetField || targetField === "price") next.price = details.price > 0 ? formatNum(details.price) : prev.price;
+          if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size;
           if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
-          if (!targetField || targetField === "largeur") next.largeur = parsedAttrs.largeur || prev.largeur;
-          if (!targetField || targetField === "hauteur") next.hauteur = parsedAttrs.hauteur || prev.hauteur;
-          if (!targetField || targetField === "profondeur") next.profondeur = parsedAttrs.profondeur || prev.profondeur;
-          if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids || prev.poids;
+          if (!targetField || targetField === "largeur") next.largeur = parsedAttrs.largeur !== "0" && parsedAttrs.largeur !== "" ? parsedAttrs.largeur : (targetField === "largeur" ? parsedAttrs.largeur : prev.largeur);
+          if (!targetField || targetField === "hauteur") next.hauteur = parsedAttrs.hauteur !== "0" && parsedAttrs.hauteur !== "" ? parsedAttrs.hauteur : (targetField === "hauteur" ? parsedAttrs.hauteur : prev.hauteur);
+          if (!targetField || targetField === "profondeur") next.profondeur = parsedAttrs.profondeur !== "0" && parsedAttrs.profondeur !== "" ? parsedAttrs.profondeur : (targetField === "profondeur" ? parsedAttrs.profondeur : prev.profondeur);
+          if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids !== "0" && parsedAttrs.poids !== "" ? parsedAttrs.poids : (targetField === "poids" ? parsedAttrs.poids : prev.poids);
           return next;
         });
         setEditSuccess(targetField ? `Champ '${FIELD_NAMES_FR[targetField] || targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
@@ -513,13 +546,13 @@ function App() {
           const next = { ...prev };
           if (!targetField || targetField === "label") next.label = details.label || prev.label;
           if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
-          if (!targetField || targetField === "price") next.price = details.price > 0 ? details.price : prev.price;
-          if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? details.pack_size : prev.pack_size;
+          if (!targetField || targetField === "price") next.price = details.price > 0 ? formatNum(details.price) : prev.price;
+          if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size;
           if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
-          if (!targetField || targetField === "largeur") next.largeur = parsedAttrs.largeur || prev.largeur;
-          if (!targetField || targetField === "hauteur") next.hauteur = parsedAttrs.hauteur || prev.hauteur;
-          if (!targetField || targetField === "profondeur") next.profondeur = parsedAttrs.profondeur || prev.profondeur;
-          if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids || prev.poids;
+          if (!targetField || targetField === "largeur") next.largeur = parsedAttrs.largeur !== "0" && parsedAttrs.largeur !== "" ? parsedAttrs.largeur : (targetField === "largeur" ? parsedAttrs.largeur : prev.largeur);
+          if (!targetField || targetField === "hauteur") next.hauteur = parsedAttrs.hauteur !== "0" && parsedAttrs.hauteur !== "" ? parsedAttrs.hauteur : (targetField === "hauteur" ? parsedAttrs.hauteur : prev.hauteur);
+          if (!targetField || targetField === "profondeur") next.profondeur = parsedAttrs.profondeur !== "0" && parsedAttrs.profondeur !== "" ? parsedAttrs.profondeur : (targetField === "profondeur" ? parsedAttrs.profondeur : prev.profondeur);
+          if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids !== "0" && parsedAttrs.poids !== "" ? parsedAttrs.poids : (targetField === "poids" ? parsedAttrs.poids : prev.poids);
           return next;
         });
         setCreateSuccess(targetField ? `Champ '${FIELD_NAMES_FR[targetField] || targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
@@ -527,8 +560,8 @@ function App() {
 
       setScrapeSteps(prev => {
         const next = [...prev];
-        next[2].status = "success";
-        next[2].details = targetField ? `Mise à jour du champ : ${FIELD_NAMES_FR[targetField] || targetField}` : "Tous les champs mis à jour";
+        if (next[2]) next[2].status = "success";
+        if (next[2]) next[2].details = targetField ? `Mise à jour du champ : ${FIELD_NAMES_FR[targetField] || targetField}` : "Tous les champs mis à jour";
         return next;
       });
     } catch (err: any) {
@@ -615,9 +648,9 @@ function App() {
 
       setScrapeSteps(prev => {
         const next = [...prev];
-        next[0].status = "success";
-        next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
-        next[1].status = "active";
+        if (next[0]) next[0].status = "success";
+        if (next[0]) next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
+        if (next[1]) next[1].status = "active";
         return next;
       });
 
@@ -628,9 +661,9 @@ function App() {
 
       setScrapeSteps(prev => {
         const next = [...prev];
-        next[1].status = "success";
-        next[1].details = "Données extraites avec succès";
-        next[2].status = "active";
+        if (next[1]) next[1].status = "success";
+        if (next[1]) next[1].details = "Données extraites avec succès";
+        if (next[2]) next[2].status = "active";
         return next;
       });
 
@@ -681,6 +714,45 @@ function App() {
         return;
       }
 
+      const hasDimensionCandidates = details.dimension_candidates && details.dimension_candidates.length > 0;
+      if (hasDimensionCandidates) {
+        if (isEdit) {
+          setEditProduct(prev => ({
+            ...prev,
+            mpn: details.mpn || prev.mpn || autofillCodeInput,
+            label: details.label || prev.label,
+            brand: details.brand || prev.brand,
+            price: details.price > 0 ? formatNum(details.price) : prev.price,
+            pack_size: details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size,
+          }));
+          if (autofillType !== "mpn") {
+            setEditVpcSite(autofillType);
+            setEditVpcCode(autofillCodeInput);
+          }
+          setEditSuccess("Champs pré-remplis avec succès ! Veuillez sélectionner les dimensions.");
+        } else {
+          setNewProduct(prev => ({
+            ...prev,
+            sku: prev.sku || details.sku || autofillCodeInput,
+            mpn: details.mpn || prev.mpn || autofillCodeInput,
+            label: details.label || prev.label,
+            brand: details.brand || prev.brand,
+            price: details.price > 0 ? formatNum(details.price) : prev.price,
+            pack_size: details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size,
+          }));
+          if (autofillType !== "mpn") {
+            setNewVpcSite(autofillType);
+            setNewVpcCode(autofillCodeInput);
+          }
+          setCreateSuccess("Champs pré-remplis avec succès ! Veuillez sélectionner les dimensions.");
+        }
+        handleOpenDimensionConfirm(details, isEdit);
+        setScrapeModalOpen(false);
+        setAutoFillLoading(prev => ({ ...prev, ["ALL"]: false }));
+        setIsScrapingMedia(false);
+        return;
+      }
+
       if (isEdit) {
         setEditProduct(prev => ({
           ...prev,
@@ -722,8 +794,8 @@ function App() {
 
       setScrapeSteps(prev => {
         const next = [...prev];
-        next[2].status = "success";
-        next[2].details = "Champs pré-remplis mis à jour";
+        if (next[2]) next[2].status = "success";
+        if (next[2]) next[2].details = "Champs pré-remplis mis à jour";
         return next;
       });
     } catch (err: any) {
@@ -778,8 +850,8 @@ function App() {
 
       setScrapeSteps(prev => {
         const next = [...prev];
-        next[0].status = "success";
-        next[1].status = "active";
+        if (next[0]) next[0].status = "success";
+        if (next[1]) next[1].status = "active";
         return next;
       });
 
@@ -790,9 +862,9 @@ function App() {
 
         setScrapeSteps(prev => {
           const next = [...prev];
-          next[1].status = "success";
-          next[1].details = `Revendeur identifié : ${reseller.provider} (Code: ${reseller.code})`;
-          next[2].status = "active";
+          if (next[1]) next[1].status = "success";
+          if (next[1]) next[1].details = `Revendeur identifié : ${reseller.provider} (Code: ${reseller.code})`;
+          if (next[2]) next[2].status = "active";
           return next;
         });
 
@@ -808,8 +880,8 @@ function App() {
 
         setScrapeSteps(prev => {
           const next = [...prev];
-          next[2].status = "success";
-          next[2].details = `Associé : ${reseller.provider} - ${reseller.code}`;
+          if (next[2]) next[2].status = "success";
+          if (next[2]) next[2].details = `Associé : ${reseller.provider} - ${reseller.code}`;
           return next;
         });
       } else {
@@ -819,8 +891,8 @@ function App() {
         setScrapeError(noResellerMsg);
         setScrapeSteps(prev => {
           const next = [...prev];
-          next[1].status = "error";
-          next[1].details = noResellerMsg;
+          if (next[1]) next[1].status = "error";
+          if (next[1]) next[1].details = noResellerMsg;
           return next;
         });
       }
@@ -909,6 +981,91 @@ function App() {
   const [pendingScrapeIsEdit, setPendingScrapeIsEdit] = useState(false);
   const [pendingScrapeSku, setPendingScrapeSku] = useState<string | null>(null);
 
+  // Dimension confirmation states
+  const [showDimensionConfirmModal, setShowDimensionConfirmModal] = useState(false);
+  const [dimValues, setDimValues] = useState<string[]>([]);
+  const [dimWidthIndex, setDimWidthIndex] = useState<string>("0");
+  const [dimHeightIndex, setDimHeightIndex] = useState<string>("1");
+  const [dimDepthIndex, setDimDepthIndex] = useState<string>("2");
+  const [dimWeight, setDimWeight] = useState<string>("");
+  const [selectedDimCandidate, setSelectedDimCandidate] = useState<string>("");
+
+  function handleOpenDimensionConfirm(details: any, isEdit: boolean) {
+    setPendingScrapeDetails(details);
+    setPendingScrapeIsEdit(isEdit);
+    
+    const candidates = details.dimension_candidates || [];
+    setDimWeight(details.weight ? details.weight.toString().replace(/\./g, ",") : "");
+    
+    if (candidates.length > 0) {
+      const first = candidates[0];
+      setSelectedDimCandidate(first);
+      
+      const nums = first.match(/\d+(?:[.,]\d+)?/g) || [];
+      setDimValues(nums);
+      setDimWidthIndex(nums[0] !== undefined ? "0" : "");
+      setDimHeightIndex(nums[1] !== undefined ? "1" : "");
+      setDimDepthIndex(nums[2] !== undefined ? "2" : "");
+    } else {
+      setSelectedDimCandidate("");
+      setDimValues([]);
+      setDimWidthIndex("");
+      setDimHeightIndex("");
+      setDimDepthIndex("");
+    }
+    
+    setShowDimensionConfirmModal(true);
+  }
+
+  function handleSelectDimensionCandidate(candidate: string) {
+    setSelectedDimCandidate(candidate);
+    const nums = candidate.match(/\d+(?:[.,]\d+)?/g) || [];
+    setDimValues(nums);
+    setDimWidthIndex(nums[0] !== undefined ? "0" : "");
+    setDimHeightIndex(nums[1] !== undefined ? "1" : "");
+    setDimDepthIndex(nums[2] !== undefined ? "2" : "");
+  }
+
+  function handleConfirmDimensions() {
+    const formatNum = (v: any) => {
+      if (v === null || v === undefined) return "";
+      return v.toString().replace(/\./g, ",");
+    };
+
+    const getVal = (idxStr: string) => {
+      if (idxStr === "" || idxStr === undefined) return "";
+      const idx = parseInt(idxStr, 10);
+      return dimValues[idx] ? formatNum(dimValues[idx]) : "";
+    };
+
+    const largeur = getVal(dimWidthIndex);
+    const hauteur = getVal(dimHeightIndex);
+    const profondeur = getVal(dimDepthIndex);
+    const poids = dimWeight;
+
+    if (pendingScrapeIsEdit) {
+      setEditProduct(prev => ({
+        ...prev,
+        largeur: largeur !== "" ? largeur : prev.largeur,
+        hauteur: hauteur !== "" ? hauteur : prev.hauteur,
+        profondeur: profondeur !== "" ? profondeur : prev.profondeur,
+        poids: poids !== "" ? poids : prev.poids,
+      }));
+      setEditSuccess("Dimensions et poids mis à jour !");
+    } else {
+      setNewProduct(prev => ({
+        ...prev,
+        largeur: largeur !== "" ? largeur : prev.largeur,
+        hauteur: hauteur !== "" ? hauteur : prev.hauteur,
+        profondeur: profondeur !== "" ? profondeur : prev.profondeur,
+        poids: poids !== "" ? poids : prev.poids,
+      }));
+      setCreateSuccess("Dimensions et poids mis à jour !");
+    }
+    
+    setShowDimensionConfirmModal(false);
+  }
+
   function handleSelectScrapedPrice(candidate: PriceCandidate) {
     const formatNum = (v: any) => {
       if (v === null || v === undefined) return "";
@@ -979,6 +1136,9 @@ function App() {
         pack_size: formatNum(candidate.pack_size)
       }));
       setEditSuccess("Prix et conditionnement mis à jour !");
+      if (pendingScrapeDetails.dimension_candidates && pendingScrapeDetails.dimension_candidates.length > 0) {
+        handleOpenDimensionConfirm(pendingScrapeDetails, true);
+      }
     } else {
       setNewProduct(prev => ({
         ...prev,
@@ -986,12 +1146,16 @@ function App() {
         pack_size: formatNum(candidate.pack_size)
       }));
       setCreateSuccess("Prix et conditionnement mis à jour !");
+      if (pendingScrapeDetails.dimension_candidates && pendingScrapeDetails.dimension_candidates.length > 0) {
+        handleOpenDimensionConfirm(pendingScrapeDetails, false);
+      }
     }
     setShowPriceConfirmModal(false);
   }
 
   async function handleCancelScrape() {
     setScrapeModalOpen(false);
+    setScrapeError(null);
     setIsScrapingMedia(false);
     setIsSavingImages(false);
     setIsSavingPdf(false);
@@ -1031,7 +1195,7 @@ function App() {
 
   interface AlertModalConfig {
     title: string;
-    message: string;
+    message: React.ReactNode;
   }
 
   const [confirmModal, setConfirmModal] = useState<ConfirmModalConfig | null>(null);
@@ -1233,9 +1397,9 @@ function App() {
 
       setScrapeSteps(prev => {
         const next = [...prev];
-        next[0].status = "success";
-        next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
-        next[1].status = "active";
+        if (next[0]) next[0].status = "success";
+        if (next[0]) next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
+        if (next[1]) next[1].status = "active";
         return next;
       });
 
@@ -1283,8 +1447,8 @@ function App() {
 
       setScrapeSteps(prev => {
         const next = [...prev];
-        next[1].status = "success";
-        next[1].details = `Nouveau prix : ${price.toFixed(2)} € (lot de ${details.pack_size || 1})`;
+        if (next[1]) next[1].status = "success";
+        if (next[1]) next[1].details = `Nouveau prix : ${price.toFixed(2)} € (lot de ${details.pack_size || 1})`;
         return next;
       });
 
@@ -1351,7 +1515,7 @@ function App() {
         setScrapeSteps(prev => {
           const next = [...prev];
           if (next.length > 0) {
-            next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
+            if (next[0]) next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
           }
           return next;
         });
@@ -1406,8 +1570,8 @@ function App() {
         const payload = event.payload;
         setScrapeSteps(prev => {
           const next = [...prev];
-          next[0].status = "active";
-          next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
+          if (next[0]) next[0].status = "active";
+          if (next[0]) next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
           return next;
         });
       });
@@ -1551,6 +1715,8 @@ function App() {
           setPdfRenameInput(loaded.pdf_rename_convention || "");
           setImageRenameInput(loaded.image_rename_convention || "");
           setPdfSizeThresholdInput(loaded.pdf_size_threshold ?? 5);
+          setSearxngUrlsInput((loaded.searxng_urls || []).join("\n"));
+          setMaxImageCandidatesInput(loaded.max_image_candidates ?? 15);
           if (loaded.price_tax_type) {
             setPriceTaxTypeInput(loaded.price_tax_type);
           }
@@ -1651,12 +1817,16 @@ function App() {
     pdfConv: string,
     imgConv: string,
     pdfThreshold: number,
-    taxType: string
+    taxType: string,
+    sxUrls: string[],
+    maxImgs: number
   ) {
     await invoke("save_config", {
       trigramme: tri,
       networkPath: net,
       searxngUrl: searx || null,
+      searxngUrls: sxUrls,
+      maxImageCandidates: maxImgs,
       vpcSites: sites,
       pdfRenameConvention: pdfConv || null,
       imageRenameConvention: imgConv || null,
@@ -1670,6 +1840,8 @@ function App() {
       trigramme: tri.toUpperCase(),
       network_path: net,
       searxng_url: searx || undefined,
+      searxng_urls: sxUrls,
+      max_image_candidates: maxImgs,
       vpc_sites: sites,
       pdf_rename_convention: pdfConv || undefined,
       image_rename_convention: imgConv || undefined,
@@ -1694,6 +1866,13 @@ function App() {
       const taxType = updatedFields?.hasOwnProperty("price_tax_type") ? updatedFields.price_tax_type! : priceTaxTypeInput;
       const apiKeys = updatedFields?.hasOwnProperty("vpc_api_keys") ? updatedFields.vpc_api_keys! : vpcKeysInput;
       const urls = updatedFields?.hasOwnProperty("vpc_urls") ? updatedFields.vpc_urls! : vpcUrlsInput;
+      
+      const sxUrls = updatedFields?.hasOwnProperty("searxng_urls") 
+        ? updatedFields.searxng_urls! 
+        : searxngUrlsInput.split("\n").map(u => u.trim()).filter(Boolean);
+      const maxImgs = updatedFields?.hasOwnProperty("max_image_candidates") 
+        ? updatedFields.max_image_candidates! 
+        : maxImageCandidatesInput;
 
       if (tri.trim().length !== 3) {
         return;
@@ -1703,6 +1882,8 @@ function App() {
         trigramme: tri,
         networkPath: net,
         searxngUrl: searx || null,
+        searxngUrls: sxUrls,
+        maxImageCandidates: maxImgs,
         vpcSites: sites,
         pdfRenameConvention: pdfConv || null,
         imageRenameConvention: imgConv || null,
@@ -1716,6 +1897,8 @@ function App() {
         trigramme: tri.toUpperCase(),
         network_path: net,
         searxng_url: searx || undefined,
+        searxng_urls: sxUrls,
+        max_image_candidates: maxImgs,
         vpc_sites: sites,
         pdf_rename_convention: pdfConv || undefined,
         image_rename_convention: imgConv || undefined,
@@ -1764,7 +1947,9 @@ function App() {
         pdfRenameInput,
         imageRenameInput,
         pdfSizeThresholdInput,
-        priceTaxTypeInput
+        priceTaxTypeInput,
+        searxngUrlsInput.split("\n").map(u => u.trim()).filter(Boolean),
+        maxImageCandidatesInput
       );
       setIsEditingConfig(false);
     } catch (err: any) {
@@ -3471,7 +3656,7 @@ function App() {
                 </div>
 
                 <div className="form-group">
-                  <label htmlFor="settings-searx">URL de l'instance SearxNG</label>
+                  <label htmlFor="settings-searx">URL de l'instance SearxNG principale</label>
                   <input
                     id="settings-searx"
                     type="text"
@@ -3480,6 +3665,65 @@ function App() {
                     onChange={(e) => setSearxngUrlInput(e.target.value)}
                     onBlur={() => triggerAutoSave()}
                   />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="settings-searx-urls">Instances SearxNG alternatives (une par ligne)</label>
+                  <textarea
+                    id="settings-searx-urls"
+                    placeholder="ex: https://searx.be&#10;https://searxng.site"
+                    value={searxngUrlsInput}
+                    onChange={(e) => setSearxngUrlsInput(e.target.value)}
+                    onBlur={() => {
+                      const urls = searxngUrlsInput.split("\n").map(u => u.trim()).filter(Boolean);
+                      triggerAutoSave({ searxng_urls: urls });
+                    }}
+                    style={{ width: "100%", height: "80px", padding: "0.5rem", borderRadius: "4px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-primary)", color: "var(--text-primary)", resize: "vertical", fontSize: "12px", fontFamily: "inherit" }}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="settings-max-images">Nombre max d'images candidates de repli (SearxNG)</label>
+                  <input
+                    id="settings-max-images"
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={maxImageCandidatesInput}
+                    onChange={(e) => setMaxImageCandidatesInput(Number(e.target.value) || 15)}
+                    onBlur={() => triggerAutoSave({ max_image_candidates: maxImageCandidatesInput })}
+                  />
+                  <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>Limite le nombre d'images candidates présentées lors d'un scraping SearxNG (Défaut : 15).</span>
+                </div>
+
+                <div className="form-group" style={{ marginTop: "-0.5rem", marginBottom: "0.5rem" }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={async () => {
+                      const urls = [searxngUrlInput, ...searxngUrlsInput.split("\n")].map(u => u.trim()).filter(Boolean);
+                      if (urls.length === 0) {
+                        showToast("Aucune instance SearxNG renseignée.", "error");
+                        return;
+                      }
+                      showToast("Test des instances lancé...", "info");
+                      try {
+                        const results: Record<string, string> = await invoke("test_searxng_instances", { urls });
+                        const summary = Object.entries(results)
+                          .map(([url, status]) => `${url} : ${status}`)
+                          .join("\n");
+                        setAlertModal({
+                          title: "Résultat du test des instances",
+                          message: <pre style={{ whiteSpace: "pre-wrap", fontSize: "11px", margin: 0 }}>{summary}</pre>
+                        });
+                      } catch (err: any) {
+                        showToast("Erreur lors du test : " + err.toString(), "error");
+                      }
+                    }}
+                    style={{ width: "100%", padding: "0.5rem", fontSize: "12px" }}
+                  >
+                    🔍 Tester la connectivité & support JSON des instances SearxNG
+                  </button>
                 </div>
 
                 <div className="form-group">
@@ -6329,6 +6573,147 @@ function App() {
                 onClick={() => setShowPriceConfirmModal(false)}
               >
                 Annuler
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dimension Confirmation Modal Overlay */}
+      {showDimensionConfirmModal && pendingScrapeDetails && (
+        <div className="modal-overlay" style={{ zIndex: 1950 }}>
+          <div className="modal-container" style={{ maxWidth: "600px", backgroundColor: "var(--bg-secondary)", borderRadius: "8px" }}>
+            <div className="modal-header">
+              <h3>Sélectionner et mapper les dimensions</h3>
+              <button 
+                type="button" 
+                className="modal-close" 
+                onClick={() => setShowDimensionConfirmModal(false)}
+                style={{ background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer", fontSize: "20px" }}
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal-body" style={{ padding: "1.5rem", display: "flex", flexDirection: "column", gap: "1.2rem" }}>
+              <p style={{ fontSize: "13px", color: "var(--text-secondary)" }}>
+                Choisissez l'expression de dimension détectée sur la page, puis associez chaque nombre au bon axe (Largeur, Hauteur, Profondeur).
+              </p>
+              
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                <label style={{ fontWeight: "600", fontSize: "13px" }}>Expressions de dimensions trouvées :</label>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", maxHeight: "150px", overflowY: "auto", border: "1px solid var(--border-color)", padding: "0.5rem", borderRadius: "6px" }}>
+                  {pendingScrapeDetails.dimension_candidates?.map((candidate: string, idx: number) => (
+                    <div 
+                      key={idx}
+                      onClick={() => handleSelectDimensionCandidate(candidate)}
+                      style={{
+                        padding: "0.5rem",
+                        borderRadius: "4px",
+                        backgroundColor: selectedDimCandidate === candidate ? "var(--bg-tertiary)" : "transparent",
+                        border: selectedDimCandidate === candidate ? "1px solid var(--accent)" : "1px solid transparent",
+                        cursor: "pointer",
+                        fontSize: "13px",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center"
+                      }}
+                    >
+                      <span>{candidate}</span>
+                      {selectedDimCandidate === candidate && <span style={{ color: "var(--accent)", fontWeight: "600" }}>✓ Sélectionné</span>}
+                    </div>
+                  ))}
+                  {(!pendingScrapeDetails.dimension_candidates || pendingScrapeDetails.dimension_candidates.length === 0) && (
+                    <div style={{ padding: "0.5rem", fontSize: "13px", color: "var(--text-secondary)", textAlign: "center" }}>
+                      Aucune expression de dimension détectée automatiquement.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {dimValues.length > 0 && (
+                <div style={{ padding: "1rem", backgroundColor: "var(--bg-tertiary)", borderRadius: "6px", border: "1px solid var(--border-color)", display: "flex", flexDirection: "column", gap: "0.8rem" }}>
+                  <div style={{ fontSize: "13px", fontWeight: "600", color: "var(--text-primary)" }}>
+                    Valeurs détectées : {dimValues.map((v, i) => <span key={i} style={{ margin: "0 0.3rem", padding: "0.1rem 0.4rem", backgroundColor: "var(--bg-secondary)", borderRadius: "4px", border: "1px solid var(--border-color)" }}>Valeur {i+1} : {v}</span>)}
+                  </div>
+                  
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.8rem" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                      <label style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Largeur :</label>
+                      <select 
+                        value={dimWidthIndex} 
+                        onChange={(e) => setDimWidthIndex(e.target.value)}
+                        style={{ padding: "0.4rem", borderRadius: "4px", backgroundColor: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-color)" }}
+                      >
+                        <option value="">-- Ignorer --</option>
+                        {dimValues.map((v, i) => (
+                          <option key={i} value={i}>Valeur {i+1} ({v} mm)</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                      <label style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Hauteur :</label>
+                      <select 
+                        value={dimHeightIndex} 
+                        onChange={(e) => setDimHeightIndex(e.target.value)}
+                        style={{ padding: "0.4rem", borderRadius: "4px", backgroundColor: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-color)" }}
+                      >
+                        <option value="">-- Ignorer --</option>
+                        {dimValues.map((v, i) => (
+                          <option key={i} value={i}>Valeur {i+1} ({v} mm)</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                      <label style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Profondeur :</label>
+                      <select 
+                        value={dimDepthIndex} 
+                        onChange={(e) => setDimDepthIndex(e.target.value)}
+                        style={{ padding: "0.4rem", borderRadius: "4px", backgroundColor: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-color)" }}
+                      >
+                        <option value="">-- Ignorer --</option>
+                        {dimValues.map((v, i) => (
+                          <option key={i} value={i}>Valeur {i+1} ({v} mm)</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={{ borderTop: "1px dashed var(--border-color)", paddingTop: "0.6rem", fontSize: "13px", display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ color: "var(--text-secondary)" }}>Aperçu final :</span>
+                    <span style={{ fontWeight: "bold", color: "var(--accent)" }}>
+                      {(dimWidthIndex !== "" && dimValues[parseInt(dimWidthIndex)]) ? dimValues[parseInt(dimWidthIndex)] : "0"} x {(dimHeightIndex !== "" && dimValues[parseInt(dimHeightIndex)]) ? dimValues[parseInt(dimHeightIndex)] : "0"} x {(dimDepthIndex !== "" && dimValues[parseInt(dimDepthIndex)]) ? dimValues[parseInt(dimDepthIndex)] : "0"} mm
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                <label style={{ fontWeight: "600", fontSize: "13px" }}>Poids (g) :</label>
+                <input 
+                  type="text" 
+                  value={dimWeight} 
+                  onChange={(e) => setDimWeight(e.target.value)}
+                  placeholder="Poids (ex: 150 ou 1,2)"
+                  style={{ padding: "0.5rem", borderRadius: "4px", backgroundColor: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-color)" }}
+                />
+              </div>
+            </div>
+            <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", padding: "1rem" }}>
+              <button 
+                type="button" 
+                className="btn btn-secondary" 
+                onClick={() => setShowDimensionConfirmModal(false)}
+              >
+                Annuler
+              </button>
+              <button 
+                type="button" 
+                className="btn btn-primary" 
+                onClick={handleConfirmDimensions}
+              >
+                Valider
               </button>
             </div>
           </div>

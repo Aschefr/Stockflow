@@ -18,7 +18,7 @@ test.beforeAll(async () => {
   tauriApp = spawn(executablePath, [], {
     env: {
       ...process.env,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9222"
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9222 --disable-features=SharedArrayBuffer --disable-service-workers --disable-shared-workers"
     }
   });
 

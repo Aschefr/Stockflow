@@ -5,6 +5,7 @@ pub enum VpcProvider {
     RsComponents,
     Farnell,
     Mouser,
+    Conrad,
 }
 
 impl VpcProvider {
@@ -16,6 +17,8 @@ impl VpcProvider {
             Some(Self::Farnell)
         } else if l.contains("mouser") {
             Some(Self::Mouser)
+        } else if l.contains("conrad") {
+            Some(Self::Conrad)
         } else {
             None
         }
@@ -30,46 +33,39 @@ impl VpcProvider {
     ) -> Result<ScrapedProductDetails, String> {
         match self {
             Self::RsComponents => {
-                let rs_code = url_or_code.trim().replace("-", "").replace(" ", "");
-                
-                let mut rs_domain = "fr.rs-online.com".to_string();
-                if let Some(config) = crate::config::load_config_internal() {
-                    if let Some(custom) = config.vpc_urls.get("RS") {
-                        if !custom.trim().is_empty() {
-                            rs_domain = custom.trim().to_string();
-                        }
-                    } else if let Some(custom) = config.vpc_urls.get("RS Components") {
-                        if !custom.trim().is_empty() {
-                            rs_domain = custom.trim().to_string();
-                        }
-                    }
+                let vpc_urls = crate::config::load_config_internal().map(|c| c.vpc_urls).unwrap_or_default();
+                if let Some(direct_url) = crate::scraper::build_vpc_product_url("RS", url_or_code, &vpc_urls) {
+                    let mut details = scrape_url_via_webview(app_handle, &direct_url).await?;
+                    details.sku = sku.to_string();
+                    return Ok(details);
                 }
-
-                let direct_url = if rs_domain.contains("rsdelivers") {
-                    format!("https://{}/product/a/a/a/{}", rs_domain, rs_code)
-                } else {
-                    format!("https://{}/web/c/?searchTerm={}", rs_domain, rs_code)
-                };
-                
-                let mut details = scrape_url_via_webview(app_handle, &direct_url).await?;
-                details.sku = sku.to_string();
-                Ok(details)
+                Err("Impossible de générer l'URL RS".to_string())
             },
             Self::Farnell => {
                 if let Some(keys) = api_keys {
                     if let Some(key) = keys.get("Farnell").or_else(|| keys.get("farnell")) {
-                        return scrape_farnell_api(sku, key).await;
+                        if let Ok(details) = scrape_farnell_api(sku, key).await {
+                            return Ok(details);
+                        }
                     }
                 }
-                Err("Pas de clé API pour Farnell".to_string())
+                // Désactivation temporaire de la WebView pour Farnell (souvent en 404/bloqué) pour passer directement au scraper générique
+                Err("Scraping WebView désactivé pour Farnell (passage direct au scraper générique)".to_string())
             },
             Self::Mouser => {
                 if let Some(keys) = api_keys {
                     if let Some(key) = keys.get("Mouser").or_else(|| keys.get("mouser")) {
-                        return scrape_mouser_api(sku, key).await;
+                        if let Ok(details) = scrape_mouser_api(sku, key).await {
+                            return Ok(details);
+                        }
                     }
                 }
-                Err("Pas de clé API pour Mouser".to_string())
+                // Désactivation du scraping WebView pour Mouser (bloqué par Cloudflare et provoque des timeouts de 60s)
+                Err("Scraping WebView désactivé pour Mouser (passage direct au scraper générique)".to_string())
+            },
+            Self::Conrad => {
+                // Désactivation du scraping WebView pour Conrad (deadlocks et captcha fréquents) pour passer directement au scraper générique
+                Err("Scraping WebView désactivé pour Conrad (passage direct au scraper générique)".to_string())
             }
         }
     }
