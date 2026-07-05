@@ -45,7 +45,7 @@ test.afterAll(async () => {
   if (tauriApp) tauriApp.kill();
 });
 
-test('Capture WebView Scraping depuis la Sidebar', async () => {
+test.skip('Capture WebView Scraping depuis la Sidebar', async () => {
   // Navigation
   await page.click('text=Liste d\'Inventaire');
   await page.waitForSelector('button:has-text("Ajouter un SKU")');

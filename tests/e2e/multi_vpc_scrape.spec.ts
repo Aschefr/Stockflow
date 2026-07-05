@@ -159,110 +159,47 @@ test('Create and Scrape all 5 references in batch', async () => {
     await page.selectOption('#modal-autofill-type', tc.provider);
     await page.fill('#modal-autofill-code', tc.code);
 
-    console.log(`[${tc.name}] Clic sur Auto-remplir...`);
-    await page.click('text=Auto-remplir');
+    // Saisir le SKU cible d'abord car requis par le background scraper
+    await page.fill('#modal-p-sku', tc.targetSku);
 
-    // Wait some time to catch and screenshot any WebView popup that opens
-    let webviewUrl = '';
-    for (let check = 0; check < 8; check++) {
-      await page.waitForTimeout(1000);
-      const contexts = browser.contexts();
-      const pages = contexts[0].pages();
-      for (const p of pages) {
-        const url = p.url();
-        if (url !== page.url() && (url.includes('rs-online') || url.includes('rsdelivers') || url.includes('conrad') || url.includes('farnell') || url.includes('mouser') || url.includes('search.amify-studio.fr'))) {
-          webviewUrl = url;
-          const screenshotName = `webview_${tc.provider.toLowerCase()}.png`;
-          const webviewPath = path.join(ARTIFACTS_DIR, screenshotName);
-          try {
-            await p.screenshot({ path: webviewPath, fullPage: false });
-            console.log(`[${tc.name}] Capture d'écran de la WebView (${url}) enregistrée sous ${screenshotName}`);
-          } catch (e: any) {
-            console.log(`[${tc.name}] Impossible de capturer la WebView: ${e.message}`);
-          }
-          break;
-        }
-      }
-      if (webviewUrl) break;
+    console.log(`[${tc.name}] Clic sur Scraper...`);
+    await page.click('button:has-text("Scraper")');
+
+    // Attendre la fin du scraping via la bannière globale pour cet SKU précis
+    console.log(`[${tc.name}] Attente du scraping en arrière-plan...`);
+    await page.waitForSelector(`.global-scrape-banner--complete:has-text("${tc.targetSku}")`, { timeout: 90000 });
+
+    console.log(`[${tc.name}] Ouverture de la modale d'auto-remplissage...`);
+    await page.click('text=Auto-remplissage (Candidats)');
+    await page.waitForSelector('.autofill-modal__content');
+
+    if (tc.provider === 'mpn') {
+      console.log(`[${tc.name}] Cas MPN : Sélection d'une image candidate dans Ressources...`);
+      await page.click('button:has-text("Ressources")');
+      await page.waitForSelector('.autofill-modal__image-thumb');
+      await page.locator('.autofill-modal__image-thumb').first().click();
     }
 
-    // Wait for fields to be populated and scraping to finish
-    console.log(`[${tc.name}] Attente du remplissage des données et fin du scraping...`);
-    try {
-      await page.waitForFunction(() => {
-        const priceConfirmHeader = Array.from(document.querySelectorAll('.modal-header h3')).some(el => el.textContent?.includes('Sélectionner le prix'));
-        const progressModalCloseBtn = Array.from(document.querySelectorAll('.modal-container button')).some(el => el.textContent?.includes('Fermer'));
-        const progressModalError = document.querySelector('.wizard-error');
-        const brandInput = document.querySelector('#modal-p-brand') as HTMLInputElement;
-        const labelInput = document.querySelector('#modal-p-label') as HTMLInputElement;
-        const priceInput = document.querySelector('#modal-p-price') as HTMLInputElement;
-        const fallbackWarning = document.querySelector('.autofill-fallback-info');
+    console.log(`[${tc.name}] Application des données...`);
+    await page.click('text=Appliquer la sélection');
 
-        const hasFilledData = (brandInput && brandInput.value !== '') || 
-                              (labelInput && labelInput.value !== '') || 
-                              (priceInput && priceInput.value !== '') ||
-                              (fallbackWarning && fallbackWarning.textContent !== '');
-
-        return (priceConfirmHeader || progressModalCloseBtn || !!progressModalError) && hasFilledData;
-      }, { timeout: 60000 });
-    } catch (err: any) {
-      console.log(`[${tc.name}] Timeout ou erreur lors de l'attente du remplissage (waitForFunction) : ${err.message}. Continuation du test.`);
+    // Vérifier si l'étape de confirmation s'affiche (bouton Confirmer l'application présent)
+    const confirmBtn = page.locator('text=Confirmer l\'application').first();
+    if (await confirmBtn.isVisible().catch(() => false)) {
+      console.log(`[${tc.name}] Confirmation de l'application...`);
+      await confirmBtn.click();
+    } else {
+      console.log(`[${tc.name}] Pas de confirmation requise (sélections vides). Fermeture de la modale.`);
+      await page.click('.autofill-modal button:has-text("Annuler")').catch(() => {});
     }
+
+    // Attendre que la modale se ferme
+    await page.waitForSelector('.autofill-modal', { state: 'detached', timeout: 15000 });
 
     // Capture main modal screenshot showing filled values
     const modalScreenshotName = `app_modal_${tc.provider.toLowerCase()}.png`;
     await page.screenshot({ path: path.join(ARTIFACTS_DIR, modalScreenshotName) });
     console.log(`[${tc.name}] Capture d'écran du modal enregistrée sous ${modalScreenshotName}`);
-
-    // Fill target SKU
-    await page.fill('#modal-p-sku', tc.targetSku);
-
-    // Select price candidate or close progress modal robustly
-    console.log(`[${tc.name}] Résolution des fenêtres modales de fin de scraping...`);
-    let modalResolved = false;
-    for (let check = 0; check < 30; check++) {
-      const priceCandidate = page.locator('.price-candidate-item').first();
-      const progressModalFermer = page.locator('.modal-container button:has-text("Fermer")').first();
-      const validerImportationBtn = page.locator('.modal-container button:has-text("Valider l\'importation")').first();
-      const annulerBtn = page.locator('.modal-container button:has-text("Annuler")').first();
-      
-      if (await priceCandidate.isVisible().catch(() => false)) {
-        console.log(`[${tc.name}] Candidat de prix détecté, sélection...`);
-        await priceCandidate.click().catch(() => {});
-        await page.waitForTimeout(1000);
-        modalResolved = true;
-        break;
-      }
-      
-      if (await progressModalFermer.isVisible().catch(() => false)) {
-        console.log(`[${tc.name}] Bouton "Fermer" du modal de progression visible, fermeture.`);
-        await progressModalFermer.click().catch(() => {});
-        await page.waitForTimeout(1000);
-        modalResolved = true;
-        break;
-      }
-
-      if (await validerImportationBtn.isVisible().catch(() => false)) {
-        console.log(`[${tc.name}] Modal de validation de PDF détecté ("Valider l'importation"), validation.`);
-        await validerImportationBtn.click().catch(() => {});
-        await page.waitForTimeout(1000);
-        modalResolved = true;
-        break;
-      }
-
-      if (await annulerBtn.isVisible().catch(() => false)) {
-        console.log(`[${tc.name}] Bouton "Annuler" visible, fermeture.`);
-        await annulerBtn.click().catch(() => {});
-        await page.waitForTimeout(1000);
-        modalResolved = true;
-        break;
-      }
-      
-      await page.waitForTimeout(1000);
-    }
-    if (!modalResolved) {
-      console.log(`[${tc.name}] Aucune modal de prix ou de progression n'a été résolue après attente.`);
-    }
 
     // Fill designation if empty
     const labelVal = await page.inputValue('#modal-p-label');
@@ -276,146 +213,6 @@ test('Create and Scrape all 5 references in batch', async () => {
     await saveBtn.click();
     await page.waitForTimeout(2500);
 
-    // --- Scraping individuel média avec validation ---
-    console.log(`[${tc.name}] --- Scraping individuel média avec validation ---`);
-    await page.fill('input[placeholder*="Rechercher"]', tc.targetSku);
-    await page.waitForTimeout(1500);
-
-    // Open detail panel
-    await page.locator(`table.spreadsheet tbody tr:has-text("${tc.targetSku}")`).first().click();
-    await page.waitForSelector(".details-panel");
-    await page.waitForTimeout(1500);
-
-    // Clic sur "Scraper Image" individuel
-    console.log(`[${tc.name}] Clic sur "Scraper Image" individuel...`);
-    await page.click('.details-panel button:has-text("Scraper Image")');
-    await page.waitForTimeout(1000);
-
-    // Attente du modal de validation d'images ou d'erreur
-    console.log(`[${tc.name}] Attente du modal d'images...`);
-    let imgResolved = false;
-    for (let checkImg = 0; checkImg < 60; checkImg++) {
-      const wizardError = page.locator('.wizard-error').first();
-      if (await wizardError.isVisible().catch(() => false)) {
-        const errMsg = await wizardError.innerText();
-        console.log(`[${tc.name}] Erreur durant le scraping d'images : ${errMsg}`);
-        break;
-      }
-
-      const toutCocherBtn = page.locator('button:has-text("Tout cocher")').first();
-      const fermerBtn = page.locator('.modal-container button:has-text("Fermer")').first();
-      
-      if (await toutCocherBtn.isVisible().catch(() => false)) {
-        // Capturer une screenshot du modal de validation
-        const valImgScreenshot = `val_modal_img_${tc.provider.toLowerCase()}.png`;
-        await page.screenshot({ path: path.join(ARTIFACTS_DIR, valImgScreenshot) });
-        console.log(`[${tc.name}] Screenshot du modal de validation d'images sous ${valImgScreenshot}`);
-        
-        await toutCocherBtn.click();
-        await page.waitForTimeout(500);
-        const confirmImgBtn = page.locator('button:has-text("Valider l\'importation")').first();
-        await confirmImgBtn.click();
-        console.log(`[${tc.name}] Validation de l'importation des images envoyée.`);
-        await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 45000 }).catch(() => {});
-        imgResolved = true;
-        break;
-      }
-      
-      if (await fermerBtn.isVisible().catch(() => false)) {
-        console.log(`[${tc.name}] Aucune image trouvée / Bouton "Fermer" visible.`);
-        await fermerBtn.click();
-        imgResolved = true;
-        break;
-      }
-      await page.waitForTimeout(1000);
-    }
-
-    if (!imgResolved) {
-      console.log(`[${tc.name}] Image modal non résolu après attente. Vérification de l'overlay de sécurité...`);
-      const overlay = page.locator('.modal-overlay').first();
-      if (await overlay.isVisible().catch(() => false)) {
-        console.log(`[${tc.name}] L'overlay du modal d'images est toujours visible, fermeture forcée.`);
-        const fermerBtn = page.locator('.modal-container button:has-text("Fermer")').first();
-        const annulerBtn = page.locator('.modal-container button:has-text("Annuler")').first();
-        if (await fermerBtn.isVisible().catch(() => false)) {
-          await fermerBtn.click().catch(() => {});
-        } else if (await annulerBtn.isVisible().catch(() => false)) {
-          await annulerBtn.click().catch(() => {});
-        }
-        await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 10000 }).catch(() => {});
-      }
-    }
-
-    await page.waitForTimeout(1500);
-
-    // Clic sur "Scraper PDF" individuel
-    console.log(`[${tc.name}] Clic sur "Scraper PDF" individuel...`);
-    await page.click('.details-panel button:has-text("Scraper PDF")');
-    await page.waitForTimeout(1000);
-
-    // Attente du modal de validation de PDF ou d'erreur
-    console.log(`[${tc.name}] Attente du modal PDF...`);
-    let pdfResolved = false;
-    for (let checkPdf = 0; checkPdf < 60; checkPdf++) {
-      const wizardError = page.locator('.wizard-error').first();
-      if (await wizardError.isVisible().catch(() => false)) {
-        const errMsg = await wizardError.innerText();
-        console.log(`[${tc.name}] Erreur durant le scraping de PDF : ${errMsg}`);
-        break;
-      }
-
-      const confirmPdfBtn = page.locator('button:has-text("Valider l\'importation")').first();
-      const pdfRadio = page.locator('input[name="selectedPdf"]').first();
-      const progressModalFermer = page.locator('.modal-container button:has-text("Fermer")').first();
-      
-      if (await confirmPdfBtn.isVisible().catch(() => false)) {
-        // Capturer une screenshot du modal de validation
-        const valPdfScreenshot = `val_modal_pdf_${tc.provider.toLowerCase()}.png`;
-        await page.screenshot({ path: path.join(ARTIFACTS_DIR, valPdfScreenshot) });
-        console.log(`[${tc.name}] Screenshot du modal de validation de PDF sous ${valPdfScreenshot}`);
-        
-        if (await pdfRadio.isVisible().catch(() => false)) {
-          await pdfRadio.click();
-          await page.waitForTimeout(500);
-        }
-        await confirmPdfBtn.click();
-        console.log(`[${tc.name}] Validation de l'importation du PDF envoyée.`);
-        await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 45000 }).catch(() => {});
-        pdfResolved = true;
-        break;
-      }
-      
-      if (await progressModalFermer.isVisible().catch(() => false)) {
-        console.log(`[${tc.name}] Aucun PDF trouvé / Bouton "Fermer" visible.`);
-        await progressModalFermer.click();
-        await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 10000 }).catch(() => {});
-        pdfResolved = true;
-        break;
-      }
-      await page.waitForTimeout(1000);
-    }
-
-    // Safeguard: If the modal overlay is still visible (timeout or error), close it
-    const overlay = page.locator('.modal-overlay').first();
-    if (await overlay.isVisible().catch(() => false)) {
-      console.log(`[${tc.name}] Safeguard: Progress modal still visible, closing it.`);
-      const closeBtn = page.locator('.modal-container button:has-text("Fermer")').first();
-      const cancelBtn = page.locator('.modal-container button:has-text("Annuler")').first();
-      if (await closeBtn.isVisible().catch(() => false)) {
-        await closeBtn.click();
-      } else if (await cancelBtn.isVisible().catch(() => false)) {
-        await cancelBtn.click();
-      }
-      await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 10000 }).catch(() => {});
-    }
-
-    await page.waitForTimeout(1500);
-
-    // Close details panel
-    await page.click('.panel-close');
-    await page.waitForTimeout(1000);
-    await page.fill('input[placeholder*="Rechercher"]', '');
-    await page.waitForTimeout(1000);
   }
 
   // 3. Search and select all created references in the Inventory table

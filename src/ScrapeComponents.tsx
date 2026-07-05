@@ -322,7 +322,8 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
 
   useEffect(() => {
     if (isOpen && sku) {
-      // Réinitialiser le compteur d'images valides à chaque ouverture
+      setConfirmStep(false);
+      setPendingSelections(null);
       setValidImageCount(0);
       loadCandidates();
     }

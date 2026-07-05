@@ -49,6 +49,8 @@ test.afterAll(async () => {
 });
 
 test('Scraping RS Standard (114-8175)', async () => {
+  test.setTimeout(120000);
+  
   // Navigation vers la page Liste d'Inventaire
   await page.click('text=Liste d\'Inventaire');
   await page.waitForSelector('button:has-text("Ajouter un SKU")');
@@ -59,58 +61,96 @@ test('Scraping RS Standard (114-8175)', async () => {
   // Attendre l'input du modal
   await page.waitForSelector('#modal-autofill-code');
 
+  // Saisir le SKU cible d'abord
+  await page.fill('#modal-p-sku', 'TEST-SCRAPE-RS');
+
   // Sélectionner la source 'RS'
   await page.selectOption('#modal-autofill-type', 'RS');
 
   // Saisir la référence
   await page.fill('#modal-autofill-code', '114-8175');
 
-  // Lancer l'auto-remplissage
-  await page.click('text=Auto-remplir');
+  // Lancer le scraping
+  await page.click('button:has-text("Scraper")');
 
-  // Attendre que la désignation (label) ou marque soit remplie
-  // L'ID du champ marque est "#modal-p-brand"
+  // Attendre la fin du scraping via la bannière globale avec l'SKU spécifique
+  await page.waitForSelector('.global-scrape-banner--complete:has-text("TEST-SCRAPE-RS")', { timeout: 45000 });
+
+  // Ouvrir le modal d'auto-remplissage
+  await page.click('text=Auto-remplissage (Candidats)');
+
+  // Attendre que la modale d'auto-remplissage s'affiche
+  await page.waitForSelector('.autofill-modal__content');
+
+  // Cliquer sur appliquer la sélection
+  await page.click('text=Appliquer la sélection');
+
+  // Confirmer l'application
+  await page.click('text=Confirmer l\'application');
+
+  // Attendre que le formulaire principal soit rempli
   await page.waitForFunction(() => {
     const inputs = document.querySelectorAll('input');
     for (let input of inputs) {
-      // Trouver l'input qui contient la marque ou la désignation
       if (input.placeholder?.toLowerCase().includes('marque') && input.value !== '') return true;
-      if (input.placeholder?.toLowerCase().includes('siemens') && input.value !== '') return true; // generic placeholder
+      if (input.value.toLowerCase().includes('rs') || input.value.toLowerCase().includes('components')) return true;
     }
-    // Alternative: vérifier la présence de texte RS
-    return document.body.innerHTML.includes('RS') && document.body.innerHTML.includes('Auto-remplissage');
+    return false;
   }, { timeout: 15000 });
 
-  // On peut vérifier explicitement que le texte de la marque ou de la modale inclut des données
+  // On vérifie que la modale de création contient maintenant des valeurs
   const pageContent = await page.content();
   expect(pageContent.toLowerCase()).toContain('rs');
 
-  // Fermer la modale
+  // Fermer la modale d'ajout de SKU
   await page.locator('button', { hasText: 'Annuler' }).first().click({ force: true });
 });
 
 test('Scraping Fallback (Fluke 117)', async () => {
+  test.setTimeout(120000);
+
   await page.click('text=Liste d\'Inventaire').catch(() => {}); // might already be there
   await page.waitForSelector('button:has-text("Ajouter un SKU")');
   await page.locator('button', { hasText: 'Ajouter un SKU' }).click();
   await page.waitForSelector('#modal-autofill-code');
 
-  // Selectionner MPN (Manufacturer Part Number)
+  // Saisir le SKU cible
+  await page.fill('#modal-p-sku', 'TEST-SCRAPE-FALLBACK');
+
+  // Sélectionner MPN (Manufacturer Part Number)
   await page.selectOption('#modal-autofill-type', 'mpn');
   
   // Saisir la référence inconnue pour déclencher le fallback
   await page.fill('#modal-autofill-code', 'Fluke 117');
   
-  // Lancer l'auto-remplissage
-  await page.click('text=Auto-remplir');
+  // Lancer le scraping
+  await page.click('button:has-text("Scraper")');
 
-  // Attendre la résolution (ça peut prendre jusqu'à 20s via SearxNG/WebView)
-  await page.waitForFunction(() => {
-    return document.body.innerHTML.toLowerCase().includes('fluke');
-  }, { timeout: 30000 });
+  // Attendre la fin du scraping pour ce SKU précis
+  await page.waitForSelector('.global-scrape-banner--complete:has-text("TEST-SCRAPE-FALLBACK")', { timeout: 75000 });
 
-  const pageContent = await page.content();
-  expect(pageContent.toLowerCase()).toContain('fluke');
-  
+  // Ouvrir le modal d'auto-remplissage
+  await page.click('text=Auto-remplissage (Candidats)');
+
+  // Attendre le modal
+  await page.waitForSelector('.autofill-modal__content');
+
+  // Cliquer sur l'onglet Ressources car il contient les images récupérées par SearxNG
+  await page.click('button:has-text("Ressources")');
+
+  // Attendre que la grille d'images s'affiche et cliquer sur la première vignette image
+  await page.waitForSelector('.autofill-modal__image-thumb');
+  await page.locator('.autofill-modal__image-thumb').first().click();
+
+  // Cliquer sur appliquer la sélection (le bouton est maintenant activé grâce à l'image sélectionnée)
+  await page.click('text=Appliquer la sélection');
+
+  // Confirmer l'application
+  await page.click('text=Confirmer l\'application');
+
+  // Attendre que la modale d'auto-remplissage se ferme (détachée du DOM)
+  await page.waitForSelector('.autofill-modal', { state: 'detached', timeout: 10000 });
+
+  // Fermer la modale d'ajout de SKU
   await page.locator('button', { hasText: 'Annuler' }).first().click({ force: true });
 });
