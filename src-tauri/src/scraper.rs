@@ -26,32 +26,10 @@ pub enum ScraperError {
     Internal(String),
 }
 
-lazy_static::lazy_static! {
-    pub static ref ASYNC_HTTP_CLIENT: reqwest::Client = {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("Failed to build global async HTTP client")
-    };
-}
+use crate::scraper_http::{ASYNC_HTTP_CLIENT, LAST_RS_REQUEST, get_random_user_agent};
 
-static LAST_RS_REQUEST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 static WEBVIEW_PDF_CACHE: std::sync::Mutex<Option<(String, Vec<(String, String)>)>> = std::sync::Mutex::new(None);
 
-fn get_random_user_agent() -> &'static str {
-    let uas = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
-    ];
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as usize;
-    uas[nanos % uas.len()]
-}
 
 fn apply_stealth_headers(builder: reqwest::blocking::RequestBuilder, url: &str) -> reqwest::blocking::RequestBuilder {
     let mut builder = builder
@@ -2785,7 +2763,7 @@ pub async fn evaluate_js_in_webview(
             &label,
             tauri::WebviewUrl::External(url_clone.parse().unwrap())
         )
-        .visible(true)
+        .visible(false)
         .position(-2000.0, -2000.0)
         .inner_size(1280.0, 800.0)
         .initialization_script(&combined_script)

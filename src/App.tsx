@@ -4,6 +4,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import logoImg from "./assets/logo.png";
+import { ScrapeProgressBadge, AutoFillModal, type AutoFillSelections } from "./ScrapeComponents";
 import "./App.css";
 interface AppConfig {
   trigramme: string;
@@ -131,11 +132,27 @@ interface DashboardStats {
   recent_audits: AuditLogItem[];
 }
 
+function sendNativeNotification(title: string, body: string) {
+  if (!("Notification" in window)) return;
+  if (Notification.permission === "granted") {
+    new Notification(title, { body });
+  } else if (Notification.permission !== "denied") {
+    Notification.requestPermission().then(permission => {
+      if (permission === "granted") {
+        new Notification(title, { body });
+      }
+    });
+  }
+}
+
 function App() {
   // Theme & Configuration States
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     const saved = localStorage.getItem("sf_theme");
-    return (saved === "light" || saved === "dark") ? saved : "dark";
+  
+  // Avoid unused variable compiler errors
+
+  return (saved === "light" || saved === "dark") ? saved : "dark";
   });
 
   // Column definitions & settings
@@ -321,591 +338,165 @@ function App() {
   const [editVpcCode, setEditVpcCode] = useState("");
   const [editSuccess, setEditSuccess] = useState("");
   const [editError, setEditError] = useState("");
-  const [isFindingReseller, setIsFindingReseller] = useState(false);
 
-  // States for transient scraping status
-  const [autoFillLoading, setAutoFillLoading] = useState<Record<string, boolean>>({});
-  const [autoFillSource, setAutoFillSource] = useState<string | null>(null);
-  const [autoFillFallbackInfo, setAutoFillFallbackInfo] = useState<string | null>(null);
-
-  // Cache for the last successful scrape to prevent redundant requests
-  const [cachedScrapeResult, setCachedScrapeResult] = useState<{
+  // States for background scraping global progress
+  const [globalScrape, setGlobalScrape] = useState<{
     sku: string;
-    vpcSite: string;
-    vpcCode: string;
-    details: any;
+    progress: number;
+    message: string;
+    status: string;
+  } | null>(null);
+
+  // Queue info state — refreshed when scraping is active
+  const [scrapeQueueInfo, setScrapeQueueInfo] = useState<{
+    pending_count: number;
+    pending_skus: string[];
+    active_sku: string | null;
   } | null>(null);
 
   useEffect(() => {
-    if (!showEditModal && !showAddModal) {
-      setCachedScrapeResult(null);
-    }
-  }, [showEditModal, showAddModal]);
-
-  // Helper function to scrape and auto-fill either a specific field or all fields
-  async function handleAutoFill(isEdit: boolean, targetField?: string) {
-    setAutoFillSource(null);
-    setAutoFillFallbackInfo(null);
-    const vpcSite = isEdit ? editVpcSite : newVpcSite;
-    const vpcCode = isEdit ? editVpcCode : newVpcCode;
-    const mpn = isEdit ? editProduct.mpn : newProduct.mpn;
-    const sku = isEdit ? editProduct.sku : newProduct.sku;
-    const brand = isEdit ? editProduct.brand : newProduct.brand;
-    const label = isEdit ? editProduct.label : newProduct.label;
-
-    const isGeneral = !vpcSite || vpcSite === "mpn";
-    const codeToUse = vpcCode.trim() || (isGeneral ? (mpn || sku) : sku).trim();
-    if (!codeToUse) {
-      const errorMsg = "Veuillez renseigner un SKU ou un Code VPC pour le remplissage.";
-      if (isEdit) setEditError(errorMsg); else setCreateError(errorMsg);
-      return;
-    }
-
-    if (isEdit) {
-      setEditError("");
-      setEditSuccess("");
-    } else {
-      setCreateError("");
-      setCreateSuccess("");
-    }
-
-    const FIELD_NAMES_FR: Record<string, string> = {
-      label: "désignation",
-      brand: "marque",
-      price: "prix",
-      pack_size: "taille du lot",
-      mpn: "référence fabricant",
-      largeur: "largeur",
-      hauteur: "hauteur",
-      profondeur: "profondeur",
-      poids: "poids"
-    };
-
-    const fieldKey = targetField || "ALL";
-    setAutoFillLoading(prev => ({ ...prev, [fieldKey]: true }));
-
-    // Open Scrape Progress Modal
-    setIsScrapingMedia(true);
-    setScrapeError(null);
-    setIsScrapeModalMinimized(false);
-    setScrapeModalTitle(targetField ? `Auto-remplissage du champ : ${FIELD_NAMES_FR[targetField] || targetField}` : "Auto-remplissage de tous les champs");
-    setScrapeSteps([
-      { label: `Recherche des informations pour ${codeToUse}`, status: "active" },
-      { label: "Extraction et traitement des données", status: "pending" },
-      { label: "Mise à jour des champs", status: "pending" }
-    ]);
-    setScrapeModalOpen(true);
-
-    try {
-      const currentVpcSite = vpcSite || "mpn";
-      const cacheKeyMatches = cachedScrapeResult &&
-        cachedScrapeResult.sku === codeToUse &&
-        cachedScrapeResult.vpcSite === currentVpcSite &&
-        cachedScrapeResult.vpcCode === vpcCode;
-
-      let details: any;
-      if (cacheKeyMatches) {
-        details = cachedScrapeResult.details;
-      } else {
-        details = await invoke("scrape_product_details", {
-          vpcSite: currentVpcSite,
-          vpcCode: vpcCode,
-          sku: codeToUse,
-          brand: brand || null,
-          label: label || null
-        });
-        setCachedScrapeResult({
-          sku: codeToUse,
-          vpcSite: currentVpcSite,
-          vpcCode: vpcCode,
-          details
-        });
-      }
-
-      if (details.source_url) {
-        setAutoFillSource(details.source_url);
-      }
-      setAutoFillFallbackInfo(details.fallback_info || null);
-
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (next[0]) next[0].status = "success";
-        if (next[0]) next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
-        if (next[1]) next[1].status = "active";
-        return next;
+    const unlistenProgress = listen<any>("scrape-task-progress", (event) => {
+      setGlobalScrape({
+        sku: event.payload.sku,
+        progress: event.payload.progress,
+        message: event.payload.message,
+        status: "InProgress"
       });
+    });
 
-      const formatNum = (v: any) => {
-        if (v === null || v === undefined) return "";
-        return v.toString().replace(/\./g, ",");
-      };
-
-      const parsedAttrs = {
-        largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : "",
-        hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : "",
-        profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : "",
-        poids: details.weight ? formatNum(details.weight) : ""
-      };
-
-      let wasFound = true;
-      if (targetField) {
-        if (targetField === "label") wasFound = !!details.label;
-        else if (targetField === "brand") wasFound = !!details.brand && details.brand !== "Inconnue";
-        else if (targetField === "price") wasFound = details.price > 0;
-        else if (targetField === "pack_size") wasFound = details.pack_size > 0;
-        else if (targetField === "mpn") wasFound = !!details.mpn;
-        else if (targetField === "largeur") wasFound = parsedAttrs.largeur !== "";
-        else if (targetField === "hauteur") wasFound = parsedAttrs.hauteur !== "";
-        else if (targetField === "profondeur") wasFound = parsedAttrs.profondeur !== "";
-        else if (targetField === "poids") wasFound = parsedAttrs.poids !== "";
-      }
-
-      if (!wasFound && targetField) {
-        setAutoFillSource(null);
-        setAutoFillFallbackInfo(null);
-        const errMsg = `Propriété '${FIELD_NAMES_FR[targetField] || targetField}' n'a pas pu être trouvée.`;
-        if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
-        
-        setScrapeError(errMsg);
-        setScrapeSteps(prev => {
-          const next = [...prev];
-          if (next[1]) next[1].status = "error";
-          if (next[1]) next[1].details = errMsg;
-          return next;
-        });
-        return;
-      }
-
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (next[1]) next[1].status = "success";
-        if (next[1]) next[1].details = "Données extraites avec succès";
-        if (next[2]) next[2].status = "active";
-        return next;
-      });
-
-      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length >= 1;
-      if (hasMultiplePriceCandidates && (targetField === "price" || targetField === "pack_size" || !targetField)) {
-        setPendingScrapeDetails(details);
-        setPendingScrapeIsEdit(isEdit);
-        setShowPriceConfirmModal(true);
-        setScrapeModalOpen(false);
-        setAutoFillLoading(prev => ({ ...prev, [fieldKey]: false }));
-        setIsScrapingMedia(false);
-        return;
-      }
-
-      const hasDimensionCandidates = details.dimension_candidates && details.dimension_candidates.length > 0;
-      const isDimensionField = !targetField || targetField === "largeur" || targetField === "hauteur" || targetField === "profondeur" || targetField === "poids";
-      if (hasDimensionCandidates && isDimensionField) {
-        if (isEdit) {
-          setEditProduct(prev => {
-            const next = { ...prev };
-            if (!targetField || targetField === "label") next.label = details.label || prev.label;
-            if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
-            if (!targetField || targetField === "price") next.price = details.price > 0 ? formatNum(details.price) : prev.price;
-            if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size;
-            if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
-            return next;
-          });
-        } else {
-          setNewProduct(prev => {
-            const next = { ...prev };
-            if (!targetField || targetField === "label") next.label = details.label || prev.label;
-            if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
-            if (!targetField || targetField === "price") next.price = details.price > 0 ? formatNum(details.price) : prev.price;
-            if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size;
-            if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
-            return next;
-          });
-        }
-        handleOpenDimensionConfirm(details, isEdit);
-        setScrapeModalOpen(false);
-        setAutoFillLoading(prev => ({ ...prev, [fieldKey]: false }));
-        setIsScrapingMedia(false);
-        return;
-      }
-
-      if (isEdit) {
-        setEditProduct(prev => {
-          const next = { ...prev };
-          if (!targetField || targetField === "label") next.label = details.label || prev.label;
-          if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
-          if (!targetField || targetField === "price") next.price = details.price > 0 ? formatNum(details.price) : prev.price;
-          if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size;
-          if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
-          if (!targetField || targetField === "largeur") next.largeur = parsedAttrs.largeur !== "0" && parsedAttrs.largeur !== "" ? parsedAttrs.largeur : (targetField === "largeur" ? parsedAttrs.largeur : prev.largeur);
-          if (!targetField || targetField === "hauteur") next.hauteur = parsedAttrs.hauteur !== "0" && parsedAttrs.hauteur !== "" ? parsedAttrs.hauteur : (targetField === "hauteur" ? parsedAttrs.hauteur : prev.hauteur);
-          if (!targetField || targetField === "profondeur") next.profondeur = parsedAttrs.profondeur !== "0" && parsedAttrs.profondeur !== "" ? parsedAttrs.profondeur : (targetField === "profondeur" ? parsedAttrs.profondeur : prev.profondeur);
-          if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids !== "0" && parsedAttrs.poids !== "" ? parsedAttrs.poids : (targetField === "poids" ? parsedAttrs.poids : prev.poids);
-          return next;
-        });
-        setEditSuccess(targetField ? `Champ '${FIELD_NAMES_FR[targetField] || targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
-      } else {
-        setNewProduct(prev => {
-          const next = { ...prev };
-          if (!targetField || targetField === "label") next.label = details.label || prev.label;
-          if (!targetField || targetField === "brand") next.brand = details.brand || prev.brand;
-          if (!targetField || targetField === "price") next.price = details.price > 0 ? formatNum(details.price) : prev.price;
-          if (!targetField || targetField === "pack_size") next.pack_size = details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size;
-          if (!targetField || targetField === "mpn") next.mpn = details.mpn || prev.mpn;
-          if (!targetField || targetField === "largeur") next.largeur = parsedAttrs.largeur !== "0" && parsedAttrs.largeur !== "" ? parsedAttrs.largeur : (targetField === "largeur" ? parsedAttrs.largeur : prev.largeur);
-          if (!targetField || targetField === "hauteur") next.hauteur = parsedAttrs.hauteur !== "0" && parsedAttrs.hauteur !== "" ? parsedAttrs.hauteur : (targetField === "hauteur" ? parsedAttrs.hauteur : prev.hauteur);
-          if (!targetField || targetField === "profondeur") next.profondeur = parsedAttrs.profondeur !== "0" && parsedAttrs.profondeur !== "" ? parsedAttrs.profondeur : (targetField === "profondeur" ? parsedAttrs.profondeur : prev.profondeur);
-          if (!targetField || targetField === "poids") next.poids = parsedAttrs.poids !== "0" && parsedAttrs.poids !== "" ? parsedAttrs.poids : (targetField === "poids" ? parsedAttrs.poids : prev.poids);
-          return next;
-        });
-        setCreateSuccess(targetField ? `Champ '${FIELD_NAMES_FR[targetField] || targetField}' mis à jour !` : "Champs pré-remplis avec succès !");
-      }
-
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (next[2]) next[2].status = "success";
-        if (next[2]) next[2].details = targetField ? `Mise à jour du champ : ${FIELD_NAMES_FR[targetField] || targetField}` : "Tous les champs mis à jour";
-        return next;
-      });
-    } catch (err: any) {
-      const errMsg = `Échec de l'auto-remplissage : ${err.toString()}`;
-      if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
-      setScrapeError(errMsg);
-      setScrapeSteps(prev => {
-        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
-      });
-    } finally {
-      setAutoFillLoading(prev => ({ ...prev, [fieldKey]: false }));
-      setIsScrapingMedia(false);
-    }
-  }
-
-  async function triggerAutoFillAction(isEdit: boolean) {
-    setAutoFillSource(null);
-    setAutoFillFallbackInfo(null);
-    if (!autofillCodeInput.trim()) {
-      const errorMsg = "Veuillez saisir un code ou une référence pour l'auto-remplissage.";
-      if (isEdit) setEditError(errorMsg); else setCreateError(errorMsg);
-      return;
-    }
-    
-    if (isEdit) {
-      setEditError("");
-      setEditSuccess("");
-    } else {
-      setCreateError("");
-      setCreateSuccess("");
-    }
-    
-    setAutoFillLoading(prev => ({ ...prev, ["ALL"]: true }));
-
-    // Open Scrape Progress Modal
-    setIsScrapingMedia(true);
-    setScrapeError(null);
-    setIsScrapeModalMinimized(false);
-    setScrapeModalTitle("Auto-remplissage global");
-    setScrapeSteps([
-      { label: `Recherche des informations pour ${autofillCodeInput}`, status: "active" },
-      { label: "Extraction et traitement des données", status: "pending" },
-      { label: "Mise à jour de la fiche produit", status: "pending" }
-    ]);
-    setScrapeModalOpen(true);
-    
-    try {
-      const vpcSite = autofillType;
-      const vpcCode = autofillType === "mpn" ? "" : autofillCodeInput;
-      const sku = autofillType === "mpn" ? autofillCodeInput : "";
-      const brand = isEdit ? editProduct.brand : newProduct.brand;
-      const label = isEdit ? editProduct.label : newProduct.label;
-      
-      const codeToUse = autofillCodeInput;
-      const currentVpcSite = vpcSite || "mpn";
-      const cacheKeyMatches = cachedScrapeResult &&
-        cachedScrapeResult.sku === codeToUse &&
-        cachedScrapeResult.vpcSite === currentVpcSite &&
-        cachedScrapeResult.vpcCode === vpcCode;
-
-      let details: any;
-      if (cacheKeyMatches) {
-        details = cachedScrapeResult.details;
-      } else {
-        details = await invoke("scrape_product_details", {
-          vpcSite: currentVpcSite,
-          vpcCode: vpcCode,
-          sku: sku,
-          brand: brand || null,
-          label: label || null
-        });
-        setCachedScrapeResult({
-          sku: codeToUse,
-          vpcSite: currentVpcSite,
-          vpcCode: vpcCode,
-          details
-        });
-      }
-
-      if (details.source_url) {
-        setAutoFillSource(details.source_url);
-      }
-      setAutoFillFallbackInfo(details.fallback_info || null);
-
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (next[0]) next[0].status = "success";
-        if (next[0]) next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
-        if (next[1]) next[1].status = "active";
-        return next;
-      });
-
-      const formatNum = (v: any) => {
-        if (v === null || v === undefined) return "";
-        return v.toString().replace(/\./g, ",");
-      };
-
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (next[1]) next[1].status = "success";
-        if (next[1]) next[1].details = "Données extraites avec succès";
-        if (next[2]) next[2].status = "active";
-        return next;
-      });
-
-      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length >= 1;
-      if (hasMultiplePriceCandidates) {
-        setPendingScrapeDetails(details);
-        setPendingScrapeIsEdit(isEdit);
-        
-        if (isEdit) {
-          setEditProduct(prev => ({
-            ...prev,
-            mpn: details.mpn || prev.mpn || autofillCodeInput,
-            label: details.label || prev.label,
-            brand: details.brand || prev.brand,
-            largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : prev.largeur,
-            hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : prev.hauteur,
-            profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : prev.profondeur,
-            poids: details.weight ? formatNum(details.weight) : prev.poids,
-          }));
-          if (autofillType !== "mpn") {
-            setEditVpcSite(autofillType);
-            setEditVpcCode(autofillCodeInput);
-          }
-          setEditSuccess("Champs pré-remplis avec succès ! Veuillez sélectionner le prix dans le modal.");
-        } else {
-          setNewProduct(prev => ({
-            ...prev,
-            sku: prev.sku || details.sku || autofillCodeInput,
-            mpn: details.mpn || prev.mpn || autofillCodeInput,
-            label: details.label || prev.label,
-            brand: details.brand || prev.brand,
-            largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : prev.largeur,
-            hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : prev.hauteur,
-            profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : prev.profondeur,
-            poids: details.weight ? formatNum(details.weight) : prev.poids,
-          }));
-          if (autofillType !== "mpn") {
-            setNewVpcSite(autofillType);
-            setNewVpcCode(autofillCodeInput);
-          }
-          setCreateSuccess("Champs pré-remplis avec succès ! Veuillez sélectionner le prix dans le modal.");
-        }
-        
-        setShowPriceConfirmModal(true);
-        setScrapeModalOpen(false);
-        setAutoFillLoading(prev => ({ ...prev, ["ALL"]: false }));
-        setIsScrapingMedia(false);
-        return;
-      }
-
-      const hasDimensionCandidates = details.dimension_candidates && details.dimension_candidates.length > 0;
-      if (hasDimensionCandidates) {
-        if (isEdit) {
-          setEditProduct(prev => ({
-            ...prev,
-            mpn: details.mpn || prev.mpn || autofillCodeInput,
-            label: details.label || prev.label,
-            brand: details.brand || prev.brand,
-            price: details.price > 0 ? formatNum(details.price) : prev.price,
-            pack_size: details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size,
-          }));
-          if (autofillType !== "mpn") {
-            setEditVpcSite(autofillType);
-            setEditVpcCode(autofillCodeInput);
-          }
-          setEditSuccess("Champs pré-remplis avec succès ! Veuillez sélectionner les dimensions.");
-        } else {
-          setNewProduct(prev => ({
-            ...prev,
-            sku: prev.sku || details.sku || autofillCodeInput,
-            mpn: details.mpn || prev.mpn || autofillCodeInput,
-            label: details.label || prev.label,
-            brand: details.brand || prev.brand,
-            price: details.price > 0 ? formatNum(details.price) : prev.price,
-            pack_size: details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size,
-          }));
-          if (autofillType !== "mpn") {
-            setNewVpcSite(autofillType);
-            setNewVpcCode(autofillCodeInput);
-          }
-          setCreateSuccess("Champs pré-remplis avec succès ! Veuillez sélectionner les dimensions.");
-        }
-        handleOpenDimensionConfirm(details, isEdit);
-        setScrapeModalOpen(false);
-        setAutoFillLoading(prev => ({ ...prev, ["ALL"]: false }));
-        setIsScrapingMedia(false);
-        return;
-      }
-
-      if (isEdit) {
-        setEditProduct(prev => ({
-          ...prev,
-          mpn: details.mpn || prev.mpn || autofillCodeInput,
-          label: details.label || prev.label,
-          brand: details.brand || prev.brand,
-          price: details.price > 0 ? formatNum(details.price) : prev.price,
-          pack_size: details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size,
-          largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : prev.largeur,
-          hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : prev.hauteur,
-          profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : prev.profondeur,
-          poids: details.weight ? formatNum(details.weight) : prev.poids,
-        }));
-        if (autofillType !== "mpn") {
-          setEditVpcSite(autofillType);
-          setEditVpcCode(autofillCodeInput);
-        }
-        setEditSuccess("Champs pré-remplis avec succès !");
-      } else {
-        setNewProduct(prev => ({
-          ...prev,
-          sku: prev.sku || details.sku || autofillCodeInput,
-          mpn: details.mpn || prev.mpn || autofillCodeInput,
-          label: details.label || prev.label,
-          brand: details.brand || prev.brand,
-          price: details.price > 0 ? formatNum(details.price) : prev.price,
-          pack_size: details.pack_size > 0 ? formatNum(details.pack_size) : prev.pack_size,
-          largeur: details.dimensions ? formatNum(details.dimensions.split('x')[0]) : prev.largeur,
-          hauteur: details.dimensions ? formatNum(details.dimensions.split('x')[1]) : prev.hauteur,
-          profondeur: details.dimensions ? formatNum(details.dimensions.split('x')[2]) : prev.profondeur,
-          poids: details.weight ? formatNum(details.weight) : prev.poids,
-        }));
-        if (autofillType !== "mpn") {
-          setNewVpcSite(autofillType);
-          setNewVpcCode(autofillCodeInput);
-        }
-        setCreateSuccess("Champs pré-remplis avec succès !");
-      }
-
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (next[2]) next[2].status = "success";
-        if (next[2]) next[2].details = "Champs pré-remplis mis à jour";
-        return next;
-      });
-    } catch (err: any) {
-      const errMsg = `Échec de l'auto-remplissage : ${err.toString()}`;
-      if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
-      setScrapeError(errMsg);
-      setScrapeSteps(prev => {
-        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
-      });
-    } finally {
-      setAutoFillLoading(prev => ({ ...prev, ["ALL"]: false }));
-      setIsScrapingMedia(false);
-    }
-  }
-
-  async function handleFindReseller(isEdit: boolean) {
-    setAutoFillSource(null);
-    setAutoFillFallbackInfo(null);
-    setIsFindingReseller(true);
-    if (isEdit) {
-      setEditError("");
-      setEditSuccess("");
-    } else {
-      setCreateError("");
-      setCreateSuccess("");
-    }
-    const skuToUse = isEdit ? editProduct.sku : newProduct.sku;
-    const brandToUse = isEdit ? editProduct.brand : newProduct.brand;
-    const labelToUse = isEdit ? editProduct.label : newProduct.label;
-
-    // Open Scrape Progress Modal
-    setIsScrapingMedia(true);
-    setScrapeError(null);
-    setIsScrapeModalMinimized(false);
-    setScrapeModalTitle("Recherche de revendeur");
-    setScrapeSteps([
-      { label: `Requête SearXNG pour revendeur (${skuToUse})`, status: "active" },
-      { label: "Analyse des résultats", status: "pending" },
-      { label: "Association du revendeur trouvé", status: "pending" }
-    ]);
-    setScrapeModalOpen(true);
-
-    try {
-      const reseller: { provider: string; code: string; url: string } | null = await invoke(
-        "find_reseller_via_searxng",
-        {
-          sku: skuToUse,
-          brand: brandToUse || null,
-          label: labelToUse || null
-        }
+    const unlistenComplete = listen<any>("scrape-task-complete", (event) => {
+      sendNativeNotification(
+        "Scraping terminé !",
+        `Le produit ${event.payload.sku} a été scrapé avec succès (${event.payload.candidates_count} candidats trouvés).`
       );
 
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (next[0]) next[0].status = "success";
-        if (next[1]) next[1].status = "active";
-        return next;
+      setGlobalScrape(prev => {
+        if (prev && prev.sku === event.payload.sku) {
+          return {
+            sku: event.payload.sku,
+            progress: 1.0,
+            message: "Terminé",
+            status: "Complete"
+          };
+        }
+        return prev;
       });
-
-      if (reseller) {
-        if (reseller.url) {
-          setAutoFillSource(reseller.url);
-        }
-
-        setScrapeSteps(prev => {
-          const next = [...prev];
-          if (next[1]) next[1].status = "success";
-          if (next[1]) next[1].details = `Revendeur identifié : ${reseller.provider} (Code: ${reseller.code})`;
-          if (next[2]) next[2].status = "active";
-          return next;
+      setTimeout(() => {
+        setGlobalScrape(prev => {
+          if (prev && prev.sku === event.payload.sku && prev.status === "Complete") {
+            return null;
+          }
+          return prev;
         });
+      }, 4000);
+    });
 
-        if (isEdit) {
-          setEditVpcSite(reseller.provider);
-          setEditVpcCode(reseller.code);
-          setEditSuccess(`Revendeur trouvé ! Fournisseur : ${reseller.provider}, Code : ${reseller.code}`);
-        } else {
-          setNewVpcSite(reseller.provider);
-          setNewVpcCode(reseller.code);
-          setCreateSuccess(`Revendeur trouvé ! Fournisseur : ${reseller.provider}, Code : ${reseller.code}`);
-        }
+    const unlistenError = listen<any>("scrape-task-error", (event) => {
+      sendNativeNotification(
+        "Erreur de scraping",
+        `Le scraping du produit ${event.payload.sku} a échoué : ${event.payload.error}`
+      );
 
-        setScrapeSteps(prev => {
-          const next = [...prev];
-          if (next[2]) next[2].status = "success";
-          if (next[2]) next[2].details = `Associé : ${reseller.provider} - ${reseller.code}`;
-          return next;
+      setGlobalScrape({
+        sku: event.payload.sku,
+        progress: 1.0,
+        message: event.payload.error || "Erreur",
+        status: "Failed"
+      });
+      setTimeout(() => {
+        setGlobalScrape(prev => {
+          if (prev && prev.sku === event.payload.sku && prev.status === "Failed") {
+            return null;
+          }
+          return prev;
         });
-      } else {
-        const noResellerMsg = "Aucun revendeur configuré trouvé sur SearXNG pour cette référence.";
-        if (isEdit) setEditError(noResellerMsg); else setCreateError(noResellerMsg);
+      }, 4000);
+    });
 
-        setScrapeError(noResellerMsg);
-        setScrapeSteps(prev => {
-          const next = [...prev];
-          if (next[1]) next[1].status = "error";
-          if (next[1]) next[1].details = noResellerMsg;
-          return next;
-        });
-      }
-    } catch (err: any) {
-      const errMsg = `Erreur lors de la recherche de revendeur : ${err.toString()}`;
-      if (isEdit) setEditError(errMsg); else setCreateError(errMsg);
-      setScrapeError(errMsg);
-      setScrapeSteps(prev => {
-        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
+    // Request notification permission if not yet decided
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  
+  // Avoid unused variable compiler errors
+
+  return () => {
+      unlistenProgress.then(f => f());
+      unlistenComplete.then(f => f());
+      unlistenError.then(f => f());
+    };
+  }, []);
+
+  // Poll queue info when scraping is active
+  useEffect(() => {
+    if (!globalScrape || globalScrape.status === "Complete" || globalScrape.status === "Failed") {
+      setScrapeQueueInfo(null);
+      return;
+    }
+    const fetchQueue = () => {
+      invoke<any>("get_queue_info").then(info => {
+        setScrapeQueueInfo(info);
+      }).catch(() => {});
+    };
+    fetchQueue();
+    const interval = setInterval(fetchQueue, 3000);
+    return () => clearInterval(interval);
+  }, [globalScrape?.status]);
+
+  const [globalScrapeHighlighted, setGlobalScrapeHighlighted] = useState(false);
+
+  useEffect(() => {
+    const handleHighlight = () => {
+      setGlobalScrapeHighlighted(true);
+      setTimeout(() => setGlobalScrapeHighlighted(false), 3000);
+    };
+    window.addEventListener("highlight-scrape-task", handleHighlight);
+
+  return () => window.removeEventListener("highlight-scrape-task", handleHighlight);
+  }, []);
+
+  const [autoFillSource, setAutoFillSource] = useState<string | null>(null);
+  const [autoFillFallbackInfo, setAutoFillFallbackInfo] = useState<string | null>(null);
+
+  // States for transient scraping launch (zone unifiée)
+  const [scrapeZoneLoading, setScrapeZoneLoading] = useState(false);
+
+
+  // ─── Unified scraping launcher ────────────────────────────────────────────────
+  // Remplace handleAutoFill + triggerAutoFillAction + handleFindReseller.
+  // Lance le scraping asynchrone via le TaskManager avec contexte optionnel,
+  // puis ouvre l'AutoFillModal pour la sélection des candidats.
+
+  async function handleLaunchUnifiedScrape(isEdit: boolean) {
+    const sku = isEdit ? editProduct.sku : newProduct.sku;
+    if (!sku || !sku.trim()) {
+      const msg = "Veuillez saisir un SKU avant de lancer le scraping.";
+      if (isEdit) setEditError(msg); else setCreateError(msg);
+      return;
+    }
+
+    if (isEdit) { setEditError(""); setEditSuccess(""); }
+    else { setCreateError(""); setCreateSuccess(""); }
+
+    setScrapeZoneLoading(true);
+
+    // Déterminer les paramètres de contexte (VPC ou MPN saisis par l'utilisateur)
+    const autofillIsVpc = autofillType !== "mpn";
+    const vpcSite = autofillIsVpc ? autofillType : undefined;
+    const vpcCode = autofillIsVpc && autofillCodeInput.trim() ? autofillCodeInput.trim() : undefined;
+    const mpn = !autofillIsVpc && autofillCodeInput.trim() ? autofillCodeInput.trim() : undefined;
+    const brand = isEdit ? editProduct.brand : newProduct.brand;
+
+    try {
+      await invoke("start_background_scrape", {
+        sku,
+        vpcSite: vpcSite || null,
+        vpcCode: vpcCode || null,
+        mpn: mpn || null,
+        brand: brand || null,
       });
     } finally {
-      setIsFindingReseller(false);
-      setIsScrapingMedia(false);
+      setScrapeZoneLoading(false);
     }
   }
 
@@ -952,7 +543,7 @@ function App() {
   // Hover image preview state
   const [hoveredImage, setHoveredImage] = useState<string | null>(null);
   const [hoverPosition, setHoverPosition] = useState({ x: 0, y: 0 });
-  const [isScrapingPrice, setIsScrapingPrice] = useState(false);
+  const [, setIsScrapingPrice] = useState(false);
   const [isScrapingMedia, setIsScrapingMedia] = useState(false);
 
   // Scraped image validation states
@@ -1182,9 +773,68 @@ function App() {
   }
 
   const [scrapeModalOpen, setScrapeModalOpen] = useState(false);
-  const [scrapeModalTitle, setScrapeModalTitle] = useState("");
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const scrapeModalTitle = ""; // Titre du modal de progression (non utilisé avec le nouveau flux unifié)
   const [scrapeSteps, setScrapeSteps] = useState<ScrapeProgressStep[]>([]);
   const [scrapeError, setScrapeError] = useState<string | null>(null);
+
+  // Universal scraper AutoFillModal state
+  const [autoFillModalOpen, setAutoFillModalOpen] = useState(false);
+  const [autoFillModalSku, setAutoFillModalSku] = useState("");
+  const [autoFillModalIsEdit, setAutoFillModalIsEdit] = useState(false);
+  const [autoFillChanges, setAutoFillChanges] = useState<AutoFillSelections | null>(null);
+
+  function openAutoFillModal(sku: string, isEdit: boolean) {
+    if (!sku || !sku.trim()) {
+      alert("Veuillez saisir un SKU avant de charger les candidats.");
+      return;
+    }
+    setAutoFillModalSku(sku);
+    setAutoFillModalIsEdit(isEdit);
+    setAutoFillModalOpen(true);
+  }
+
+  function handleAutoFillApply(selections: AutoFillSelections) {
+    const formatNum = (v: any) => {
+      if (v === null || v === undefined) return "";
+      return v.toString().replace(/\./g, ",");
+    };
+    setAutoFillChanges(selections);
+
+    if (autoFillModalIsEdit) {
+      setEditProduct(prev => {
+        const next = { ...prev };
+        if (selections.label) next.label = selections.label;
+        if (selections.brand) next.brand = selections.brand;
+        if (selections.mpn) next.mpn = selections.mpn;
+        if (selections.price !== undefined && selections.price > 0) next.price = formatNum(selections.price);
+        if (selections.pack_size !== undefined && selections.pack_size > 0) next.pack_size = formatNum(selections.pack_size);
+        if (selections.largeur) next.largeur = formatNum(selections.largeur);
+        if (selections.hauteur) next.hauteur = formatNum(selections.hauteur);
+        if (selections.profondeur) next.profondeur = formatNum(selections.profondeur);
+        if (selections.poids) next.poids = formatNum(selections.poids);
+        return next;
+      });
+      if (selections.source_url) setAutoFillSource(selections.source_url);
+      setEditSuccess("Champs pré-remplis via auto-remplissage !");
+    } else {
+      setNewProduct(prev => {
+        const next = { ...prev };
+        if (selections.label) next.label = selections.label;
+        if (selections.brand) next.brand = selections.brand;
+        if (selections.mpn) next.mpn = selections.mpn;
+        if (selections.price !== undefined && selections.price > 0) next.price = formatNum(selections.price);
+        if (selections.pack_size !== undefined && selections.pack_size > 0) next.pack_size = formatNum(selections.pack_size);
+        if (selections.largeur) next.largeur = formatNum(selections.largeur);
+        if (selections.hauteur) next.hauteur = formatNum(selections.hauteur);
+        if (selections.profondeur) next.profondeur = formatNum(selections.profondeur);
+        if (selections.poids) next.poids = formatNum(selections.poids);
+        return next;
+      });
+      if (selections.source_url) setAutoFillSource(selections.source_url);
+      setCreateSuccess("Champs pré-remplis via auto-remplissage !");
+    }
+  }
 
   interface ConfirmModalConfig {
     title: string;
@@ -1352,303 +1002,42 @@ function App() {
     syncAndFetch(config);
   }
 
-  async function handleScrapePrice() {
-    if (!config || !selectedProduct) return;
-    setIsScrapingPrice(true);
-    setMovementError("");
-    setMovementSuccess("");
-
-    // Extrait les infos VPC du produit
-    let vpcSite = "mpn";
-    let vpcCode = "";
-    let mpnOrSku = selectedProduct.mpn || selectedProduct.sku;
-    try {
-      const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
-      if (attrs && attrs.vpc) {
-        const keys = Object.keys(attrs.vpc);
-        if (keys.length > 0) {
-          vpcSite = keys[0];
-          vpcCode = attrs.vpc[keys[0]]?.toString() || "";
-        }
-      }
-    } catch (e) {}
-
-    const codeToUse = vpcCode.trim() || mpnOrSku.trim();
-
-    // Open Scrape Progress Modal
-    setIsScrapingMedia(true);
-    setScrapeError(null);
-    setIsScrapeModalMinimized(false);
-    setScrapeModalTitle(`Scraping de prix : ${selectedProduct.sku}`);
-    setScrapeSteps([
-      { label: `Recherche du prix pour ${codeToUse}`, status: "active" },
-      { label: "Enregistrement du prix", status: "pending" }
-    ]);
-    setScrapeModalOpen(true);
-
-    try {
-      const details: any = await invoke("scrape_product_details", {
-        vpcSite: vpcSite,
-        vpcCode: vpcCode,
-        sku: vpcCode || mpnOrSku,
-        brand: selectedProduct.brand || null,
-        label: selectedProduct.label || null
-      });
-
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (next[0]) next[0].status = "success";
-        if (next[0]) next[0].details = details.source_url ? `Source : ${details.source_url}` : "Recherche terminée";
-        if (next[1]) next[1].status = "active";
-        return next;
-      });
-
-      const hasMultiplePriceCandidates = details.price_candidates && details.price_candidates.length >= 1;
-      if (hasMultiplePriceCandidates) {
-        setPendingScrapeDetails(details);
-        setPendingScrapeIsEdit(false);
-        setPendingScrapeSku(selectedProduct.sku);
-        setShowPriceConfirmModal(true);
-        setScrapeModalOpen(false);
-        setIsScrapingPrice(false);
-        setIsScrapingMedia(false);
-        return;
-      }
-
-      const price = details.price;
-      if (!price || price <= 0) {
-        throw new Error("Prix introuvable");
-      }
-
-      // Sauvegarde automatique du prix unique trouvé
-      const currentAttrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
-      if (details.source_url) {
-        currentAttrs.scrape_price_url = details.source_url;
-      }
-
-      await invoke("create_product", {
-        networkPath: config.network_path,
-        trigramme: config.trigramme,
-        sku: selectedProduct.sku,
-        mpn: selectedProduct.mpn,
-        label: selectedProduct.label,
-        brand: selectedProduct.brand,
-        category: selectedProduct.category,
-        subCategory: selectedProduct.sub_category,
-        location: selectedProduct.location,
-        itemType: selectedProduct.item_type,
-        minStock: selectedProduct.min_stock,
-        price: price,
-        imagePath: selectedProduct.image_path,
-        pdfPath: selectedProduct.pdf_path,
-        attributes: currentAttrs,
-        packSize: details.pack_size || selectedProduct.pack_size || 1
-      });
-
-      setScrapeSteps(prev => {
-        const next = [...prev];
-        if (next[1]) next[1].status = "success";
-        if (next[1]) next[1].details = `Nouveau prix : ${price.toFixed(2)} € (lot de ${details.pack_size || 1})`;
-        return next;
-      });
-
-      // Fermer le modal de progression de scraping après une seconde
-      setTimeout(() => {
-        setScrapeModalOpen(false);
-        setIsScrapingMedia(false);
-      }, 1000);
-
-      setMovementSuccess(`Prix mis à jour : ${price.toFixed(2)} €`);
-      setIsScrapingPrice(false);
-
-      // Synchro en tâche de fond (non bloquante)
-      syncAndFetch(config).then(() => {
-        refreshSelectedProduct(selectedProduct.sku);
-      });
-
-    } catch (err: any) {
-      const errMsg = `Échec du scraping : ${err.toString()}`;
-      setMovementError(errMsg);
-      setScrapeError(errMsg);
-      setScrapeSteps(prev => {
-        return prev.map(s => s.status === "active" ? { ...s, status: "error", details: errMsg } : s);
-      });
-      setIsScrapingPrice(false);
-    }
-  }
 
   function sanitizeTitleForDocType(title: string, sku: string): string {
     let t = (title || "").toLowerCase();
-    // Supprimer les préfixes [PDF] et extensions
     t = t.replace(/\[pdf\]/g, "");
     t = t.replace(/pdf/g, "");
     t = t.replace(new RegExp(sku.toLowerCase(), "g"), "");
-    t = t.replace(/legrand|schneider|siemens|abb/g, ""); // marques courantes
-    t = t.replace(/[^a-z0-9àéèçùœ\s-_]/g, ""); // garder lettres, chiffres, espaces, tirets
-    t = t.trim().replace(/[\s-_]+/g, "_"); // remplacer espaces par underscores
+    t = t.replace(/legrand|schneider|siemens|abb/g, "");
+    t = t.replace(/[^a-z0-9àéèçùœ\s-_]/g, "");
+    t = t.trim().replace(/[\s-_]+/g, "_");
     if (t.startsWith("_")) t = t.substring(1);
     if (t.endsWith("_")) t = t.substring(0, t.length - 1);
     if (t.length > 25) t = t.substring(0, 25);
     return t || "document";
   }
 
-  async function handleScrapePdfSingle() {
-    if (!config || !selectedProduct) return;
-    setIsScrapingMedia(true);
-    setScrapeError(null);
-    setIsPdfValidationMode(false);
-    setIsScrapeModalMinimized(false);
-    setScrapedPdfCandidates([]);
-    setSelectedPdfUrl("");
-    setSelectedPdfType("");
-    setScrapeModalTitle(`Sélection de notices PDF : ${selectedProduct.sku}`);
-    setScrapeSteps([
-      { label: "Recherche des documents PDF candidats sur le web...", status: "active" }
-    ]);
-    setScrapeModalOpen(true);
-
-    const unlistens: (() => void)[] = [];
-
-    try {
-      const unlistenProgress = await listen<any>("pdf-download-progress", (event) => {
-        const payload = event.payload;
-        setScrapeSteps(prev => {
-          const next = [...prev];
-          if (next.length > 0) {
-            if (next[0]) next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
-          }
-          return next;
-        });
-      });
-      unlistens.push(unlistenProgress);
-
-      const candidates = await invoke<{ url: string; title: string; domain: string }[]>("search_pdf_candidates", {
-        sku: selectedProduct.sku,
-        brand: selectedProduct.brand || null,
-        label: selectedProduct.label || null
-      });
-
-      unlistens.forEach(fn => fn());
-
-      if (candidates.length === 0) {
-        throw new Error("Aucun document PDF candidat n'a été trouvé.");
-      }
-
-      setScrapeSteps([
-        { label: "Recherche des documents PDF candidats sur le web", status: "success", details: `${candidates.length} documents PDF trouvés.` }
-      ]);
-      setScrapedPdfCandidates(candidates);
-      // Pre-select the first candidate by default
-      setSelectedPdfUrl(candidates[0].url);
-      setSelectedPdfType(sanitizeTitleForDocType(candidates[0].title, selectedProduct.sku));
-      setIsPdfValidationMode(true);
-    } catch (err: any) {
-      unlistens.forEach(fn => fn());
-      const errMsg = err.toString();
-      setScrapeError(errMsg);
-      setScrapeSteps([{ label: "Recherche des documents PDF candidats sur le web", status: "error", details: errMsg }]);
-    } finally {
-      setIsScrapingMedia(false);
-    }
-  }
-
   async function handleSaveSelectedPdf() {
     if (!config || !selectedProduct || !selectedPdfUrl) return;
     setIsSavingPdf(true);
     setScrapeError(null);
-    setIsPdfValidationMode(false);
-
-    setScrapeSteps([
-      { label: "Téléchargement & validation du document PDF sélectionné...", status: "active" },
-      { label: "Sauvegarde réseau (cascade) & Enregistrement", status: "pending" }
-    ]);
-
-    const unlistens: (() => void)[] = [];
-
     try {
-      const unlistenProgress = await listen<any>("pdf-download-progress", (event) => {
-        const payload = event.payload;
-        setScrapeSteps(prev => {
-          const next = [...prev];
-          if (next[0]) next[0].status = "active";
-          if (next[0]) next[0].details = payload.message + (payload.details ? ` - ${payload.details}` : "");
-          return next;
-        });
-      });
-      unlistens.push(unlistenProgress);
-
-      const relativePath = await invoke<string>("save_selected_pdf", {
+      await invoke("save_selected_pdf", {
         sku: selectedProduct.sku,
-        url: selectedPdfUrl,
+        pdfUrl: selectedPdfUrl,
         networkPath: config.network_path,
         trigramme: config.trigramme,
-        docType: selectedPdfType || null
+        docType: selectedPdfType || null,
       });
-
-      setScrapeSteps([
-        { label: "Téléchargement & validation du document PDF sélectionné", status: "success" },
-        { label: "Sauvegarde réseau (cascade) & Enregistrement", status: "success", details: `Sauvegardé : ${relativePath.split('/').pop()}` }
-      ]);
-
-      setMovementSuccess("PDF récupéré et sauvegardé avec succès.");
-      await syncAndFetch(config);
-      await refreshSelectedProduct(selectedProduct.sku);
-      setTimeout(() => {
-        setScrapeModalOpen(false);
-      }, 1000);
+      setSelectedPdfUrl("");
+      setSelectedPdfType("");
+      setScrapedPdfCandidates([]);
+      setIsPdfValidationMode(false);
+      syncAndFetch(config).then(() => refreshSelectedProduct(selectedProduct.sku));
     } catch (err: any) {
-      const errMsg = err.toString();
-      setScrapeError(errMsg);
-      setScrapeSteps([
-        { label: "Téléchargement & validation du document PDF sélectionné", status: "error", details: errMsg },
-        { label: "Sauvegarde réseau (cascade) & Enregistrement", status: "pending" }
-      ]);
-      setMovementError(errMsg);
+      setScrapeError(`Erreur lors de l'importation : ${err.toString()}`);
     } finally {
-      unlistens.forEach(fn => fn());
       setIsSavingPdf(false);
-    }
-  }
-
-  async function handleScrapeImageSingle() {
-    if (!config || !selectedProduct) return;
-    setIsScrapingMedia(true);
-    setScrapeError(null);
-    setIsImageValidationMode(false);
-    setIsScrapeModalMinimized(false);
-    setScrapedImageCandidates([]);
-    setSelectedImageUrls([]);
-    setScrapeModalTitle(`Sélection d'images : ${selectedProduct.sku}`);
-    setScrapeSteps([
-      { label: "Recherche des images candidates sur le web...", status: "active" }
-    ]);
-    setScrapeModalOpen(true);
-
-    try {
-      const candidates = await invoke<{ url: string; title?: string; domain: string }[]>("search_image_candidates", {
-        sku: selectedProduct.sku,
-        brand: selectedProduct.brand || null,
-        label: selectedProduct.label || null
-      });
-
-      if (candidates.length === 0) {
-        throw new Error("Aucune image candidate n'a été trouvée pour ce produit.");
-      }
-
-      setScrapeSteps([
-        { label: "Recherche des images candidates sur le web", status: "success", details: `${candidates.length} images trouvées.` }
-      ]);
-      setScrapedImageCandidates(candidates);
-      // Pre-select only the first 5 candidates by default (the most relevant ones)
-      setSelectedImageUrls(candidates.slice(0, 5).map(c => c.url));
-      setIsImageValidationMode(true);
-    } catch (err: any) {
-      const errMsg = err.toString();
-      setScrapeError(errMsg);
-      setScrapeSteps([{ label: "Recherche des images candidates sur le web", status: "error", details: errMsg }]);
-      setMovementError(errMsg);
-    } finally {
-      setIsScrapingMedia(false);
     }
   }
 
@@ -1753,7 +1142,10 @@ function App() {
     const interval = setInterval(() => {
       syncAndFetch(config);
     }, 4000);
-    return () => clearInterval(interval);
+  
+  // Avoid unused variable compiler errors
+
+  return () => clearInterval(interval);
   }, [config]);
 
   // Sync and fetch data helper
@@ -2120,6 +1512,13 @@ function App() {
         case "Notes":
           attributesObj.notes = oldValue || "";
           break;
+        case "Images":
+          if (oldValue && oldValue.trim()) {
+            try { attributesObj.scrape_image_urls = JSON.parse(oldValue); } catch (e) { attributesObj.scrape_image_urls = []; }
+          } else {
+            delete attributesObj.scrape_image_urls;
+          }
+          break;
         default:
           alert(`Restauration non supportée pour le champ : ${fieldName}`);
           return;
@@ -2193,6 +1592,7 @@ function App() {
     if (newProduct.poids) attributesObj.poids = newProduct.poids;
     if (newProduct.notes) attributesObj.notes = newProduct.notes;
     if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
+    if (autoFillChanges?.image_urls?.length) attributesObj.scrape_image_urls = autoFillChanges.image_urls;
 
     try {
       await invoke("create_product", {
@@ -2231,6 +1631,10 @@ function App() {
         }
       }
       setCreateSuccess("Produit créé avec succès ! Événement généré.");
+      // Trigger background scrape for the new product
+      invoke("start_background_scrape", { sku: newProduct.sku }).catch(e => {
+        console.warn("Background scrape trigger failed:", e);
+      });
       setNewVpcSite("");
       setNewVpcCode("");
       setAutoFillSource(null);
@@ -2255,6 +1659,7 @@ function App() {
         initial_stock: "0"
       });
       setShowAddModal(false);
+      setAutoFillChanges(null);
       syncAndFetch(config);
     } catch (err: any) {
       setCreateError(err.toString());
@@ -2286,6 +1691,7 @@ function App() {
     if (editProduct.poids) attributesObj.poids = editProduct.poids; else delete attributesObj.poids;
     if (editProduct.notes) attributesObj.notes = editProduct.notes; else delete attributesObj.notes;
     if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
+    if (autoFillChanges?.image_urls?.length) attributesObj.scrape_image_urls = autoFillChanges.image_urls;
 
     try {
       await invoke("create_product", {
@@ -2311,6 +1717,7 @@ function App() {
       setAutoFillSource(null);
       setAutoFillFallbackInfo(null);
       setShowEditModal(false);
+      setAutoFillChanges(null);
 
       // Update selected product view in real time
       const updated = {
@@ -2646,7 +2053,10 @@ function App() {
 
   // If App config has not loaded yet
   if (!configLoaded) {
-    return (
+  
+  // Avoid unused variable compiler errors
+
+  return (
       <div className="wizard-overlay">
         <div style={{ color: "#fff", fontSize: "1.2rem", fontWeight: 600 }}>
           Chargement de StockFlow...
@@ -2657,7 +2067,10 @@ function App() {
 
   // Setup Wizard if Config is missing or being edited
   if (!config || isEditingConfig) {
-    return (
+  
+  // Avoid unused variable compiler errors
+
+  return (
       <div className="wizard-overlay">
         <form onSubmit={handleSetup} className="wizard-card">
           <div className="wizard-logo">
@@ -2778,7 +2191,10 @@ function App() {
                       </th>
                       {columns.map(col => {
                         if (!col.visible) return null;
-                        return (
+                      
+  // Avoid unused variable compiler errors
+
+  return (
                           <th
                             key={col.id}
                             style={{
@@ -2817,7 +2233,10 @@ function App() {
                         if (prod.current_stock === 0) stockClass = "stock-empty";
                         else if (prod.min_stock > 0 && prod.current_stock <= prod.min_stock) stockClass = "stock-low";
 
-                        return (
+                      
+  // Avoid unused variable compiler errors
+
+  return (
                           <tr 
                             key={prod.sku}
                             className={`${selectedProduct?.sku === prod.sku ? "selected" : ""} ${selectedSkus.includes(prod.sku) ? "batch-selected" : ""}`}
@@ -2985,7 +2404,10 @@ function App() {
                               const isEditing = editingCell?.sku === prod.sku && editingCell.field === col.id;
                               const isNumericField = ["price", "min_stock", "largeur", "hauteur", "profondeur", "poids", "pack_size"].includes(col.id);
 
-                              return (
+                            
+  // Avoid unused variable compiler errors
+
+  return (
                                 <td
                                   key={col.id}
                                   onDoubleClick={(!isPickerMode && isEditable) ? () => handleCellDoubleClick(prod.sku, col.id, rawValue) : undefined}
@@ -3029,6 +2451,9 @@ function App() {
               </div>
   );
 
+
+  // Avoid unused variable compiler errors
+
   return (
     <div className="app-container">
       {/* Header */}
@@ -3044,6 +2469,58 @@ function App() {
             ● {isOnline ? "Connecté au réseau" : "Hors-ligne"}
           </span>
         </div>
+
+        {globalScrape && (
+          <div 
+            className={`global-scrape-banner global-scrape-banner--${globalScrape.status.toLowerCase()} ${globalScrapeHighlighted ? "scrape-highlight-flash" : ""}`}
+            onClick={() => {
+              const found = products.find(p => p.sku === globalScrape.sku);
+              if (found) {
+                setSelectedProduct(found);
+                setActiveTab("inventory");
+              }
+              if (globalScrape.status === "Complete") {
+                openAutoFillModal(globalScrape.sku, true);
+              }
+            }}
+            title={globalScrape.status === "Complete" ? "Cliquez pour ouvrir la modale d'auto-remplissage et importer les données" : "Cliquez pour afficher les détails du produit"}
+          >
+            <span className="scrape-spin-micro" />
+            <span className="global-scrape-banner__text">
+              {globalScrape.status === "Complete" ? (
+                <span>🎉 Scraping terminé pour <strong>{globalScrape.sku}</strong> ! Cliquez pour importer ✨</span>
+              ) : globalScrape.status === "Failed" ? (
+                <span>⚠️ Échec pour <strong>{globalScrape.sku}</strong> ({globalScrape.message})</span>
+              ) : (
+                <span>⚡ Scraping : <strong>{globalScrape.sku}</strong> ({Math.round(globalScrape.progress * 100)}%) <span className="msg" style={{ opacity: 0.8, marginLeft: "4px" }}>- {globalScrape.message}</span></span>
+              )}
+            </span>
+          </div>
+        )}
+
+        {/* Queue info badge — visible when multiple tasks pending */}
+        {scrapeQueueInfo && scrapeQueueInfo.pending_count > 0 && (
+          <div 
+            className="global-scrape-banner global-scrape-banner--queue"
+            title={`En attente : ${scrapeQueueInfo.pending_skus.join(", ")}`}
+            style={{ 
+              fontSize: "12px", 
+              padding: "4px 12px", 
+              opacity: 0.85, 
+              cursor: "default",
+              background: "var(--bg-tertiary, #2a2a3e)",
+              borderRadius: "6px",
+              marginLeft: "6px"
+            }}
+          >
+            📋 {scrapeQueueInfo.pending_count} en file d'attente
+            {scrapeQueueInfo.pending_count <= 5 && (
+              <span style={{ marginLeft: "6px", opacity: 0.7 }}>
+                ({scrapeQueueInfo.pending_skus.join(", ")})
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="header-actions">
           <button 
@@ -3266,7 +2743,10 @@ function App() {
                           );
                         }
 
-                        return (
+                      
+  // Avoid unused variable compiler errors
+
+  return (
                           <div key={item.audit_id || i} className={`audit-item ${badgeClass}`} style={{ borderBottom: "1px solid var(--border-color)", padding: "0.5rem" }}>
                             <div className="audit-meta" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                               <div>
@@ -3861,7 +3341,10 @@ function App() {
                               conrad: ["www.conrad.fr", "www.conrad.com"]
                             } as Record<string, string[]>)[presetsKey] : [];
 
-                            return (
+                          
+  // Avoid unused variable compiler errors
+
+  return (
                               <div style={{
                                 position: "absolute",
                                 top: "26px",
@@ -4328,6 +3811,16 @@ function App() {
             </div>
             
             <div className="panel-content">
+              <ScrapeProgressBadge 
+                sku={selectedProduct.sku} 
+                onOpenAutoFill={(sku) => openAutoFillModal(sku, true)}
+                onComplete={() => {
+                  if (config) {
+                    syncAndFetch(config);
+                  }
+                }}
+              />
+
               {/* Image Container / Carousel */}
               <div className="image-preview-container">
                 {productImages.length > 0 ? (
@@ -4435,7 +3928,10 @@ function App() {
                         url = `https://www.mouser.fr/Search/Refine?Keyword=${encodeURIComponent(code)}`;
                       }
                       
-                      return (
+                    
+  // Avoid unused variable compiler errors
+
+  return (
                         <div style={{ gridColumn: "span 2", marginTop: "0.2rem" }}>
                           Code VPC:{" "}
                           <button
@@ -4476,7 +3972,10 @@ function App() {
                     const tension = getAttribute(selectedProduct, "tension");
                     
                     if (width || height || depth || weight || tension) {
-                      return (
+                    
+  // Avoid unused variable compiler errors
+
+  return (
                         <div style={{ gridColumn: "span 2", borderTop: "1px solid var(--border-color)", paddingTop: "0.4rem", marginTop: "0.4rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.3rem" }}>
                           {width && <div>Largeur: <strong>{width} mm</strong></div>}
                           {height && <div>Hauteur: <strong>{height} mm</strong></div>}
@@ -4491,7 +3990,10 @@ function App() {
                   {(() => {
                     const notes = getAttribute(selectedProduct, "notes");
                     if (notes) {
-                      return (
+                    
+  // Avoid unused variable compiler errors
+
+  return (
                         <div style={{ gridColumn: "span 2", borderTop: "1px solid var(--border-color)", paddingTop: "0.4rem", marginTop: "0.4rem" }}>
                           <div style={{ fontWeight: "600", marginBottom: "0.3rem", fontSize: "11px", color: "var(--text-secondary)" }}>📝 Notes / Remarques :</div>
                           <div style={{ fontSize: "12px", whiteSpace: "pre-wrap", color: "var(--text-primary)" }}>{notes}</div>
@@ -4518,7 +4020,10 @@ function App() {
                     const docUrl = getAttribute(selectedProduct, "scrape_doc_url");
                     
                     if (priceUrl || imageUrl || docUrl) {
-                      return (
+                    
+  // Avoid unused variable compiler errors
+
+  return (
                         <div style={{ gridColumn: "span 2", borderTop: "1px solid var(--border-color)", paddingTop: "0.4rem", marginTop: "0.4rem" }}>
                           <div style={{ fontWeight: "600", marginBottom: "0.3rem", fontSize: "11px", color: "var(--text-secondary)" }}>Sources de scraping :</div>
                           <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "11px" }}>
@@ -4586,30 +4091,11 @@ function App() {
                 <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
                   <button
                     type="button"
-                    className="btn btn-secondary"
-                    style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "11px" }}
-                    disabled={isScrapingPrice}
-                    onClick={handleScrapePrice}
+                    className="btn btn-premium-scrape"
+                    style={{ flex: 1, padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px" }}
+                    onClick={() => openAutoFillModal(selectedProduct.sku, true)}
                   >
-                    {isScrapingPrice ? "Recherche prix..." : "🔍 Scraper Prix"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "11px" }}
-                    disabled={isScrapingMedia}
-                    onClick={handleScrapeImageSingle}
-                  >
-                    🔍 Scraper Image
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "11px" }}
-                    disabled={isScrapingMedia}
-                    onClick={handleScrapePdfSingle}
-                  >
-                    🔍 Scraper PDF
+                    ✨ Voir les données scrapées
                   </button>
                 </div>
                 {movementError && movementError.includes("déjà en cours") && (
@@ -4749,7 +4235,10 @@ function App() {
                         return clean || "INCONNU";
                       };
                       const sanitizeSku = (sku: string): string => {
-                        return (sku || "").trim()
+                      
+  // Avoid unused variable compiler errors
+
+  return (sku || "").trim()
                           .replace(/\s+/g, "")
                           .replace(/\//g, "-")
                           .replace(/\\/g, "-")
@@ -4782,7 +4271,10 @@ function App() {
                   productPdfs.map((pdf, idx) => {
                     const fileName = pdf.split("/").pop() || "Manuel PDF";
                     const isEditing = editingPdfPath === pdf;
-                    return (
+                  
+  // Avoid unused variable compiler errors
+
+  return (
                       <div key={idx} style={{ display: "flex", gap: "0.3rem" }}>
                         {isEditing ? (
                           <div style={{ display: "flex", gap: "0.2rem", flex: 1 }}>
@@ -5098,7 +4590,10 @@ function App() {
                         );
                       }
 
-                      return (
+                    
+  // Avoid unused variable compiler errors
+
+  return (
                         <div key={item.audit_id} className={`audit-item ${badgeClass}`}>
                           <div className="audit-meta">
                             <span className="audit-badge">{badge}</span>
@@ -5123,7 +4618,7 @@ function App() {
           <div className="modal-container">
             <div className="modal-header">
               <h3>Ajouter un nouveau SKU</h3>
-              <button className="modal-close" onClick={() => { setShowAddModal(false); setAutoFillSource(null); setAutoFillFallbackInfo(null); }}>×</button>
+              <button className="modal-close" onClick={() => { setShowAddModal(false); setAutoFillSource(null); setAutoFillFallbackInfo(null); setAutoFillChanges(null); }}>×</button>
             </div>
             <form onSubmit={handleCreateProduct}>
               <div className="modal-body">
@@ -5153,16 +4648,27 @@ function App() {
                       placeholder="Saisir la référence / le code..."
                       value={autofillCodeInput}
                       onChange={(e) => setAutofillCodeInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleLaunchUnifiedScrape(false); } }}
                       style={{ flex: 1, padding: "0.3rem", fontSize: "12px", height: "32px" }}
                     />
                     <button
                       type="button"
                       className="btn"
                       style={{ padding: "0 1rem", fontSize: "12px", height: "32px" }}
-                      disabled={autoFillLoading["ALL"]}
-                      onClick={() => triggerAutoFillAction(false)}
+                      disabled={scrapeZoneLoading}
+                      onClick={() => handleLaunchUnifiedScrape(false)}
                     >
-                      {autoFillLoading["ALL"] ? "⏳ ..." : "Auto-remplir"}
+                      {scrapeZoneLoading ? "⏳ ..." : "🔍 Scraper"}
+                    </button>
+                  </div>
+                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.4rem" }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ flex: 1, fontSize: "12px", height: "32px", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", backgroundColor: "rgba(99, 102, 241, 0.15)", border: "1px solid rgba(99, 102, 241, 0.3)", color: "var(--primary-color)" }}
+                      onClick={() => openAutoFillModal(newProduct.sku, false)}
+                    >
+                      ✨ Auto-remplissage (Candidats)
                     </button>
                   </div>
                 </div>
@@ -5175,6 +4681,22 @@ function App() {
                 {autoFillFallbackInfo && (
                   <div className="autofill-fallback-info" style={{ fontSize: "11px", color: "var(--warning)", marginTop: "0.2rem", backgroundColor: "rgba(245,158,11,0.1)", padding: "0.4rem", borderRadius: "4px", border: "1px solid rgba(245,158,11,0.2)" }}>
                     ⚠️ {autoFillFallbackInfo}
+                  </div>
+                )}
+
+                {autoFillChanges && (
+                  <div style={{ marginBottom: "0.8rem", backgroundColor: "rgba(99,102,241,0.08)", padding: "0.6rem 0.8rem", borderRadius: "6px", border: "1px solid rgba(99,102,241,0.25)" }}>
+                    <div style={{ fontSize: "11px", fontWeight: "bold", color: "var(--accent)", marginBottom: "0.3rem" }}>📋 Modifications à appliquer</div>
+                    <div style={{ fontSize: "11px", color: "var(--text-secondary)", display: "flex", flexWrap: "wrap", gap: "0.3rem 1rem" }}>
+                      {autoFillChanges.label && <span>🏷️ Désignation → <strong>{autoFillChanges.label}</strong></span>}
+                      {autoFillChanges.brand && <span>🏭 Marque → <strong>{autoFillChanges.brand}</strong></span>}
+                      {autoFillChanges.mpn && <span>🔢 MPN → <strong>{autoFillChanges.mpn}</strong></span>}
+                      {autoFillChanges.price !== undefined && <span>💰 Prix → <strong>{autoFillChanges.price} €</strong></span>}
+                      {autoFillChanges.largeur && <span>📐 Dims → <strong>{autoFillChanges.largeur}×{autoFillChanges.hauteur || "—"}×{autoFillChanges.profondeur || "—"}</strong></span>}
+                      {autoFillChanges.poids && <span>⚖️ Poids → <strong>{autoFillChanges.poids} g</strong></span>}
+                      {autoFillChanges.image_urls && autoFillChanges.image_urls.length > 0 && <span>🖼️ {autoFillChanges.image_urls.length} image(s)</span>}
+                    </div>
+                    <div style={{ fontSize: "10px", color: "var(--text-tertiary)", marginTop: "0.3rem" }}>Vérifie les champs ci-dessous puis clique sur "Créer" pour enregistrer.</div>
                   </div>
                 )}
 
@@ -5208,15 +4730,6 @@ function App() {
                             placeholder="Identique SKU si vide"
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir MPN"
-                          disabled={autoFillLoading["mpn"]}
-                          onClick={() => handleAutoFill(false, "mpn")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -5236,15 +4749,6 @@ function App() {
                             placeholder="ex: Siemens S7-1500 PS 60W"
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Désignation"
-                          disabled={autoFillLoading["label"]}
-                          onClick={() => handleAutoFill(false, "label")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5261,15 +4765,6 @@ function App() {
                             placeholder="ex: Siemens"
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Marque"
-                          disabled={autoFillLoading["brand"]}
-                          onClick={() => handleAutoFill(false, "brand")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -5296,10 +4791,10 @@ function App() {
                           alignItems: "center",
                           gap: "0.2rem"
                         }}
-                        disabled={isFindingReseller}
-                        onClick={() => handleFindReseller(false)}
+                        disabled={scrapeZoneLoading}
+                        onClick={() => handleLaunchUnifiedScrape(false)}
                       >
-                        {isFindingReseller ? "⏳ ..." : "🔍 Trouver un revendeur"}
+                        {scrapeZoneLoading ? "⏳ ..." : "🔍 Rechercher un revendeur"}
                       </button>
                     )}
                   </div>
@@ -5418,15 +4913,6 @@ function App() {
                             onChange={(e) => setNewProduct(prev => ({ ...prev, price: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Prix"
-                          disabled={autoFillLoading["price"]}
-                          onClick={() => handleAutoFill(false, "price")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5441,15 +4927,6 @@ function App() {
                             onChange={(e) => setNewProduct(prev => ({ ...prev, pack_size: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Taille Lot"
-                          disabled={autoFillLoading["pack_size"]}
-                          onClick={() => handleAutoFill(false, "pack_size")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -5471,15 +4948,6 @@ function App() {
                             onChange={(e) => setNewProduct(prev => ({ ...prev, largeur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Largeur"
-                          disabled={autoFillLoading["largeur"]}
-                          onClick={() => handleAutoFill(false, "largeur")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5495,15 +4963,6 @@ function App() {
                             onChange={(e) => setNewProduct(prev => ({ ...prev, hauteur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Hauteur"
-                          disabled={autoFillLoading["hauteur"]}
-                          onClick={() => handleAutoFill(false, "hauteur")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5519,15 +4978,6 @@ function App() {
                             onChange={(e) => setNewProduct(prev => ({ ...prev, profondeur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Profondeur"
-                          disabled={autoFillLoading["profondeur"]}
-                          onClick={() => handleAutoFill(false, "profondeur")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5543,15 +4993,6 @@ function App() {
                             onChange={(e) => setNewProduct(prev => ({ ...prev, poids: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Poids"
-                          disabled={autoFillLoading["poids"]}
-                          onClick={() => handleAutoFill(false, "poids")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -5576,7 +5017,7 @@ function App() {
 
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => { setShowAddModal(false); setAutoFillSource(null); }}>Annuler</button>
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowAddModal(false); setAutoFillSource(null); setAutoFillChanges(null); }}>Annuler</button>
                 <button type="submit" className="btn">Créer le SKU</button>
               </div>
             </form>
@@ -5590,7 +5031,7 @@ function App() {
           <div className="modal-container">
             <div className="modal-header">
               <h3>Modifier le SKU : {editProduct.sku}</h3>
-              <button className="modal-close" onClick={() => { setShowEditModal(false); setAutoFillSource(null); setAutoFillFallbackInfo(null); }}>×</button>
+              <button className="modal-close" onClick={() => { setShowEditModal(false); setAutoFillSource(null); setAutoFillFallbackInfo(null); setAutoFillChanges(null); }}>×</button>
             </div>
             <form onSubmit={handleEditProduct}>
               <div className="modal-body">
@@ -5623,10 +5064,20 @@ function App() {
                       type="button"
                       className="btn"
                       style={{ padding: "0 1rem", fontSize: "12px", height: "32px" }}
-                      disabled={autoFillLoading["ALL"]}
-                      onClick={() => triggerAutoFillAction(true)}
+                      disabled={scrapeZoneLoading}
+                      onClick={() => handleLaunchUnifiedScrape(true)}
                     >
-                      {autoFillLoading["ALL"] ? "⏳ ..." : "Auto-remplir"}
+                      {scrapeZoneLoading ? "⏳ ..." : "🔍 Scraper"}
+                    </button>
+                  </div>
+                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.4rem" }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ flex: 1, fontSize: "12px", height: "32px", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", backgroundColor: "rgba(99, 102, 241, 0.15)", border: "1px solid rgba(99, 102, 241, 0.3)", color: "var(--primary-color)" }}
+                      onClick={() => openAutoFillModal(editProduct.sku, true)}
+                    >
+                      ✨ Auto-remplissage (Candidats)
                     </button>
                   </div>
                 </div>
@@ -5639,6 +5090,22 @@ function App() {
                 {autoFillFallbackInfo && (
                   <div className="autofill-fallback-info" style={{ fontSize: "11px", color: "var(--warning)", marginTop: "0.2rem", backgroundColor: "rgba(245,158,11,0.1)", padding: "0.4rem", borderRadius: "4px", border: "1px solid rgba(245,158,11,0.2)" }}>
                     ⚠️ {autoFillFallbackInfo}
+                  </div>
+                )}
+
+                {autoFillChanges && (
+                  <div style={{ marginBottom: "0.8rem", backgroundColor: "rgba(99,102,241,0.08)", padding: "0.6rem 0.8rem", borderRadius: "6px", border: "1px solid rgba(99,102,241,0.25)" }}>
+                    <div style={{ fontSize: "11px", fontWeight: "bold", color: "var(--accent)", marginBottom: "0.3rem" }}>📋 Modifications à appliquer</div>
+                    <div style={{ fontSize: "11px", color: "var(--text-secondary)", display: "flex", flexWrap: "wrap", gap: "0.3rem 1rem" }}>
+                      {autoFillChanges.label && <span>🏷️ Désignation → <strong>{autoFillChanges.label}</strong></span>}
+                      {autoFillChanges.brand && <span>🏭 Marque → <strong>{autoFillChanges.brand}</strong></span>}
+                      {autoFillChanges.mpn && <span>🔢 MPN → <strong>{autoFillChanges.mpn}</strong></span>}
+                      {autoFillChanges.price !== undefined && <span>💰 Prix → <strong>{autoFillChanges.price} €</strong></span>}
+                      {autoFillChanges.largeur && <span>📐 Dims → <strong>{autoFillChanges.largeur}×{autoFillChanges.hauteur || "—"}×{autoFillChanges.profondeur || "—"}</strong></span>}
+                      {autoFillChanges.poids && <span>⚖️ Poids → <strong>{autoFillChanges.poids} g</strong></span>}
+                      {autoFillChanges.image_urls && autoFillChanges.image_urls.length > 0 && <span>🖼️ {autoFillChanges.image_urls.length} image(s)</span>}
+                    </div>
+                    <div style={{ fontSize: "10px", color: "var(--text-tertiary)", marginTop: "0.3rem" }}>Vérifie les champs ci-dessous puis clique sur "Enregistrer" pour sauvegarder.</div>
                   </div>
                 )}
 
@@ -5660,15 +5127,6 @@ function App() {
                             placeholder="Identique SKU si vide"
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir MPN"
-                          disabled={autoFillLoading["mpn"]}
-                          onClick={() => handleAutoFill(true, "mpn")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -5688,15 +5146,6 @@ function App() {
                             placeholder="ex: Siemens S7-1500 PS 60W"
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Désignation"
-                          disabled={autoFillLoading["label"]}
-                          onClick={() => handleAutoFill(true, "label")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5713,15 +5162,6 @@ function App() {
                             placeholder="ex: Siemens"
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Marque"
-                          disabled={autoFillLoading["brand"]}
-                          onClick={() => handleAutoFill(true, "brand")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -5748,10 +5188,10 @@ function App() {
                           alignItems: "center",
                           gap: "0.2rem"
                         }}
-                        disabled={isFindingReseller}
-                        onClick={() => handleFindReseller(true)}
+                        disabled={scrapeZoneLoading}
+                        onClick={() => handleLaunchUnifiedScrape(true)}
                       >
-                        {isFindingReseller ? "⏳ ..." : "🔍 Trouver un revendeur"}
+                        {scrapeZoneLoading ? "⏳ ..." : "🔍 Rechercher un revendeur"}
                       </button>
                     )}
                   </div>
@@ -5849,15 +5289,6 @@ function App() {
                             onChange={(e) => setEditProduct(prev => ({ ...prev, price: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Prix"
-                          disabled={autoFillLoading["price"]}
-                          onClick={() => handleAutoFill(true, "price")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5872,15 +5303,6 @@ function App() {
                             onChange={(e) => setEditProduct(prev => ({ ...prev, pack_size: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Taille Lot"
-                          disabled={autoFillLoading["pack_size"]}
-                          onClick={() => handleAutoFill(true, "pack_size")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -5902,15 +5324,6 @@ function App() {
                             onChange={(e) => setEditProduct(prev => ({ ...prev, largeur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Largeur"
-                          disabled={autoFillLoading["largeur"]}
-                          onClick={() => handleAutoFill(true, "largeur")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5926,15 +5339,6 @@ function App() {
                             onChange={(e) => setEditProduct(prev => ({ ...prev, hauteur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Hauteur"
-                          disabled={autoFillLoading["hauteur"]}
-                          onClick={() => handleAutoFill(true, "hauteur")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5950,15 +5354,6 @@ function App() {
                             onChange={(e) => setEditProduct(prev => ({ ...prev, profondeur: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Profondeur"
-                          disabled={autoFillLoading["profondeur"]}
-                          onClick={() => handleAutoFill(true, "profondeur")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
 
@@ -5974,15 +5369,6 @@ function App() {
                             onChange={(e) => setEditProduct(prev => ({ ...prev, poids: cleanNumericInput(e.target.value) }))}
                           />
                         </div>
-                        <button
-                          type="button"
-                          className="btn-field-autofill"
-                          title="Auto-remplir Poids"
-                          disabled={autoFillLoading["poids"]}
-                          onClick={() => handleAutoFill(true, "poids")}
-                        >
-                          🔍
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -6007,7 +5393,7 @@ function App() {
 
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => { setShowEditModal(false); setAutoFillSource(null); }}>Annuler</button>
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowEditModal(false); setAutoFillSource(null); setAutoFillChanges(null); }}>Annuler</button>
                 <button type="submit" className="btn">Enregistrer</button>
               </div>
             </form>
@@ -6047,8 +5433,8 @@ function App() {
         {uniquePrices.map(p => <option key={p} value={p} />)}
       </datalist>
 
-      {/* Scrape Progress Modal */}
-      {scrapeModalOpen && (
+      {/* Scrape Progress Modal (Disabled) */}
+      {false && scrapeModalOpen && (
         <div 
           className="modal-overlay"
           style={isScrapeModalMinimized ? {
@@ -6155,7 +5541,10 @@ function App() {
                       >
                         {scrapedImageCandidates.map((candidate, idx) => {
                           const isChecked = selectedImageUrls.includes(candidate.url);
-                          return (
+                        
+  // Avoid unused variable compiler errors
+
+  return (
                             <div
                               key={idx}
                               onClick={() => {
@@ -6253,7 +5642,10 @@ function App() {
                       >
                         {scrapedPdfCandidates.map((candidate, idx) => {
                           const isSelected = selectedPdfUrl === candidate.url;
-                          return (
+                        
+  // Avoid unused variable compiler errors
+
+  return (
                             <div
                               key={idx}
                               className="candidate-item"
@@ -6336,7 +5728,10 @@ function App() {
                             { label: "Certificat", value: "certificat" }
                           ].map((chip) => {
                             const isActive = selectedPdfType === chip.value;
-                            return (
+                          
+  // Avoid unused variable compiler errors
+
+  return (
                               <button
                                 key={chip.value}
                                 type="button"
@@ -6375,7 +5770,10 @@ function App() {
                           statusIcon = "❌";
                           statusClass = "step-error";
                         }
-                        return (
+                      
+  // Avoid unused variable compiler errors
+
+  return (
                           <div key={idx} className={`scrape-step ${statusClass}`} style={{ display: "flex", alignItems: "flex-start", gap: "0.8rem" }}>
                             <span className="step-icon" style={{ fontSize: "1.2rem", lineHeight: 1 }}>{statusIcon}</span>
                             <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", flex: 1, minWidth: 0 }}>
@@ -6510,7 +5908,10 @@ function App() {
               >
                 {pendingScrapeDetails.price_candidates?.map((candidate: any, idx: number) => {
                   const unitPrice = parseFloat((candidate.price / candidate.pack_size).toFixed(3));
-                  return (
+                
+  // Avoid unused variable compiler errors
+
+  return (
                     <div 
                       key={idx}
                       onClick={() => handleSelectScrapedPrice(candidate)}
@@ -6814,6 +6215,32 @@ function App() {
         >
           {toast.type === "success" ? "✔️" : toast.type === "error" ? "❌" : "ℹ️"} {toast.message}
         </div>
+      )}
+      {/* Universal Scraper AutoFill Modal */}
+      {config && (
+        <AutoFillModal
+          isOpen={autoFillModalOpen}
+          onClose={() => setAutoFillModalOpen(false)}
+          sku={autoFillModalSku}
+          onApply={handleAutoFillApply}
+          networkPath={config.network_path}
+          currentProduct={autoFillModalIsEdit ? {
+            label: editProduct.label,
+            brand: editProduct.brand,
+            mpn: editProduct.mpn,
+            price: editProduct.price,
+            poids: editProduct.poids,
+            largeur: editProduct.largeur,
+            hauteur: editProduct.hauteur,
+            profondeur: editProduct.profondeur,
+            pack_size: editProduct.pack_size ? parseFloat(String(editProduct.pack_size)) || undefined : undefined,
+          } : {
+            label: newProduct.label,
+            brand: newProduct.brand,
+            mpn: newProduct.mpn,
+            price: newProduct.price,
+          }}
+        />
       )}
     </div>
   );

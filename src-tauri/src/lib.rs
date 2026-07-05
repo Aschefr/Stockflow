@@ -4,6 +4,11 @@ mod db;
 mod events;
 mod csv_importer;
 mod scraper;
+mod scraper_http;
+mod scraper_extractor;
+mod scraper_candidates;
+mod scraper_engine;
+mod scraper_task;
 mod backup;
 mod providers;
 mod searxng;
@@ -12,6 +17,7 @@ use config::{AppConfig, load_config_internal, save_config_internal};
 use db::{Product, ProductHistoryItem, AuditLogItem};
 use rusqlite::Connection;
 use serde_json::json;
+use tauri::Manager;
 
 #[tauri::command]
 fn get_config() -> Option<AppConfig> {
@@ -177,6 +183,11 @@ fn create_product(
     let mut final_attributes = attributes.clone();
     let mut final_scrape_price_url = attributes.get("scrape_price_url").and_then(|v| v.as_str()).map(|s| s.to_string());
     let mut final_scrape_image_url = attributes.get("scrape_image_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    if final_scrape_image_url.is_none() {
+        final_scrape_image_url = attributes.get("scrape_image_urls").and_then(|v| v.as_str()).and_then(|s| {
+            serde_json::from_str::<Vec<String>>(s).ok().and_then(|arr| arr.into_iter().next())
+        });
+    }
     let mut final_scrape_doc_url = attributes.get("scrape_doc_url").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // Diff champ par champ pour l'audit log
@@ -279,12 +290,13 @@ fn create_product(
 
                 // Comparer les dimensions, poids et notes dans les attributs
                 if let Ok(old_attrs) = serde_json::from_str::<serde_json::Value>(&old.attributes) {
-                    let fields_to_check = vec![
+                    let fields_to_check: Vec<(&str, &str)> = vec![
                         ("largeur", "Largeur"),
                         ("hauteur", "Hauteur"),
                         ("profondeur", "Profondeur"),
                         ("poids", "Poids"),
                         ("notes", "Notes"),
+                        ("scrape_image_urls", "Images"),
                     ];
                     for (key, display_name) in fields_to_check {
                         let old_val = old_attrs.get(key).map(|v| match v {
@@ -1663,6 +1675,117 @@ async fn test_searxng_instances(urls: Vec<String>) -> Result<std::collections::H
     Ok(results)
 }
 
+// ─── New Universal Scraper Commands ───────────────────────────────────────────
+
+#[tauri::command]
+async fn start_background_scrape(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, std::sync::Arc<scraper_task::ScrapeTaskManager>>,
+    sku: String,
+    vpc_site: Option<String>,
+    vpc_code: Option<String>,
+    mpn: Option<String>,
+    brand: Option<String>,
+) -> Result<(), String> {
+    let has_params = vpc_site.is_some() || vpc_code.is_some() || mpn.is_some() || brand.is_some();
+    if has_params {
+        let params = scraper_task::ScrapeParams { vpc_site, vpc_code, mpn, brand };
+        state.enqueue_with_params(sku, scraper_task::TaskPriority::High, Some(params)).await;
+    } else {
+        state.enqueue(sku, scraper_task::TaskPriority::Normal).await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn cancel_background_scrape(state: tauri::State<'_, std::sync::Arc<scraper_task::ScrapeTaskManager>>, sku: String) -> Result<(), String> {
+    state.cancel(&sku).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn resume_background_scrape(state: tauri::State<'_, std::sync::Arc<scraper_task::ScrapeTaskManager>>, sku: String) -> Result<(), String> {
+    state.resume(sku).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_scrape_candidates(sku: String) -> Result<Option<scraper_candidates::ScrapeCandidates>, String> {
+    let config = load_config_internal().ok_or("Configuration introuvable")?;
+    Ok(scraper_candidates::load_candidates(&config.network_path, &sku))
+}
+
+#[tauri::command]
+async fn get_scrape_status(state: tauri::State<'_, std::sync::Arc<scraper_task::ScrapeTaskManager>>, sku: String) -> Result<Option<serde_json::Value>, String> {
+    if let Some(status) = state.get_status(&sku).await {
+        Ok(Some(json!({
+            "sku": status.sku,
+            "status": format!("{:?}", status.status),
+            "progress": status.progress,
+            "message": status.message,
+        })))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+async fn get_queue_info(state: tauri::State<'_, std::sync::Arc<scraper_task::ScrapeTaskManager>>) -> Result<serde_json::Value, String> {
+    let (pending_count, pending_skus, active_sku, active_skus) = state.get_queue_info().await;
+    Ok(json!({
+        "pending_count": pending_count,
+        "pending_skus": pending_skus,
+        "active_sku": active_sku,
+        "active_skus": active_skus,
+    }))
+}
+
+/// Applique les sélections de l'AutoFillModal : télécharge les images et PDFs sélectionnés
+/// depuis les candidats scrapés vers le stockage réseau.
+#[tauri::command]
+async fn apply_scrape_selections(
+    window: tauri::Window,
+    sku: String,
+    network_path: String,
+    trigramme: String,
+    selected_image_urls: Vec<String>,
+    selected_pdf_url: Option<String>,
+    selected_pdf_type: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let config = load_config_internal().ok_or("Configuration introuvable")?;
+    let image_conv = config.image_rename_convention.clone().unwrap_or_else(|| "{SKU}_{Index}.jpg".to_string());
+    let pdf_conv = config.pdf_rename_convention.clone().unwrap_or_else(|| "{SKU}_datasheet.pdf".to_string());
+
+    let mut saved_images: Vec<String> = Vec::new();
+    let mut saved_pdf: Option<String> = None;
+    let mut errors: Vec<String> = Vec::new();
+
+    // Télécharger les images sélectionnées
+    if !selected_image_urls.is_empty() {
+        match scraper::save_selected_images_internal(&sku, selected_image_urls, &image_conv, &network_path) {
+            Ok(paths) => saved_images = paths,
+            Err(e) => errors.push(format!("Images : {}", e)),
+        }
+    }
+
+    // Télécharger le PDF sélectionné
+    if let Some(ref pdf_url) = selected_pdf_url {
+        if !pdf_url.is_empty() {
+            let doc_type = selected_pdf_type.as_deref();
+            match scraper::save_selected_pdf_internal(&sku, pdf_url, &pdf_conv, &network_path, &trigramme, doc_type) {
+                Ok(path) => saved_pdf = Some(path),
+                Err(e) => errors.push(format!("PDF : {}", e)),
+            }
+        }
+    }
+
+    Ok(json!({
+        "saved_images": saved_images,
+        "saved_pdf": saved_pdf,
+        "errors": errors,
+    }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
 
@@ -1677,6 +1800,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .setup(|app| {
+            let task_manager = std::sync::Arc::new(scraper_task::ScrapeTaskManager::new(app.handle().clone()));
+            app.manage(task_manager);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
@@ -1723,8 +1851,17 @@ pub fn run() {
             select_image_file,
             save_screenshot,
             get_sku_screenshot_path,
-            test_searxng_instances
+            test_searxng_instances,
+            // New universal scraper commands
+            start_background_scrape,
+            cancel_background_scrape,
+            resume_background_scrape,
+            get_scrape_candidates,
+            get_scrape_status,
+            get_queue_info,
+            apply_scrape_selections
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

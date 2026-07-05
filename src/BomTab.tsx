@@ -105,10 +105,12 @@ export default function BomTab({
   products, 
   renderProductTable,
   selectedSkus,
-  setSelectedSkus
+  setSelectedSkus,
+  onEditingChange
 }: any) {
   const [boms, setBoms] = useState<Bom[]>([]);
   const [editingBom, setEditingBom] = useState<Bom | null>(null);
+  useEffect(() => { onEditingChange?.(editingBom !== null); }, [editingBom]);
 
   const [excelColumns, setExcelColumns] = useState(() => {
     const saved = localStorage.getItem("sf_bom_excel_columns");
