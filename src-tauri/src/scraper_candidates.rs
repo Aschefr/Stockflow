@@ -65,6 +65,10 @@ pub struct ResourceCandidate {
     pub domain: String,
     pub source: CandidateSource,
     pub file_type: String,  // "pdf", "jpg", "png"
+    /// Score de pertinence : 0.0 (inconnu) à 1.0 (source officielle structurée).
+    /// Rétrocompatible avec les caches existants via #[serde(default)].
+    #[serde(default)]
+    pub confidence: f32,
 }
 
 // ─── Source Info ──────────────────────────────────────────────────────────────
@@ -208,8 +212,8 @@ impl ScrapeCandidates {
         Self::reselect_best(&mut self.pack_size_candidates);
     }
 
-    /// Ajoute un candidat PDF.
-    pub fn add_pdf(&mut self, url: &str, title: &str, domain: &str, source: CandidateSource) {
+    /// Ajoute un candidat PDF avec score de confiance.
+    pub fn add_pdf(&mut self, url: &str, title: &str, domain: &str, source: CandidateSource, confidence: f32) {
         if url.is_empty() || self.pdf_candidates.iter().any(|c| c.url == url) { return; }
         self.pdf_candidates.push(ResourceCandidate {
             url: url.to_string(),
@@ -217,11 +221,14 @@ impl ScrapeCandidates {
             domain: domain.to_string(),
             source,
             file_type: "pdf".to_string(),
+            confidence,
         });
+        // Trier par confiance décroissante pour que les meilleures sources apparaissent en premier
+        self.pdf_candidates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
     }
 
-    /// Ajoute un candidat image.
-    pub fn add_image(&mut self, url: &str, title: &str, domain: &str, file_type: &str, source: CandidateSource) {
+    /// Ajoute un candidat image avec score de confiance.
+    pub fn add_image(&mut self, url: &str, title: &str, domain: &str, file_type: &str, source: CandidateSource, confidence: f32) {
         if url.is_empty() || self.image_candidates.iter().any(|c| c.url == url) { return; }
         // Blacklist images non pertinentes
         let url_lower = url.to_lowercase();
@@ -236,7 +243,10 @@ impl ScrapeCandidates {
             domain: domain.to_string(),
             source,
             file_type: file_type.to_string(),
+            confidence,
         });
+        // Trier par confiance décroissante pour que les meilleures images apparaissent en premier
+        self.image_candidates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
     }
 
     /// Intègre les données extraites d'une page dans les candidats.
@@ -293,10 +303,10 @@ impl ScrapeCandidates {
             self.add_pack_size(ps, make_source(), 0.8);
         }
         for pdf in &data.pdf_urls {
-            self.add_pdf(&pdf.url, &pdf.title, &pdf.domain, make_source());
+            self.add_pdf(&pdf.url, &pdf.title, &pdf.domain, make_source(), pdf.confidence);
         }
         for img in &data.image_urls {
-            self.add_image(&img.url, &img.title, &img.domain, &img.resource_type, make_source());
+            self.add_image(&img.url, &img.title, &img.domain, &img.resource_type, make_source(), img.confidence);
         }
     }
 }

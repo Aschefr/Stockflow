@@ -5,6 +5,24 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.4.4] - 2026-07-08
+
+### Pertinence de recherche, scoring, correctifs d'auto-remplissage et confirmations inline
+- **Scoring & Tri de Pertinence (Images et PDFs) :**
+  - Ajout du champ `confidence` sur les ressources candidates pour trier automatiquement les meilleurs résultats en premier.
+  - Attribution de coefficients de confiance : JSON-LD (`0.95`/`0.90`), Cloudinary RS (`0.92`), Open Graph `og:image` (`0.85`), liens explicites du HTML (`0.80`), HTML brut (`0.40`/`0.35`) et SearXNG (`0.50`/`0.60`).
+  - Affichage de badges visuels colorés `Officiel` (vert) et `Probable` (orange) dans la modale d'auto-remplissage.
+- **Importation & Remplissage Direct Résilient :**
+  - Correction de l'erreur d'importation réseau lors de la création d'un produit (le SKU n'existait pas encore en DB).
+  - Ouverture automatique et pré-remplissage du formulaire d'édition lors d'une application d'auto-remplissage initiée depuis la fiche de détails du produit.
+- **Renommage intelligent & Résolution de collisions PDF :**
+  - Le backend conserve le nom de fichier d'origine de l'URL s'il est plus descriptif que le mot générique `"datasheet"`.
+  - Résolution des doublons physiques sur le lecteur réseau par ajout de suffixe incrémental (ex: `_1.pdf`) pour éviter que des notices ne s'écrasent entre elles.
+- **Zéro Dialogue Système (Confirmation Inline de suppression) :**
+  - Remplacement du dernier `confirm()` bloquant du navigateur par un mini menu de confirmation `[Confirmer]` / `[Annuler]` intégré directement aux vignettes d'images et lignes de notices PDF.
+- **Amélioration de la Recherche SearXNG :**
+  - La recherche de datasheet utilise prioritairement le MPN fabricant au SKU interne, et applique le format `filetype:pdf` pour cibler les résultats les plus qualitatifs.
+
 ## [1.4.3] - 2026-06-23
 
 ### Choix Explicite des Dimensions & Parcours d'Onglets Séquentiel

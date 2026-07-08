@@ -1088,43 +1088,7 @@ table.spreadsheet tr.batch-selected {
   color: #fff !important;
 }
 
-/* Scrape modal steps */
-.scrape-steps-list {
-  background-color: var(--bg-tertiary);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 1.25rem;
-}
 
-.scrape-step {
-  transition: all 0.3s ease;
-}
-
-.scrape-step.step-pending {
-  opacity: 0.5;
-}
-
-.scrape-step.step-active {
-  opacity: 1;
-}
-
-.scrape-step.step-active .step-icon {
-  animation: spin 1.5s linear infinite;
-  display: inline-block;
-}
-
-.scrape-step.step-success .step-icon {
-  color: var(--success);
-}
-
-.scrape-step.step-error .step-icon {
-  color: var(--danger);
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
 
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
@@ -1814,6 +1778,83 @@ table.spreadsheet tr.batch-selected {
     border-color: rgba(139, 92, 246, 0.9);
     transform: scale(1.04);
   }
+}
+
+/* New layouts for clean refactoring components */
+.autofill-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+  background-color: var(--bg-secondary);
+  padding: 0.8rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+.autofill-box-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.autofill-box-row select {
+  width: 160px;
+  padding: 0.3rem;
+  font-size: 12px;
+  height: 32px;
+}
+
+.autofill-box-row input {
+  flex: 1;
+  padding: 0.3rem;
+  font-size: 12px;
+  height: 32px;
+}
+
+.autofill-box-row button {
+  padding: 0 1rem;
+  font-size: 12px;
+  height: 32px;
+}
+
+.autofill-fallback-message {
+  font-size: 11px;
+  color: var(--warning);
+  margin-top: 0.2rem;
+  background-color: rgba(245, 158, 11, 0.1);
+  padding: 0.4rem;
+  border-radius: 4px;
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.autofill-changes-box {
+  margin-bottom: 0.8rem;
+  background-color: rgba(99, 102, 241, 0.08);
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+}
+
+.autofill-changes-title {
+  font-size: 11px;
+  font-weight: bold;
+  color: var(--accent);
+  margin-bottom: 0.3rem;
+}
+
+.autofill-changes-list {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+}
+
+.autofill-changes-help {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-top: 0.3rem;
 }
 
 

@@ -482,26 +482,62 @@ fn upload_media(
     file_data: Vec<u8>,
     trigramme: String,
 ) -> Result<String, String> {
+    let sku_upper = sku.to_uppercase();
+
     let dest_dir = if media_type == "image" {
         std::path::Path::new(&network_path).join("images")
     } else {
-        std::path::Path::new(&network_path).join("documents").join(&sku)
+        // Résoudre la structure hiérarchique documents/{Brand}/{Category}/{SubCategory}/{SKU}/
+        // comme le fait le scraper, avec fallback si la DB est inaccessible.
+        let hierarchical = events::get_db_path().and_then(|db_path| {
+            Connection::open(&db_path).ok().and_then(|conn| {
+                conn.query_row(
+                    "SELECT brand, category, sub_category FROM products WHERE sku = ?",
+                    [&sku_upper],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                            row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        ))
+                    },
+                ).ok()
+            })
+        });
+
+        if let Some((brand, category, sub_category)) = hierarchical {
+            std::path::Path::new(&network_path)
+                .join("documents")
+                .join(csv_importer::sanitize_folder_name(&brand, "INCONNU"))
+                .join(csv_importer::sanitize_folder_name(&category, "INCONNU"))
+                .join(csv_importer::sanitize_folder_name(&sub_category, "INCONNU"))
+                .join(&sku_upper)
+        } else {
+            // Fallback : structure plate si la DB est inaccessible
+            std::path::Path::new(&network_path).join("documents").join(&sku_upper)
+        }
     };
-    
-    let _ = std::fs::create_dir_all(&dest_dir);
+
+    std::fs::create_dir_all(&dest_dir).map_err(|e| format!("Impossible de créer le dossier destination : {}", e))?;
     let dest_path = dest_dir.join(&file_name);
-    
+
     std::fs::write(&dest_path, file_data).map_err(|e| e.to_string())?;
-    
-    let relative_path = if media_type == "image" {
-        format!("images/{}", file_name)
-    } else {
-        format!("documents/{}/{}", sku, file_name)
-    };
-    
+
+    // Calculer le chemin relatif au network_path (séparateurs UNIX pour cohérence)
+    let relative_path = dest_path
+        .strip_prefix(&network_path)
+        .map(|p| p.to_string_lossy().to_string().replace('\\', "/"))
+        .unwrap_or_else(|_| {
+            if media_type == "image" {
+                format!("images/{}", file_name)
+            } else {
+                format!("documents/{}/{}", sku_upper, file_name)
+            }
+        });
+
     let _ = events::write_audit_file(
         &network_path,
-        &sku,
+        &sku_upper,
         &trigramme,
         "UPLOAD_MEDIA",
         Some(&media_type),
@@ -509,24 +545,44 @@ fn upload_media(
         None,
         None,
     );
-    
+
+    // Mettre à jour image_path / pdf_path en DB si aucune référence n'est encore définie
+    if let Some(db_path) = events::get_db_path() {
+        if let Ok(conn) = Connection::open(&db_path) {
+            let col = if media_type == "image" { "image_path" } else { "pdf_path" };
+            let current: Option<String> = conn.query_row(
+                &format!("SELECT {} FROM products WHERE sku = ?", col),
+                [&sku_upper],
+                |row| row.get(0),
+            ).unwrap_or(None);
+            if current.is_none() {
+                let _ = conn.execute(
+                    &format!("UPDATE products SET {} = ? WHERE sku = ?", col),
+                    (&relative_path, &sku_upper),
+                );
+            }
+        }
+    }
+
     Ok(relative_path)
 }
 
-#[tauri::command]
-fn list_sku_images(network_path: String, sku: String) -> Result<Vec<String>, String> {
-    let images_dir = std::path::Path::new(&network_path).join("images");
+/// Version synchrone interne — utilisable depuis un contexte bloquant (ex: delete_media).
+fn list_sku_images_sync(network_path: &str, sku: &str) -> Result<Vec<String>, String> {
+    let images_dir = std::path::Path::new(network_path).join("images");
     if !images_dir.exists() {
         return Ok(Vec::new());
     }
     let mut images = Vec::new();
     let sku_upper = sku.to_uppercase();
-    if let Ok(entries) = std::fs::read_dir(images_dir) {
+    if let Ok(entries) = std::fs::read_dir(&images_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
                 if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                     let name_upper = file_name.to_uppercase();
+                    // Exclure les thumbnails du listing principal
+                    if name_upper.starts_with("THUMB_") { continue; }
                     if name_upper.starts_with(&format!("{}_", sku_upper)) || name_upper.starts_with(&format!("{}.", sku_upper)) {
                         images.push(format!("images/{}", file_name));
                     }
@@ -539,7 +595,14 @@ fn list_sku_images(network_path: String, sku: String) -> Result<Vec<String>, Str
 }
 
 #[tauri::command]
-fn list_sku_pdfs(network_path: String, sku: String) -> Result<Vec<String>, String> {
+async fn list_sku_images(network_path: String, sku: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        list_sku_images_sync(&network_path, &sku)
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Version synchrone interne — utilisable depuis un contexte bloquant (ex: delete_media).
+fn list_sku_pdfs_sync(network_path: &str, sku: &str) -> Result<Vec<String>, String> {
     let db_path = events::get_db_path().ok_or("Base de données cache introuvable")?;
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     
@@ -558,7 +621,7 @@ fn list_sku_pdfs(network_path: String, sku: String) -> Result<Vec<String>, Strin
     ).unwrap_or((None, String::new(), String::new(), String::new()));
 
     let pdfs_dir = if let Some(ref path) = pdf_path_opt {
-        let full_path = std::path::Path::new(&network_path).join(path);
+        let full_path = std::path::Path::new(network_path).join(path);
         if full_path.is_file() {
             full_path.parent().unwrap_or(std::path::Path::new("")).to_path_buf()
         } else {
@@ -568,8 +631,8 @@ fn list_sku_pdfs(network_path: String, sku: String) -> Result<Vec<String>, Strin
         let clean_brand = csv_importer::sanitize_folder_name(&brand, "INCONNU");
         let clean_category = csv_importer::sanitize_folder_name(&category, "INCONNU");
         let clean_subcategory = csv_importer::sanitize_folder_name(&sub_category, "INCONNU");
-        let clean_sku = db::sanitize_sku(&sku);
-        std::path::Path::new(&network_path)
+        let clean_sku = db::sanitize_sku(sku);
+        std::path::Path::new(network_path)
             .join("documents")
             .join(&clean_brand)
             .join(&clean_category)
@@ -588,7 +651,7 @@ fn list_sku_pdfs(network_path: String, sku: String) -> Result<Vec<String>, Strin
             if path.is_file() {
                 if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                     if file_name.to_lowercase().ends_with(".pdf") {
-                        let relative_to_network = path.strip_prefix(&network_path)
+                        let relative_to_network = path.strip_prefix(network_path)
                             .map(|p| p.to_string_lossy().to_string().replace("\\", "/"))
                             .unwrap_or_else(|_| format!("documents/{}", file_name));
                         pdfs.push(relative_to_network);
@@ -599,6 +662,13 @@ fn list_sku_pdfs(network_path: String, sku: String) -> Result<Vec<String>, Strin
     }
     pdfs.sort();
     Ok(pdfs)
+}
+
+#[tauri::command]
+async fn list_sku_pdfs(network_path: String, sku: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        list_sku_pdfs_sync(&network_path, &sku)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -759,6 +829,8 @@ async fn clean_network_media(network_path: String) -> Result<String, String> {
                     if path.is_file() {
                         if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                             let name_upper = file_name.to_uppercase();
+                            // Les thumbnails sont gérés conjointement à leur image parente
+                            if name_upper.starts_with("THUMB_") { continue; }
                             let mut belongs_to_active = false;
                             for sku in &active_skus {
                                 if name_upper.starts_with(&format!("{}_", sku)) || name_upper.starts_with(&format!("{}.", sku)) {
@@ -767,9 +839,12 @@ async fn clean_network_media(network_path: String) -> Result<String, String> {
                                 }
                             }
                             if !belongs_to_active {
-                                if std::fs::remove_file(path).is_ok() {
+                                if std::fs::remove_file(&path).is_ok() {
                                     deleted_images += 1;
                                 }
+                                // Supprimer également le thumbnail associé s'il existe
+                                let thumb = images_dir.join(format!("thumb_{}", file_name));
+                                let _ = std::fs::remove_file(&thumb);
                             }
                         }
                     }
@@ -777,23 +852,42 @@ async fn clean_network_media(network_path: String) -> Result<String, String> {
             }
         }
         
+        // Parcours récursif de documents/{Brand}/{Category}/{SubCategory}/{SKU}/
+        // On descend jusqu'aux dossiers-feuille (sans sous-dossiers) et on vérifie
+        // si leur nom correspond à un SKU actif.
         let docs_dir = std::path::Path::new(&network_path).join("documents");
         if docs_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&docs_dir) {
+            fn collect_sku_leaf_dirs(
+                dir: &std::path::Path,
+                active_skus: &std::collections::HashSet<String>,
+                deleted: &mut i32,
+            ) {
+                let Ok(entries) = std::fs::read_dir(dir) else { return };
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_dir() {
+                    if !path.is_dir() { continue; }
+
+                    // Un dossier-feuille n'a aucun sous-dossier
+                    let has_subdirs = std::fs::read_dir(&path)
+                        .map(|mut e| e.any(|e| e.map(|e| e.path().is_dir()).unwrap_or(false)))
+                        .unwrap_or(false);
+
+                    if has_subdirs {
+                        // Descendre dans la hiérarchie
+                        collect_sku_leaf_dirs(&path, active_skus, deleted);
+                    } else {
+                        // Dossier-feuille : comparer son nom au SKU attendu
                         if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                            let dir_upper = dir_name.to_uppercase();
-                            if !active_skus.contains(&dir_upper) {
-                                if std::fs::remove_dir_all(path).is_ok() {
-                                    deleted_folders += 1;
+                            if !active_skus.contains(&dir_name.to_uppercase()) {
+                                if std::fs::remove_dir_all(&path).is_ok() {
+                                    *deleted += 1;
                                 }
                             }
                         }
                     }
                 }
             }
+            collect_sku_leaf_dirs(&docs_dir, &active_skus, &mut deleted_folders);
         }
         
         Ok(format!("Nettoyage réussi : {} images et {} dossiers de documents obsolètes supprimés.", deleted_images, deleted_folders))
@@ -822,6 +916,16 @@ fn delete_media(
     }
     
     std::fs::remove_file(&full_path).map_err(|e| format!("Erreur lors de la suppression : {}", e))?;
+
+    // Supprimer le thumbnail associé s'il existe (ne pas remonter d'erreur si absent)
+    if media_type == "image" {
+        if let Some(file_name) = full_path.file_name().and_then(|n| n.to_str()) {
+            if let Some(parent) = full_path.parent() {
+                let thumb_path = parent.join(format!("thumb_{}", file_name));
+                let _ = std::fs::remove_file(&thumb_path);
+            }
+        }
+    }
     
     let _ = events::write_audit_file(
         &network_path,
@@ -846,7 +950,8 @@ fn delete_media(
                 
                 if let Some(ref cp) = current_pdf {
                     if cp.replace("\\", "/") == path_str {
-                        let remaining_pdfs = list_sku_pdfs(network_path.clone(), sku.clone()).unwrap_or_default();
+                        // Utiliser la variante synchrone (on est déjà dans un contexte bloquant)
+                        let remaining_pdfs = list_sku_pdfs_sync(&network_path, &sku).unwrap_or_default();
                         let next_pdf = remaining_pdfs.first().cloned();
                         let _ = conn.execute("UPDATE products SET pdf_path = ? WHERE sku = ?", (next_pdf, &sku_upper));
                     }
@@ -860,7 +965,8 @@ fn delete_media(
                 
                 if let Some(ref ci) = current_img {
                     if ci.replace("\\", "/") == path_str {
-                        let remaining_images = list_sku_images(network_path.clone(), sku.clone()).unwrap_or_default();
+                        // Utiliser la variante synchrone (on est déjà dans un contexte bloquant)
+                        let remaining_images = list_sku_images_sync(&network_path, &sku).unwrap_or_default();
                         let next_img = remaining_images.first().cloned();
                         let _ = conn.execute("UPDATE products SET image_path = ? WHERE sku = ?", (next_img, &sku_upper));
                     }

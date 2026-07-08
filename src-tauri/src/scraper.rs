@@ -2007,7 +2007,14 @@ pub fn save_selected_pdf_internal(
     trigramme: &str,
     doc_type_override: Option<&str>,
 ) -> Result<String, String> {
-    let p = get_product_details(sku)?;
+    let p = get_product_details(sku).unwrap_or_else(|_| ProductDetails {
+        sku: sku.to_string(),
+        mpn: String::new(),
+        brand: String::new(),
+        category: String::new(),
+        sub_category: String::new(),
+        attributes: String::new(),
+    });
     let clean_sku = sku.to_uppercase();
 
     check_scrape_lock(network_path, sku, trigramme)?;
@@ -2052,8 +2059,25 @@ pub fn save_selected_pdf_internal(
     }
 
     let doc_type = if let Some(over) = doc_type_override {
-        let clean = over.trim().replace(" ", "_").replace("/", "_").replace("\\", "_");
-        if clean.is_empty() { "document".to_string() } else { clean }
+        if over == "datasheet" {
+            // Tenter d'extraire un nom plus descriptif du nom de fichier de l'URL si possible
+            let url_filename = Path::new(url)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|s| s.split('?').next()) // retirer les query params
+                .map(|s| s.trim_end_matches(".pdf").trim_end_matches(".PDF"))
+                .unwrap_or("datasheet");
+            
+            let clean_url_name = url_filename.replace(" ", "_").replace("/", "_").replace("\\", "_");
+            if clean_url_name.is_empty() || clean_url_name.to_lowercase() == "datasheet" || clean_url_name.len() < 3 {
+                "datasheet".to_string()
+            } else {
+                clean_url_name
+            }
+        } else {
+            let clean = over.trim().replace(" ", "_").replace("/", "_").replace("\\", "_");
+            if clean.is_empty() { "document".to_string() } else { clean }
+        }
     } else {
         detect_doc_type(url, "Fiche Technique")
     };
@@ -2065,7 +2089,7 @@ pub fn save_selected_pdf_internal(
         .replace("{MPN}", &sanitize_folder_name(&p.mpn))
         .replace("{Type}", &doc_type);
 
-    let final_name = if formatted_name.to_lowercase().ends_with(".pdf") {
+    let mut final_name = if formatted_name.to_lowercase().ends_with(".pdf") {
         formatted_name
     } else {
         format!("{}.{}", formatted_name, ext)
@@ -2087,7 +2111,16 @@ pub fn save_selected_pdf_internal(
         return Err(format!("Impossible de créer le dossier de destination : {}", e));
     }
 
-    let final_path = dest_dir.join(&final_name);
+    // Résolution de collision pour éviter d'écraser les fichiers existants
+    let mut final_path = dest_dir.join(&final_name);
+    let mut counter = 1;
+    let base_name = final_name.trim_end_matches(".pdf").to_string();
+    while final_path.exists() {
+        final_name = format!("{}_{}.pdf", base_name, counter);
+        final_path = dest_dir.join(&final_name);
+        counter += 1;
+    }
+
     if let Err(e) = fs::write(&final_path, &bytes) {
         release_scrape_lock(network_path);
         return Err(format!("Échec écriture du fichier notice : {}", e));
@@ -2388,7 +2421,14 @@ pub fn save_selected_images_internal(
     rename_convention: &str,
     network_path: &str,
 ) -> Result<Vec<String>, String> {
-    let p = get_product_details(sku)?;
+    let p = get_product_details(sku).unwrap_or_else(|_| ProductDetails {
+        sku: sku.to_string(),
+        mpn: String::new(),
+        brand: String::new(),
+        category: String::new(),
+        sub_category: String::new(),
+        attributes: String::new(),
+    });
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent(get_random_user_agent())

@@ -7,6 +7,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { openPath } from "@tauri-apps/plugin-opener";
 
 interface ScrapeProgressBadgeProps {
   sku: string;
@@ -222,6 +223,7 @@ interface ResourceCandidate {
   domain: string;
   source: CandidateSource;
   file_type: string;
+  confidence?: number;
 }
 
 interface ScrapeCandidates {
@@ -284,6 +286,7 @@ export interface AutoFillSelections {
   source_url?: string;
   screenshot_path?: string;
   image_urls?: string[];
+  pdf_urls?: string[];
 }
 
 export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _networkPath, currentProduct }: AutoFillModalProps) {
@@ -306,10 +309,26 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
   // Skipped fields + image selection
   const [skippedFields, setSkippedFields] = useState<Set<string>>(new Set());
   const [selectedImageUrls, setSelectedImageUrls] = useState<Set<string>>(new Set());
+  const [selectedPdfUrls, setSelectedPdfUrls] = useState<Set<string>>(new Set());
 
   // Confirmation step
   const [confirmStep, setConfirmStep] = useState(false);
   const [pendingSelections, setPendingSelections] = useState<AutoFillSelections | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (confirmStep) {
+          setConfirmStep(false);
+        } else {
+          onClose();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, confirmStep, onClose]);
 
   const toggleSkip = (field: string) => {
     setSkippedFields(prev => {
@@ -338,6 +357,11 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
         setCandidates(result);
         // Initialiser le compteur à la totalité, les onError des images vont le décrémenter
         setValidImageCount(result.image_candidates.length);
+        // Pré-sélectionner toutes les PDFs par défaut
+        const pdfUrls = new Set<string>();
+        result.pdf_candidates.forEach(pdf => pdfUrls.add(pdf.url));
+        setSelectedPdfUrls(pdfUrls);
+
         // Pré-sélectionner automatiquement le candidat marqué selected:true par le backend
         const labelIdx = result.label_candidates.findIndex(c => c.selected);
         if (labelIdx >= 0) setSelectedLabel(labelIdx);
@@ -399,6 +423,10 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
 
     if (selectedImageUrls.size > 0) {
       selections.image_urls = Array.from(selectedImageUrls);
+    }
+
+    if (selectedPdfUrls.size > 0) {
+      selections.pdf_urls = Array.from(selectedPdfUrls);
     }
 
     const bestSource = candidates.sources_visited.find(s => s.success);
@@ -567,10 +595,25 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
                       <td style={{ padding: "0.3rem 0.5rem", fontWeight: 500 }}>{pendingSelections.image_urls.length} image(s) sélectionnée(s)</td>
                     </tr>
                   )}
+                  {pendingSelections.pdf_urls && pendingSelections.pdf_urls.length > 0 && (
+                    <tr>
+                      <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-secondary)" }}>Notices PDF</td>
+                      <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-tertiary)", fontStyle: "italic" }}>—</td>
+                      <td style={{ padding: "0.3rem 0.3rem", color: "var(--accent)" }}>→</td>
+                      <td style={{ padding: "0.3rem 0.5rem", fontWeight: 500 }}>{pendingSelections.pdf_urls.length} notice(s) sélectionnée(s)</td>
+                    </tr>
+                  )}
                   {pendingSelections.source_url && (
                     <tr>
                       <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-secondary)" }}>Source</td>
-                      <td colSpan={3} style={{ padding: "0.3rem 0.5rem", fontSize: "11px" }}><a href={pendingSelections.source_url} target="_blank" rel="noopener noreferrer">{pendingSelections.source_url.length > 60 ? pendingSelections.source_url.substring(0, 60) + "..." : pendingSelections.source_url}</a></td>
+                      <td colSpan={3} style={{ padding: "0.3rem 0.5rem", fontSize: "11px" }}>
+                        <span 
+                          onClick={() => pendingSelections.source_url && openPath(pendingSelections.source_url).catch(err => console.error(err))}
+                          style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}
+                        >
+                          {pendingSelections.source_url.length > 60 ? pendingSelections.source_url.substring(0, 60) + "..." : pendingSelections.source_url}
+                        </span>
+                      </td>
                     </tr>
                   )}
                 </tbody>
@@ -701,15 +744,63 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
                   {candidates.pdf_candidates.length > 0 && (
                     <div className="autofill-modal__resource-group">
                       <h4>📄 PDF ({candidates.pdf_candidates.length})</h4>
-                      {candidates.pdf_candidates.map((pdf, i) => (
-                        <div key={i} className="autofill-modal__resource-item">
-                          <span className="resource-title">{pdf.title || "PDF"}</span>
-                          <span className="resource-domain">{pdf.domain}</span>
-                          <a href={pdf.url} target="_blank" rel="noopener noreferrer" className="resource-link">
-                            ↗
-                          </a>
-                        </div>
-                      ))}
+                      {candidates.pdf_candidates.map((pdf, i) => {
+                        const conf = pdf.confidence ?? 0;
+                        const badgeColor = conf >= 0.85 ? "#2e7d32" : conf >= 0.60 ? "#ef6c00" : null;
+                        const badgeText = conf >= 0.85 ? "Officiel" : conf >= 0.60 ? "Probable" : null;
+                        const isSelected = selectedPdfUrls.has(pdf.url);
+                        return (
+                          <div 
+                            key={i} 
+                            className={`autofill-modal__resource-item ${isSelected ? "selected" : ""}`}
+                            onClick={() => {
+                              setSelectedPdfUrls(prev => {
+                                const next = new Set(prev);
+                                if (next.has(pdf.url)) next.delete(pdf.url);
+                                else next.add(pdf.url);
+                                return next;
+                              });
+                            }}
+                            style={{ 
+                              cursor: "pointer", 
+                              border: isSelected ? "1px solid var(--accent)" : "1px solid var(--border-color)", 
+                              display: "flex", 
+                              alignItems: "center", 
+                              padding: "8px 12px", 
+                              borderRadius: "4px", 
+                              marginBottom: "0.5rem",
+                              backgroundColor: isSelected ? "rgba(99, 102, 241, 0.05)" : "var(--bg-secondary)"
+                            }}
+                          >
+                            <span style={{ marginRight: "0.6rem", color: isSelected ? "var(--accent)" : "var(--text-tertiary)", fontWeight: "bold", fontSize: "14px" }}>
+                              {isSelected ? "☑" : "☐"}
+                            </span>
+                            <span className="resource-title" style={{ flex: 1, marginRight: "0.5rem" }}>{pdf.title || "PDF"}</span>
+                            <span className="resource-domain">{pdf.domain}</span>
+                            {badgeText && (
+                              <span style={{
+                                marginLeft: "0.5rem",
+                                padding: "2px 6px",
+                                fontSize: "10px",
+                                fontWeight: "bold",
+                                borderRadius: "4px",
+                                color: "#fff",
+                                backgroundColor: badgeColor || "gray"
+                              }}>
+                                {badgeText}
+                              </span>
+                            )}
+                            <span 
+                              className="resource-link" 
+                              onClick={(e) => { e.stopPropagation(); openPath(pdf.url).catch(err => console.error(err)); }}
+                              style={{ marginLeft: "0.5rem", color: "var(--accent)", cursor: "pointer" }}
+                              title="Ouvrir le PDF"
+                            >
+                              ↗
+                            </span>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                   {candidates.image_candidates.length > 0 && (
@@ -722,6 +813,9 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
                       <div className="autofill-modal__image-grid">
                         {candidates.image_candidates.filter(img => img.url && img.url.trim()).slice(0, 12).map((img, i) => {
                           const isSelected = selectedImageUrls.has(img.url);
+                          const conf = img.confidence ?? 0;
+                          const badgeColor = conf >= 0.85 ? "#2e7d32" : conf >= 0.60 ? "#ef6c00" : null;
+                          const badgeText = conf >= 0.85 ? "Officiel" : conf >= 0.60 ? "Probable" : null;
                           return (
                             <div
                               key={i}
@@ -747,10 +841,26 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
                                 }}
                               />
                               <span className="image-domain">{img.domain}</span>
+                              {badgeText && (
+                                <span style={{
+                                  position: "absolute",
+                                  top: "4px",
+                                  left: "4px",
+                                  padding: "2px 6px",
+                                  fontSize: "9px",
+                                  fontWeight: "bold",
+                                  borderRadius: "4px",
+                                  color: "#fff",
+                                  backgroundColor: badgeColor || "gray",
+                                  zIndex: 2
+                                }}>
+                                  {badgeText}
+                                </span>
+                              )}
                               <button
                                 type="button"
                                 className="image-preview-btn"
-                                onClick={(e) => { e.stopPropagation(); window.open(img.url, '_blank', 'noopener'); }}
+                                onClick={(e) => { e.stopPropagation(); openPath(img.url).catch(err => console.error("Error opening URL:", err)); }}
                                 title="Ouvrir l'image"
                               >📷</button>
                               {isSelected && (
@@ -774,9 +884,13 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
                     <div key={i} className={`autofill-modal__source-item ${src.success ? "success" : "failed"}`}>
                       <span className="source-icon">{src.success ? "✓" : "✕"}</span>
                       <span className="source-provider">{src.provider}</span>
-                      <a href={src.url} target="_blank" rel="noopener noreferrer" className="source-url">
+                      <span 
+                        onClick={() => openPath(src.url).catch(err => console.error(err))}
+                        className="source-url"
+                        style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}
+                      >
                         {src.url.length > 60 ? src.url.substring(0, 60) + "..." : src.url}
-                      </a>
+                      </span>
                       {src.screenshot_path && (
                         <span className="source-screenshot" title="Screenshot disponible">📸</span>
                       )}
@@ -877,12 +991,29 @@ function CandidateRow({
         )}
       </div>
       <button
+        type="button"
         className="btn-icon candidate-row__skip"
         onClick={onToggleSkip}
-        title={skipped ? "Inclure ce champ" : "Ignorer ce champ"}
-        style={{ marginLeft: "0.3rem", fontSize: "14px", opacity: skipped ? 1 : 0.5 }}
+        title={skipped ? "Inclure ce champ dans l'importation" : "Ignorer ce champ"}
+        style={{
+          marginLeft: "0.5rem",
+          fontSize: "11px",
+          padding: "3px 8px",
+          borderRadius: "4px",
+          border: "1px solid",
+          borderColor: skipped ? "var(--success)" : "var(--border-color)",
+          backgroundColor: skipped ? "rgba(16, 185, 129, 0.15)" : "transparent",
+          color: skipped ? "var(--success)" : "var(--text-secondary)",
+          cursor: "pointer",
+          fontWeight: "600",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "4px",
+          transition: "all 0.15s ease",
+          opacity: skipped ? 1 : 0.7
+        }}
       >
-        {skipped ? "✓" : "✕"}
+        {skipped ? "➕ Inclure" : "✕ Ignorer"}
       </button>
     </div>
   );

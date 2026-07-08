@@ -42,6 +42,10 @@ pub struct ExtractedResource {
     pub title: String,
     pub domain: String,
     pub resource_type: String,  // "pdf", "jpg", "png", "webp"
+    /// Score de pertinence porté depuis l'extraction.
+    /// 0.0 par défaut pour les vieilles données désérialisées.
+    #[serde(default)]
+    pub confidence: f32,
 }
 
 // ─── Extraction depuis JSON-LD ────────────────────────────────────────────────
@@ -196,6 +200,7 @@ fn collect_pdf_urls_from_json(val: &serde_json::Value, urls: &mut Vec<ExtractedR
                     title: "Fiche Technique".to_string(),
                     domain,
                     resource_type: "pdf".to_string(),
+                    confidence: 0.90, // Données structurées JSON-LD : officiel
                 });
             }
         }
@@ -229,6 +234,8 @@ fn collect_image_urls_from_json(val: &serde_json::Value, urls: &mut Vec<Extracte
                     title: String::new(),
                     domain,
                     resource_type: ext.to_string(),
+                    // URL brute dans JSON-LD hors ImageObject : confiance modérée
+                    confidence: 0.70,
                 });
             }
         }
@@ -247,7 +254,10 @@ fn collect_image_urls_from_json(val: &serde_json::Value, urls: &mut Vec<Extracte
                             title: "ImageObject".to_string(),
                             domain,
                             resource_type: "jpg".to_string(),
+                            // ImageObject JSON-LD : données structurées officielles
+                            confidence: 0.95,
                         });
+                        return; // Pas besoin de descendre plus dans cet objet
                     }
                 }
             }
@@ -263,11 +273,75 @@ fn collect_image_urls_from_json(val: &serde_json::Value, urls: &mut Vec<Extracte
 
 /// Extrait les URLs PDF depuis le HTML brut avec filtrage des faux positifs JS/JSON.
 /// Filtre les URLs dans des contextes JavaScript, commentaires, et fragments JSON inline.
-pub fn extract_pdf_urls_from_html(html: &str) -> Vec<ExtractedResource> {
+pub fn extract_pdf_urls_from_html(html: &str, source_url: &str) -> Vec<ExtractedResource> {
     let mut results = Vec::new();
+    let base = match reqwest::Url::parse(source_url) {
+        Ok(b) => b,
+        Err(_) => return results,
+    };
     let html_lower = html.to_lowercase();
-    let mut pos = 0;
 
+    // Mots-clés indiquant un lien PDF contextuel (datasheet, fiche technique, etc.)
+    let datasheet_keywords = ["datasheet", "fiche technique", "fiche produit", "notice", "manuel",
+        "technical", "specification", "spec sheet", "data sheet"];
+
+    // 1. Scan for href="..." or href='...'
+    let mut pos = 0;
+    while let Some(href_start) = html_lower[pos..].find("href=") {
+        let abs_href = pos + href_start;
+        let val_start = abs_href + 5;
+        if val_start >= html.len() { break; }
+        let quote = html.as_bytes()[val_start];
+        if quote == b'"' || quote == b'\'' {
+            let actual_start = val_start + 1;
+            let end_offset = html[actual_start..]
+                .find(quote as char)
+                .unwrap_or(html[actual_start..].len());
+            let end = actual_start + end_offset;
+            let raw_url = &html[actual_start..end];
+            let raw_lower = raw_url.to_lowercase();
+            
+            if raw_lower.contains(".pdf") && !raw_lower.contains("javascript") {
+                let resolved = if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+                    Some(raw_url.to_string())
+                } else if raw_url.starts_with("//") {
+                    Some(format!("{}:{}", base.scheme(), raw_url))
+                } else if let Ok(joined) = base.join(raw_url) {
+                    Some(joined.to_string())
+                } else {
+                    None
+                };
+
+                if let Some(url) = resolved {
+                    if !results.iter().any(|r: &ExtractedResource| r.url == url) {
+                        let title = extract_link_text(html, raw_url);
+                        let title_lower = title.to_lowercase();
+                        // Score selon le texte du lien : contextuel vs générique
+                        let confidence = if datasheet_keywords.iter().any(|k| title_lower.contains(k)) {
+                            0.80
+                        } else {
+                            0.60
+                        };
+                        let clean_title = if title.is_empty() { "Fiche Technique".to_string() } else { title };
+                        let domain = get_domain_from_url(&url);
+                        results.push(ExtractedResource {
+                            url,
+                            title: clean_title,
+                            domain,
+                            resource_type: "pdf".to_string(),
+                            confidence,
+                        });
+                    }
+                }
+            }
+            pos = end + 1;
+        } else {
+            pos = val_start;
+        }
+    }
+
+    // 2. Scan for absolute http/https links containing .pdf
+    let mut pos = 0;
     while let Some(rel_start) = html_lower[pos..].find("http") {
         let abs_start = pos + rel_start;
         let end = html.as_bytes()[abs_start..]
@@ -279,44 +353,28 @@ pub fn extract_pdf_urls_from_html(html: &str) -> Vec<ExtractedResource> {
         let url_lower = url_raw.to_lowercase();
 
         if url_lower.contains(".pdf") && !url_lower.contains("javascript") {
-            // Filtrer les faux positifs : URL dans du JS inline ou du JSON
-            let context_start = abs_start.saturating_sub(30);
-            let context = &html[context_start..abs_start];
-            let context_lower = context.to_lowercase();
-
-            // Ignorer si on est dans un commentaire JS/HTML ou du code
-            let is_js_context = context_lower.contains("function") 
-                || context_lower.contains("var ") 
-                || context_lower.contains("const ")
-                || context_lower.contains("let ")
-                || context_lower.contains("//")
-                || context.trim_end().ends_with('?')
-                || context.trim_end().ends_with(',');
-
-            // S'assurer que l'URL est dans un attribut href/src ou une chaîne propre
-            let in_link_attr = context_lower.contains("href=") 
-                || context_lower.contains("src=")
-                || context_lower.contains("url=")
-                || context_lower.contains("link=")
-                || context_lower.contains("action=");
-            
-            // Accepter si : dans un attribut de lien OU pas dans un contexte JS détecté
-            if (in_link_attr || !is_js_context) && !url_raw.is_empty() {
-                if !results.iter().any(|r: &ExtractedResource| r.url == url_raw) {
-                    let title = extract_link_text(html, &url_raw);
-                    let clean_title = if title.is_empty() { "Fiche Technique".to_string() } else { title };
-                    let domain = get_domain_from_url(&url_raw);
-                    results.push(ExtractedResource {
-                        url: url_raw,
-                        title: clean_title,
-                        domain,
-                        resource_type: "pdf".to_string(),
-                    });
-                }
+            if !results.iter().any(|r: &ExtractedResource| r.url == url_raw) {
+                let title = extract_link_text(html, &url_raw);
+                let title_lower = title.to_lowercase();
+                let confidence = if datasheet_keywords.iter().any(|k| title_lower.contains(k)) {
+                    0.80
+                } else {
+                    0.55 // Lien absolu sans contexte de lien lisible
+                };
+                let clean_title = if title.is_empty() { "Fiche Technique".to_string() } else { title };
+                let domain = get_domain_from_url(&url_raw);
+                results.push(ExtractedResource {
+                    url: url_raw,
+                    title: clean_title,
+                    domain,
+                    resource_type: "pdf".to_string(),
+                    confidence,
+                });
             }
         }
         pos = end.max(abs_start + 1);
     }
+
     results
 }
 
@@ -372,8 +430,84 @@ pub fn is_valid_product_image_url(url: &str) -> bool {
 }
 
 /// Extrait les URLs d'images depuis le HTML brut.
-pub fn extract_image_urls_from_html(html: &str) -> Vec<ExtractedResource> {
+pub fn extract_image_urls_from_html(html: &str, source_url: &str) -> Vec<ExtractedResource> {
     let mut results = Vec::new();
+    let base = match reqwest::Url::parse(source_url) {
+        Ok(b) => b,
+        Err(_) => return results,
+    };
+    let html_lower = html.to_lowercase();
+
+    // 1. Scan for open graph image — confiance 0.85 (image principale déclarée par la page)
+    let og_marker = "property=\"og:image\" content=\"";
+    if let Some(og_start) = html_lower.find(og_marker) {
+        let actual_start = og_start + og_marker.len();
+        if actual_start < html.len() {
+            if let Some(end_offset) = html[actual_start..].find('"') {
+                let raw_url = &html[actual_start..(actual_start + end_offset)];
+                if is_valid_product_image_url(raw_url) && !results.iter().any(|r: &ExtractedResource| r.url == raw_url) {
+                    results.push(ExtractedResource {
+                        url: raw_url.to_string(),
+                        title: "OG Image".to_string(),
+                        domain: get_domain_from_url(raw_url),
+                        resource_type: "jpg".to_string(),
+                        confidence: 0.85,
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Scan for src="..."
+    let mut pos = 0;
+    while let Some(src_start) = html_lower[pos..].find("src=") {
+        let abs_src = pos + src_start;
+        let val_start = abs_src + 4;
+        if val_start >= html.len() { break; }
+        let quote = html.as_bytes()[val_start];
+        if quote == b'"' || quote == b'\'' {
+            let actual_start = val_start + 1;
+            let end_offset = html[actual_start..]
+                .find(quote as char)
+                .unwrap_or(html[actual_start..].len());
+            let end = actual_start + end_offset;
+            let raw_url = &html[actual_start..end];
+            
+            let resolved = if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+                Some(raw_url.to_string())
+            } else if raw_url.starts_with("//") {
+                Some(format!("{}:{}", base.scheme(), raw_url))
+            } else if let Ok(joined) = base.join(raw_url) {
+                Some(joined.to_string())
+            } else {
+                None
+            };
+
+            if let Some(url) = resolved {
+                if is_valid_product_image_url(&url) {
+                    if !results.iter().any(|r: &ExtractedResource| r.url == url) {
+                        let domain = get_domain_from_url(&url);
+                        let url_lower = url.to_lowercase();
+                        let ext = if url_lower.ends_with(".png") { "png" }
+                            else if url_lower.ends_with(".webp") { "webp" }
+                            else { "jpg" };
+                        results.push(ExtractedResource {
+                            url,
+                            title: String::new(),
+                            domain,
+                            resource_type: ext.to_string(),
+                            confidence: 0.40,
+                        });
+                    }
+                }
+            }
+            pos = end + 1;
+        } else {
+            pos = val_start;
+        }
+    }
+
+    // 3. Scan for absolute https:// image links
     let mut pos = 0;
     while let Some(start_idx) = html[pos..].find("https://") {
         let abs_start = pos + start_idx;
@@ -396,6 +530,7 @@ pub fn extract_image_urls_from_html(html: &str) -> Vec<ExtractedResource> {
                     title: String::new(),
                     domain,
                     resource_type: ext.to_string(),
+                    confidence: 0.35,
                 });
             }
         }
@@ -680,7 +815,7 @@ pub fn extract_all_from_html(html: &str, source_url: &str) -> ExtractedProductDa
     let mut data = extract_from_json_ld(&json_ld_blocks);
     
     // Enrichir avec les PDFs du HTML brut
-    let html_pdfs = extract_pdf_urls_from_html(html);
+    let html_pdfs = extract_pdf_urls_from_html(html, source_url);
     for pdf in html_pdfs {
         if !data.pdf_urls.iter().any(|u| u.url == pdf.url) {
             data.pdf_urls.push(pdf);
@@ -688,7 +823,7 @@ pub fn extract_all_from_html(html: &str, source_url: &str) -> ExtractedProductDa
     }
 
     // Enrichir avec les images du HTML brut
-    let html_images = extract_image_urls_from_html(html);
+    let html_images = extract_image_urls_from_html(html, source_url);
     for img in html_images {
         if !data.image_urls.iter().any(|u| u.url == img.url) {
             data.image_urls.push(img);
@@ -707,6 +842,21 @@ pub fn extract_all_from_html(html: &str, source_url: &str) -> ExtractedProductDa
                 title: "RS Cloudinary".to_string(),
                 domain: "res.cloudinary.com".to_string(),
                 resource_type: "jpg".to_string(),
+                // Cloudinary RS : CDN officiel déterministe
+                confidence: 0.90,
+            });
+        }
+    }
+
+    // og:image : image principale déclarée par la page — prioritaire sur le HTML brut
+    if let Some(og_url) = extract_meta_tag_value(html, "og:image") {
+        if is_valid_product_image_url(&og_url) && !data.image_urls.iter().any(|u| u.url == og_url) {
+            data.image_urls.push(ExtractedResource {
+                title: "og:image".to_string(),
+                domain: get_domain_from_url(&og_url),
+                resource_type: "jpg".to_string(),
+                confidence: 0.80,
+                url: og_url,
             });
         }
     }

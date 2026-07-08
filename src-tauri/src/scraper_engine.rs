@@ -214,7 +214,7 @@ pub async fn scrape_all_for_sku(
     // ── Phase 1 : Scraping direct VPC ─────────────────────────────────────
     if cancel_token.is_cancelled() { return finish_cancelled(&mut candidates, network_path); }
 
-    let mut source_idx = 0;
+
     
     if !vpc_site.is_empty() && !vpc_code.is_empty() {
         if skip_phase1 {
@@ -261,7 +261,7 @@ pub async fn scrape_all_for_sku(
 
                 candidates.ingest_extracted_data(&data, &vpc_site, Some(&vpc_url), screenshot_rel.as_deref());
                 emit_progress(app_handle, &sku_upper, 0.25, &format!("Phase 1 : {} données extraites de {}", candidates.total_candidates(), vpc_site));
-                source_idx += 1;
+
             } else {
                 let err_msg = format!("Phase 1 : HTTP échoué pour {} ({})", vpc_site, vpc_url);
                 emit_progress(app_handle, &sku_upper, 0.25, &err_msg);
@@ -488,7 +488,7 @@ pub async fn scrape_all_for_sku(
                             };
                             candidates.sources_visited.push(source_info);
                             candidates.ingest_extracted_data(&data, "SearxNG", Some(&r.url), screenshot_rel.as_deref());
-                            source_idx += 1;
+
                         }
                     }
 
@@ -514,7 +514,9 @@ pub async fn scrape_all_for_sku(
 
             // Query pour les PDFs
             if candidates.pdf_candidates.is_empty() {
-                let pdf_query = format!("\"{}\" {} datasheet pdf", code_to_search, brand);
+                let brand_suffix = if brand.is_empty() { "".to_string() } else { format!(" {}", brand) };
+                let pdf_code = if !mpn.is_empty() { &mpn } else { &code_to_search };
+                let pdf_query = format!("\"{}\"{} datasheet filetype:pdf", pdf_code, brand_suffix);
                 let pdf_results = scraper_http::search_searxng(searxng_url, &pdf_query, None).await;
                 for r in &pdf_results {
                     let ll = r.url.to_lowercase();
@@ -526,14 +528,16 @@ pub async fn scrape_all_for_sku(
                             screenshot_path: None,
                             provider: "SearxNG".to_string(),
                         };
-                        candidates.add_pdf(&r.url, &r.title, &domain, source);
+                        candidates.add_pdf(&r.url, &r.title, &domain, source, 0.50);
                     }
                 }
             }
 
             // Query pour les images
             if candidates.image_candidates.len() < 3 {
-                let img_query = format!("\"{}\" {} photo produit", mpn, brand);
+                let brand_suffix = if brand.is_empty() { "".to_string() } else { format!(" {}", brand) };
+                let code_for_img = if !mpn.is_empty() { &mpn } else { &sku_upper };
+                let img_query = format!("\"{}\"{}", code_for_img, brand_suffix);
                 let img_results = scraper_http::search_searxng_images(searxng_url, &img_query).await;
                 for r in &img_results {
                     if !scraper_extractor::is_valid_product_image_url(&r.url) {
@@ -549,7 +553,10 @@ pub async fn scrape_all_for_sku(
                         screenshot_path: None,
                         provider: "SearxNG images".to_string(),
                     };
-                    candidates.add_image(&r.url, &r.title, &domain, ext, source);
+                    let title_lower = r.title.to_lowercase();
+                    let code_lower = code_for_img.to_lowercase();
+                    let confidence = if title_lower.contains(&code_lower) { 0.60 } else { 0.45 };
+                    candidates.add_image(&r.url, &r.title, &domain, ext, source, confidence);
                 }
             }
 
@@ -594,7 +601,7 @@ pub async fn scrape_all_for_sku(
                         prefix_char, r_code, idx
                     );
                     if scraper_http::url_exists(&url).await {
-                        candidates.add_image(&url, &format!("RS #{}{}", prefix_char, idx), "res.cloudinary.com", "jpg", source.clone());
+                        candidates.add_image(&url, &format!("RS #{}{}", prefix_char, idx), "res.cloudinary.com", "jpg", source.clone(), 0.92);
                         validated_count += 1;
                     }
                 }

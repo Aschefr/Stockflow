@@ -4,7 +4,9 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import logoImg from "./assets/logo.png";
-import { ScrapeProgressBadge, AutoFillModal, type AutoFillSelections } from "./ScrapeComponents";
+import { AutoFillModal, type AutoFillSelections } from "./ScrapeComponents";
+import { ProductForm } from "./ProductForm";
+import { ProductDetailPanel } from "./ProductDetailPanel";
 import "./App.css";
 interface AppConfig {
   trigramme: string;
@@ -244,9 +246,6 @@ function App() {
   const [backupDelay, setBackupDelay] = useState<number>(30);
   const [backupStatus, setBackupStatus] = useState<string>("");
   const [isBackupRunning, setIsBackupRunning] = useState<boolean>(false);
-
-  const [editingPdfPath, setEditingPdfPath] = useState<string | null>(null);
-  const [newPdfName, setNewPdfName] = useState("");
   const [configError, setConfigError] = useState("");
   const [isEditingConfig, setIsEditingConfig] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
@@ -362,6 +361,9 @@ function App() {
         message: event.payload.message,
         status: "InProgress"
       });
+      if (batchSkusRef.current.has(event.payload.sku)) {
+        setBatchStatus(`Scraping de ${event.payload.sku} : ${event.payload.message || "en cours"}...`);
+      }
     });
 
     const unlistenComplete = listen<any>("scrape-task-complete", (event) => {
@@ -389,6 +391,21 @@ function App() {
           return prev;
         });
       }, 4000);
+
+      if (batchSkusRef.current.has(event.payload.sku)) {
+        setBatchSuccessCount(prev => prev + 1);
+        setBatchProgress(prev => {
+          const next = prev + 1;
+          batchSkusRef.current.delete(event.payload.sku);
+          if (batchSkusRef.current.size === 0) {
+            setIsBatchRunning(false);
+            showToast("Scraping par lot terminé !", "success");
+            if (config) syncAndFetch(config);
+          }
+          return next;
+        });
+        setBatchStatus(`Scraping de ${event.payload.sku} terminé avec succès.`);
+      }
     });
 
     const unlistenError = listen<any>("scrape-task-error", (event) => {
@@ -411,6 +428,21 @@ function App() {
           return prev;
         });
       }, 4000);
+
+      if (batchSkusRef.current.has(event.payload.sku)) {
+        setBatchErrorCount(prev => prev + 1);
+        setBatchProgress(prev => {
+          const next = prev + 1;
+          batchSkusRef.current.delete(event.payload.sku);
+          if (batchSkusRef.current.size === 0) {
+            setIsBatchRunning(false);
+            showToast("Scraping par lot terminé !", "success");
+            if (config) syncAndFetch(config);
+          }
+          return next;
+        });
+        setBatchStatus(`Scraping de ${event.payload.sku} a échoué.`);
+      }
     });
 
     // Request notification permission if not yet decided
@@ -418,14 +450,12 @@ function App() {
       Notification.requestPermission();
     }
   
-  // Avoid unused variable compiler errors
-
-  return () => {
+    return () => {
       unlistenProgress.then(f => f());
       unlistenComplete.then(f => f());
       unlistenError.then(f => f());
     };
-  }, []);
+  }, [config]);
 
   // Poll queue info when scraping is active
   useEffect(() => {
@@ -510,8 +540,29 @@ function App() {
   const [editingCell, setEditingCell] = useState<{ sku: string; field: string } | null>(null);
   const [editValue, setEditValue] = useState("");
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (showAddModal) {
+          setShowAddModal(false);
+          setAutoFillSource(null);
+          setAutoFillChanges(null);
+        } else if (showEditModal) {
+          setShowEditModal(false);
+          setAutoFillSource(null);
+          setAutoFillChanges(null);
+        } else if (editingCell) {
+          setEditingCell(null);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showAddModal, showEditModal, editingCell]);
+
   const [selectedSkus, setSelectedSkus] = useState<string[]>([]);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const batchSkusRef = useRef<Set<string>>(new Set());
   const [batchTotal, setBatchTotal] = useState(0);
   const [batchProgress, setBatchProgress] = useState(0);
   const [batchSuccessCount, setBatchSuccessCount] = useState(0);
@@ -534,7 +585,6 @@ function App() {
   const [productImages, setProductImages] = useState<string[]>([]);
   const [productPdfs, setProductPdfs] = useState<string[]>([]);
   const [productScreenshotPath, setProductScreenshotPath] = useState<string | null>(null);
-  const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
 
   // Network sync status
@@ -543,22 +593,7 @@ function App() {
   // Hover image preview state
   const [hoveredImage, setHoveredImage] = useState<string | null>(null);
   const [hoverPosition, setHoverPosition] = useState({ x: 0, y: 0 });
-  const [, setIsScrapingPrice] = useState(false);
-  const [isScrapingMedia, setIsScrapingMedia] = useState(false);
 
-  // Scraped image validation states
-  const [scrapedImageCandidates, setScrapedImageCandidates] = useState<{ url: string; title?: string; domain: string }[]>([]);
-  const [selectedImageUrls, setSelectedImageUrls] = useState<string[]>([]);
-  const [isImageValidationMode, setIsImageValidationMode] = useState(false);
-  const [isSavingImages, setIsSavingImages] = useState(false);
-  const [isScrapeModalMinimized, setIsScrapeModalMinimized] = useState(false);
-
-  // New PDF validation states
-  const [scrapedPdfCandidates, setScrapedPdfCandidates] = useState<{ url: string; title: string; domain: string }[]>([]);
-  const [selectedPdfUrl, setSelectedPdfUrl] = useState<string>("");
-  const [selectedPdfType, setSelectedPdfType] = useState<string>("");
-  const [isPdfValidationMode, setIsPdfValidationMode] = useState(false);
-  const [isSavingPdf, setIsSavingPdf] = useState(false);
 
   // Price confirmation states
   interface PriceCandidate {
@@ -680,7 +715,6 @@ function App() {
       // Scraping depuis la sidebar (mise à jour directe en DB)
       (async () => {
         try {
-          setIsScrapingPrice(true);
           const prod = products.find(p => p.sku === pendingScrapeSku);
           if (prod && config) {
             const currentAttrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
@@ -706,7 +740,6 @@ function App() {
               packSize: candidate.pack_size
             });
             setMovementSuccess(`Prix mis à jour : ${candidate.price.toFixed(2)} €`);
-            setIsScrapingPrice(false);
             setPendingScrapeSku(null);
             
             // Synchro en tâche de fond non bloquante pour l'interface
@@ -716,7 +749,6 @@ function App() {
           }
         } catch (err: any) {
           setMovementError(err.toString());
-          setIsScrapingPrice(false);
           setPendingScrapeSku(null);
         }
       })();
@@ -744,39 +776,6 @@ function App() {
     setShowPriceConfirmModal(false);
   }
 
-  async function handleCancelScrape() {
-    setScrapeModalOpen(false);
-    setScrapeError(null);
-    setIsScrapingMedia(false);
-    setIsSavingImages(false);
-    setIsSavingPdf(false);
-    setIsScrapingPrice(false);
-    setIsImageValidationMode(false);
-    setIsPdfValidationMode(false);
-    setScrapedImageCandidates([]);
-    setSelectedImageUrls([]);
-    setScrapedPdfCandidates([]);
-    setSelectedPdfUrl("");
-    if (config) {
-      try {
-        await invoke("force_release_lock", { networkPath: config.network_path });
-      } catch (err) {
-        console.error("Erreur lors de la libération du verrou :", err);
-      }
-    }
-  }
-
-  interface ScrapeProgressStep {
-    label: string;
-    status: "pending" | "active" | "success" | "error";
-    details?: string;
-  }
-
-  const [scrapeModalOpen, setScrapeModalOpen] = useState(false);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const scrapeModalTitle = ""; // Titre du modal de progression (non utilisé avec le nouveau flux unifié)
-  const [scrapeSteps, setScrapeSteps] = useState<ScrapeProgressStep[]>([]);
-  const [scrapeError, setScrapeError] = useState<string | null>(null);
 
   // Universal scraper AutoFillModal state
   const [autoFillModalOpen, setAutoFillModalOpen] = useState(false);
@@ -802,19 +801,71 @@ function App() {
     setAutoFillChanges(selections);
 
     if (autoFillModalIsEdit) {
-      setEditProduct(prev => {
-        const next = { ...prev };
-        if (selections.label) next.label = selections.label;
-        if (selections.brand) next.brand = selections.brand;
-        if (selections.mpn) next.mpn = selections.mpn;
-        if (selections.price !== undefined && selections.price > 0) next.price = formatNum(selections.price);
-        if (selections.pack_size !== undefined && selections.pack_size > 0) next.pack_size = formatNum(selections.pack_size);
-        if (selections.largeur) next.largeur = formatNum(selections.largeur);
-        if (selections.hauteur) next.hauteur = formatNum(selections.hauteur);
-        if (selections.profondeur) next.profondeur = formatNum(selections.profondeur);
-        if (selections.poids) next.poids = formatNum(selections.poids);
-        return next;
-      });
+      let baseProduct = { ...editProduct };
+
+      if (!showEditModal && selectedProduct) {
+        // L'auto-remplissage a été ouvert depuis la fiche détail, le formulaire d'édition n'était pas ouvert.
+        // On initialise editProduct à partir de selectedProduct.
+        let attributesObj: any = {};
+        try {
+          attributesObj = typeof selectedProduct.attributes === "string"
+            ? JSON.parse(selectedProduct.attributes || "{}")
+            : selectedProduct.attributes || {};
+        } catch (e) {}
+
+        baseProduct = {
+          sku: selectedProduct.sku,
+          mpn: selectedProduct.mpn,
+          label: selectedProduct.label,
+          brand: selectedProduct.brand,
+          category: selectedProduct.category,
+          sub_category: selectedProduct.sub_category,
+          location: selectedProduct.location,
+          min_stock: formatNum(selectedProduct.min_stock),
+          price: formatNum(selectedProduct.price),
+          item_type: selectedProduct.item_type,
+          image_path: selectedProduct.image_path || null,
+          pdf_path: selectedProduct.pdf_path || null,
+          attributes: typeof selectedProduct.attributes === "string" ? selectedProduct.attributes : JSON.stringify(selectedProduct.attributes || {}),
+          pack_size: formatNum(selectedProduct.pack_size || 1),
+          largeur: formatNum(attributesObj.largeur || ""),
+          hauteur: formatNum(attributesObj.hauteur || ""),
+          profondeur: formatNum(attributesObj.profondeur || ""),
+          poids: formatNum(attributesObj.poids || ""),
+          notes: attributesObj.notes || ""
+        };
+
+        // Extraire les infos de site vpc s'il y en a pour pré-configurer le type d'auto-remplissage
+        let site = "";
+        let code = "";
+        if (attributesObj && attributesObj.vpc) {
+          const keys = Object.keys(attributesObj.vpc);
+          if (keys.length > 0) {
+            site = keys[0];
+            code = attributesObj.vpc[site];
+          }
+        }
+        setEditVpcSite(site);
+        setEditVpcCode(code);
+        setAutofillType(site || "mpn");
+        setAutofillCodeInput(code || selectedProduct.mpn || "");
+
+        setShowEditModal(true);
+      }
+
+      // Appliquer les sélections par-dessus les valeurs de base
+      const nextProduct = { ...baseProduct };
+      if (selections.label) nextProduct.label = selections.label;
+      if (selections.brand) nextProduct.brand = selections.brand;
+      if (selections.mpn) nextProduct.mpn = selections.mpn;
+      if (selections.price !== undefined && selections.price > 0) nextProduct.price = formatNum(selections.price);
+      if (selections.pack_size !== undefined && selections.pack_size > 0) nextProduct.pack_size = formatNum(selections.pack_size);
+      if (selections.largeur) nextProduct.largeur = formatNum(selections.largeur);
+      if (selections.hauteur) nextProduct.hauteur = formatNum(selections.hauteur);
+      if (selections.profondeur) nextProduct.profondeur = formatNum(selections.profondeur);
+      if (selections.poids) nextProduct.poids = formatNum(selections.poids);
+
+      setEditProduct(nextProduct);
       if (selections.source_url) setAutoFillSource(selections.source_url);
       setEditSuccess("Champs pré-remplis via auto-remplissage !");
     } else {
@@ -834,6 +885,42 @@ function App() {
       if (selections.source_url) setAutoFillSource(selections.source_url);
       setCreateSuccess("Champs pré-remplis via auto-remplissage !");
     }
+
+    if (config) {
+      const skuUpper = autoFillModalSku.toUpperCase();
+      if (selections.image_urls && selections.image_urls.length > 0) {
+        invoke<string[]>("save_selected_images", {
+          sku: skuUpper,
+          urls: selections.image_urls,
+          networkPath: config.network_path
+        }).then(() => {
+          if (selectedProduct && selectedProduct.sku === skuUpper) {
+            refreshSelectedProduct(skuUpper);
+          }
+        }).catch(err => {
+          console.error("Error saving selected images:", err);
+          showToast("Erreur import d'images : " + err.toString(), "error");
+        });
+      }
+      if (selections.pdf_urls && selections.pdf_urls.length > 0) {
+        Promise.all(selections.pdf_urls.map((url: string) =>
+          invoke("save_selected_pdf", {
+            sku: skuUpper,
+            url: url,
+            networkPath: config.network_path,
+            trigramme: config.trigramme,
+            docType: "datasheet"
+          })
+        )).then(() => {
+          if (selectedProduct && selectedProduct.sku === skuUpper) {
+            refreshSelectedProduct(skuUpper);
+          }
+        }).catch(err => {
+          console.error("Error saving selected PDFs:", err);
+          showToast("Erreur import notice : " + err.toString(), "error");
+        });
+      }
+    }
   }
 
   interface ConfirmModalConfig {
@@ -849,7 +936,6 @@ function App() {
   }
 
   const [confirmModal, setConfirmModal] = useState<ConfirmModalConfig | null>(null);
-  const [inlineConfirm, setInlineConfirm] = useState<{ id: string, action: () => void } | null>(null);
   const [alertModal, setAlertModal] = useState<AlertModalConfig | null>(null);
 
   function getRenamePreview(convention: string, isPdf: boolean): string {
@@ -874,214 +960,56 @@ function App() {
     }
     return name;
   }
-  async function executeScrapePriceForSku(sku: string): Promise<number> {
-    if (!config) throw new Error("Configuration manquante");
-    const prod = products.find(p => p.sku === sku);
-    if (!prod) throw new Error(`Produit introuvable : ${sku}`);
 
-    // Extrait les infos VPC du produit (même logique que la loupe de prix du modal)
-    let vpcSite = "mpn";
-    let vpcCode = "";
-    let mpnOrSku = prod.mpn || prod.sku;
-    try {
-      const attrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
-      if (attrs && attrs.vpc) {
-        const keys = Object.keys(attrs.vpc);
-        if (keys.length > 0) {
-          vpcSite = keys[0];
-          vpcCode = attrs.vpc[keys[0]]?.toString() || "";
-        }
-      }
-    } catch (e) {}
-
-    // Utilise le même moteur que la loupe de prix du modal (scrape_product_details)
-    const details: any = await invoke("scrape_product_details", {
-      vpcSite: vpcSite,
-      vpcCode: vpcCode,
-      sku: vpcCode || mpnOrSku,
-      brand: prod.brand || null,
-      label: prod.label || null
-    });
-
-    const price: number = details.price;
-    if (!price || price <= 0) {
-      throw new Error("Prix introuvable via scrape_product_details");
-    }
-
-    // Sauvegarde le prix mis à jour
-    const currentAttrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
-    if (details.source_url) {
-      currentAttrs.scrape_price_url = details.source_url;
-    }
-    await invoke("create_product", {
-      networkPath: config.network_path,
-      trigramme: config.trigramme,
-      sku: prod.sku,
-      mpn: prod.mpn,
-      label: prod.label,
-      brand: prod.brand,
-      category: prod.category,
-      subCategory: prod.sub_category,
-      location: prod.location,
-      itemType: prod.item_type,
-      minStock: prod.min_stock,
-      price: price,
-      imagePath: prod.image_path,
-      pdfPath: prod.pdf_path,
-      attributes: currentAttrs,
-      packSize: prod.pack_size
-    });
-    return price;
-  }
-
-  async function executeScrapePdfForSku(sku: string): Promise<string> {
-    if (!config) throw new Error("Configuration manquante");
-    const prod = products.find(p => p.sku === sku);
-    if (!prod) throw new Error(`Produit introuvable : ${sku}`);
-    // La query est conservée pour compatibilité mais la logique est construite côté Rust
-    const query = `${prod.brand || ""} ${prod.mpn || prod.sku} datasheet`.trim();
-    return await invoke<string>("scrape_pdf", {
-      sku,
-      query,
-      networkPath: config.network_path,
-      brand: prod.brand || null,
-      label: prod.label || null,
-    });
-  }
-
-  async function executeScrapeImageForSku(sku: string): Promise<string[]> {
-    if (!config) throw new Error("Configuration manquante");
-    const prod = products.find(p => p.sku === sku);
-    if (!prod) throw new Error(`Produit introuvable : ${sku}`);
-    // La query est conservée pour compatibilité mais la logique est construite côté Rust
-    const query = `${prod.brand || ""} ${prod.mpn || prod.sku} photo`.trim();
-    return await invoke<string[]>("scrape_images", {
-      sku,
-      query,
-      networkPath: config.network_path,
-      brand: prod.brand || null,
-      label: prod.label || null,
-    });
-  }
-
-  async function runBatchScraping(mediaType: "images" | "pdf" | "price") {
+  async function runBatchScraping() {
     if (selectedSkus.length === 0 || !config) return;
     setIsBatchRunning(true);
+    batchSkusRef.current = new Set(selectedSkus);
     setBatchTotal(selectedSkus.length);
     setBatchProgress(0);
     setBatchSuccessCount(0);
     setBatchErrorCount(0);
     setBatchStatus("Initialisation du scraping par lot...");
 
-    const randomized = [...selectedSkus].sort(() => Math.random() - 0.5);
+    const list = [...selectedSkus];
+    setSelectedSkus([]); // Clear selection immediately
+    showToast(`${list.length} tâches de scraping ajoutées en arrière-plan.`, "info");
 
-    for (let i = 0; i < randomized.length; i++) {
-      const sku = randomized[i];
-      setBatchStatus(`Scraping de ${sku} en cours (${i + 1}/${randomized.length})...`);
-      
+    for (const sku of list) {
       try {
-        if (mediaType === "pdf") {
-          await executeScrapePdfForSku(sku);
-        } else if (mediaType === "images") {
-          await executeScrapeImageForSku(sku);
-        } else if (mediaType === "price") {
-          await executeScrapePriceForSku(sku);
-        }
-        setBatchSuccessCount(prev => prev + 1);
-      } catch (err) {
-        console.error(err);
+        await invoke("start_background_scrape", { sku });
+      } catch (err: any) {
+        console.error("Failed to enqueue batch scrape for SKU", sku, err);
         setBatchErrorCount(prev => prev + 1);
+        setBatchProgress(prev => {
+          const next = prev + 1;
+          batchSkusRef.current.delete(sku);
+          if (batchSkusRef.current.size === 0) {
+            setIsBatchRunning(false);
+            showToast("Scraping par lot terminé !", "success");
+            syncAndFetch(config);
+          }
+          return next;
+        });
       }
-      setBatchProgress(i + 1);
-      await new Promise(r => setTimeout(r, 1000));
     }
+  }
 
-    setBatchStatus("Scraping par lot terminé !");
+  async function handleCancelBatchScrape() {
+    if (!config) return;
+    const listToCancel = Array.from(batchSkusRef.current);
+    batchSkusRef.current.clear();
     setIsBatchRunning(false);
-    setSelectedSkus([]);
+    setBatchStatus("Annulation du scraping par lot...");
+    showToast("Scraping par lot annulé.", "info");
+    
+    for (const sku of listToCancel) {
+      invoke("cancel_background_scrape", { sku }).catch(() => {});
+    }
     syncAndFetch(config);
   }
 
 
-  function sanitizeTitleForDocType(title: string, sku: string): string {
-    let t = (title || "").toLowerCase();
-    t = t.replace(/\[pdf\]/g, "");
-    t = t.replace(/pdf/g, "");
-    t = t.replace(new RegExp(sku.toLowerCase(), "g"), "");
-    t = t.replace(/legrand|schneider|siemens|abb/g, "");
-    t = t.replace(/[^a-z0-9àéèçùœ\s-_]/g, "");
-    t = t.trim().replace(/[\s-_]+/g, "_");
-    if (t.startsWith("_")) t = t.substring(1);
-    if (t.endsWith("_")) t = t.substring(0, t.length - 1);
-    if (t.length > 25) t = t.substring(0, 25);
-    return t || "document";
-  }
-
-  async function handleSaveSelectedPdf() {
-    if (!config || !selectedProduct || !selectedPdfUrl) return;
-    setIsSavingPdf(true);
-    setScrapeError(null);
-    try {
-      await invoke("save_selected_pdf", {
-        sku: selectedProduct.sku,
-        pdfUrl: selectedPdfUrl,
-        networkPath: config.network_path,
-        trigramme: config.trigramme,
-        docType: selectedPdfType || null,
-      });
-      setSelectedPdfUrl("");
-      setSelectedPdfType("");
-      setScrapedPdfCandidates([]);
-      setIsPdfValidationMode(false);
-      syncAndFetch(config).then(() => refreshSelectedProduct(selectedProduct.sku));
-    } catch (err: any) {
-      setScrapeError(`Erreur lors de l'importation : ${err.toString()}`);
-    } finally {
-      setIsSavingPdf(false);
-    }
-  }
-
-  async function handleSaveSelectedImages() {
-    if (!config || !selectedProduct || selectedImageUrls.length === 0) return;
-    setIsSavingImages(true);
-    setScrapeError(null);
-    setIsImageValidationMode(false);
-    
-    setScrapeSteps([
-      { label: "Téléchargement & validation des images sélectionnées...", status: "active" },
-      { label: "Création des miniatures & Sauvegarde réseau", status: "pending" }
-    ]);
-
-    try {
-      const downloaded = await invoke<string[]>("save_selected_images", {
-        sku: selectedProduct.sku,
-        urls: selectedImageUrls,
-        networkPath: config.network_path
-      });
-
-      setScrapeSteps([
-        { label: "Téléchargement & validation des images sélectionnées", status: "success", details: `${downloaded.length} images importées` },
-        { label: "Création des miniatures & Sauvegarde réseau", status: "success" }
-      ]);
-
-      setMovementSuccess("Images sauvegardées avec succès.");
-      await syncAndFetch(config);
-      await refreshSelectedProduct(selectedProduct.sku);
-      setTimeout(() => {
-        setScrapeModalOpen(false);
-      }, 1000);
-    } catch (err: any) {
-      const errMsg = err.toString();
-      setScrapeError(errMsg);
-      setScrapeSteps([
-        { label: "Téléchargement & validation des images sélectionnées", status: "error", details: errMsg },
-        { label: "Création des miniatures & Sauvegarde réseau", status: "pending" }
-      ]);
-      setMovementError(errMsg);
-    } finally {
-      setIsSavingImages(false);
-    }
-  }
 
   // Maintenance states
   const [maintenanceStatus, setMaintenanceStatus] = useState("");
@@ -1404,7 +1332,6 @@ function App() {
     setSelectedProduct(prod);
     setMovementSuccess("");
     setMovementError("");
-    setActiveImageIndex(0);
     try {
       const history: ProductHistoryItem[] = await invoke("get_product_history", { sku: prod.sku });
       setProductHistory(history);
@@ -1630,7 +1557,7 @@ function App() {
           console.warn("Stock initial non enregistré :", e);
         }
       }
-      setCreateSuccess("Produit créé avec succès ! Événement généré.");
+      showToast("Produit créé ! Scraping en arrière-plan...", "success");
       // Trigger background scrape for the new product
       invoke("start_background_scrape", { sku: newProduct.sku }).catch(e => {
         console.warn("Background scrape trigger failed:", e);
@@ -1741,6 +1668,60 @@ function App() {
     }
   }
 
+  function prepareEditForm(prod: Product) {
+    setEditSuccess("");
+    setEditError("");
+    setAutoFillSource(null);
+    setAutoFillFallbackInfo(null);
+    setAutoFillChanges(null);
+    
+    let site = "";
+    let code = "";
+    let attributesObj: any = {};
+    try {
+      attributesObj = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
+      if (attributesObj && attributesObj.vpc) {
+        const keys = Object.keys(attributesObj.vpc);
+        if (keys.length > 0) {
+          site = keys[0];
+          code = attributesObj.vpc[site];
+        }
+      }
+    } catch (e) {}
+    setEditVpcSite(site);
+    setEditVpcCode(code);
+
+    const formatNum = (v: any) => {
+      if (v === null || v === undefined) return "";
+      return v.toString().replace(/\./g, ",");
+    };
+
+    setEditProduct({
+      sku: prod.sku,
+      mpn: prod.mpn,
+      label: prod.label,
+      brand: prod.brand,
+      category: prod.category,
+      sub_category: prod.sub_category,
+      location: prod.location,
+      min_stock: formatNum(prod.min_stock),
+      price: formatNum(prod.price),
+      item_type: prod.item_type,
+      image_path: prod.image_path || null,
+      pdf_path: prod.pdf_path || null,
+      attributes: typeof prod.attributes === "string" ? prod.attributes : JSON.stringify(prod.attributes || {}),
+      pack_size: formatNum(prod.pack_size || 1),
+      largeur: formatNum(attributesObj.largeur || ""),
+      hauteur: formatNum(attributesObj.hauteur || ""),
+      profondeur: formatNum(attributesObj.profondeur || ""),
+      poids: formatNum(attributesObj.poids || ""),
+      notes: attributesObj.notes || ""
+    });
+    setAutofillType(site || "mpn");
+    setAutofillCodeInput(code || prod.mpn || "");
+    setShowEditModal(true);
+  }
+
   // Inline Cell Editing
   function handleCellDoubleClick(sku: string, field: string, value: any) {
     setEditingCell({ sku, field });
@@ -1799,9 +1780,15 @@ function App() {
             note: diff > 0 ? "Ajustement stock (entrée)" : "Ajustement stock (sortie)",
           });
           setEditingCell(null);
-          syncAndFetch(config);
-        } catch (err) {
+          showToast("Stock mis à jour avec succès !", "success");
+          syncAndFetch(config).then(() => {
+            if (selectedProduct && selectedProduct.sku === product.sku) {
+              refreshSelectedProduct(product.sku);
+            }
+          });
+        } catch (err: any) {
           console.error("Erreur mouvement stock :", err);
+          showToast("Erreur ajustement stock : " + err.toString(), "error");
         }
       } else {
         setEditingCell(null);
@@ -1829,9 +1816,15 @@ function App() {
         packSize: updatedProd.pack_size
       });
       setEditingCell(null);
-      syncAndFetch(config);
-    } catch (err) {
+      showToast("Référence mise à jour !", "success");
+      syncAndFetch(config).then(() => {
+        if (selectedProduct && selectedProduct.sku === product.sku) {
+          refreshSelectedProduct(product.sku);
+        }
+      });
+    } catch (err: any) {
       console.error(err);
+      showToast("Erreur modification : " + err.toString(), "error");
     }
   }
 
@@ -1858,6 +1851,63 @@ function App() {
       await refreshSelectedProduct(selectedProduct.sku);
     } catch (err: any) {
       setMovementError(err.toString());
+    }
+  }
+
+  async function handleDeleteProduct() {
+    if (!config || !selectedProduct) return;
+    try {
+      await invoke("delete_product", {
+        networkPath: config.network_path,
+        trigramme: config.trigramme,
+        sku: selectedProduct.sku
+      });
+      setSelectedProduct(null);
+      syncAndFetch(config);
+    } catch (err: any) {
+      setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+    }
+  }
+
+  async function handleDeleteMedia(mediaType: "image" | "pdf", filePath: string) {
+    if (!config || !selectedProduct) return;
+    try {
+      await invoke("delete_media", {
+        networkPath: config.network_path,
+        sku: selectedProduct.sku,
+        mediaType,
+        filePath,
+        trigramme: config.trigramme
+      });
+      if (mediaType === "image") {
+        const updatedImgs: string[] = await invoke("list_sku_images", { networkPath: config.network_path, sku: selectedProduct.sku });
+        setProductImages(updatedImgs);
+      } else {
+        const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
+        setProductPdfs(updatedPdfs);
+      }
+      syncAndFetch(config);
+    } catch (err: any) {
+      setAlertModal({ title: "Erreur de suppression", message: err.toString() });
+    }
+  }
+
+  async function handleRenameMedia(mediaType: "pdf", oldPath: string, newName: string) {
+    if (!config || !selectedProduct) return;
+    try {
+      await invoke("rename_media", {
+        networkPath: config.network_path,
+        sku: selectedProduct.sku,
+        mediaType,
+        oldPath,
+        newName,
+        trigramme: config.trigramme
+      });
+      const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
+      setProductPdfs(updatedPdfs);
+      syncAndFetch(config);
+    } catch (err: any) {
+      setAlertModal({ title: "Erreur de renommage", message: err.toString() });
     }
   }
 
@@ -2271,53 +2321,7 @@ function App() {
                                   <button
                                     type="button"
                                     title="Modifier la référence"
-                                    onClick={() => {
-                                      let site = "";
-                                      let code = "";
-                                      let attributesObj: any = {};
-                                      try {
-                                        attributesObj = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
-                                        if (attributesObj && attributesObj.vpc) {
-                                          const keys = Object.keys(attributesObj.vpc);
-                                          if (keys.length > 0) {
-                                            site = keys[0];
-                                            code = attributesObj.vpc[site];
-                                          }
-                                        }
-                                      } catch (e) {}
-                                      setEditVpcSite(site);
-                                      setEditVpcCode(code);
-                                      
-                                      const formatNum = (v: any) => {
-                                        if (v === null || v === undefined) return "";
-                                        return v.toString().replace(/\./g, ",");
-                                      };
-                                      
-                                      setEditProduct({
-                                        sku: prod.sku,
-                                        mpn: prod.mpn,
-                                        label: prod.label,
-                                        brand: prod.brand,
-                                        category: prod.category,
-                                        sub_category: prod.sub_category,
-                                        location: prod.location,
-                                        min_stock: formatNum(prod.min_stock),
-                                        price: formatNum(prod.price),
-                                        item_type: prod.item_type,
-                                        image_path: prod.image_path || null,
-                                        pdf_path: prod.pdf_path || null,
-                                        attributes: typeof prod.attributes === "string" ? prod.attributes : JSON.stringify(prod.attributes || {}),
-                                        pack_size: formatNum(prod.pack_size || 1),
-                                        largeur: formatNum(attributesObj.largeur || ""),
-                                        hauteur: formatNum(attributesObj.hauteur || ""),
-                                        profondeur: formatNum(attributesObj.profondeur || ""),
-                                        poids: formatNum(attributesObj.poids || ""),
-                                        notes: attributesObj.notes || ""
-                                      });
-                                      setAutofillType(site || "mpn");
-                                      setAutofillCodeInput(code || prod.mpn || "");
-                                      setShowEditModal(true);
-                                    }}
+                                    onClick={() => prepareEditForm(prod)}
                                     style={{
                                       background: "none",
                                       border: "none",
@@ -2799,30 +2803,12 @@ function App() {
                     <span style={{ fontSize: "11px", fontWeight: "bold" }}>{selectedSkus.length} sélectionnés</span>
                     <button
                       type="button"
-                      className="btn"
-                      style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
-                      onClick={() => runBatchScraping("images")}
+                      className="btn btn-premium-scrape"
+                      style={{ padding: "0.3rem 0.8rem", fontSize: "11px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                      onClick={runBatchScraping}
                       disabled={isBatchRunning}
                     >
-                      📷 Scraper Images
-                    </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
-                      onClick={() => runBatchScraping("pdf")}
-                      disabled={isBatchRunning}
-                    >
-                      📄 Scraper PDF
-                    </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
-                      onClick={() => runBatchScraping("price")}
-                      disabled={isBatchRunning}
-                    >
-                      💰 Scraper Prix
+                      ⚡ Lancer le Scraping par lot
                     </button>
                     <button
                       type="button"
@@ -2945,9 +2931,27 @@ function App() {
                   <div style={{ width: "100%", height: "8px", backgroundColor: "rgba(0,0,0,0.2)", borderRadius: "4px", overflow: "hidden" }}>
                     <div style={{ width: `${batchTotal > 0 ? (batchProgress / batchTotal) * 100 : 0}%`, height: "100%", backgroundColor: "var(--accent)", transition: "width 0.3s ease" }}></div>
                   </div>
-                  <div style={{ display: "flex", gap: "1rem", fontSize: "11px", marginTop: "0.4rem", color: "var(--text-secondary)" }}>
-                    <span style={{ color: "var(--success)" }}>🟢 Succès: {batchSuccessCount}</span>
-                    <span style={{ color: "var(--danger)" }}>🔴 Échecs: {batchErrorCount}</span>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", marginTop: "0.4rem" }}>
+                    <div style={{ display: "flex", gap: "1rem", color: "var(--text-secondary)" }}>
+                      <span style={{ color: "var(--success)" }}>🟢 Succès: {batchSuccessCount}</span>
+                      <span style={{ color: "var(--danger)" }}>🔴 Échecs: {batchErrorCount}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleCancelBatchScrape}
+                      style={{
+                        padding: "2px 8px",
+                        backgroundColor: "var(--danger-light)",
+                        color: "var(--danger)",
+                        border: "1px solid rgba(239, 68, 68, 0.2)",
+                        borderRadius: "4px",
+                        cursor: "pointer",
+                        fontSize: "10px",
+                        fontWeight: "600"
+                      }}
+                    >
+                      Annuler le scraping
+                    </button>
                   </div>
                 </div>
               )}
@@ -3799,1606 +3803,104 @@ function App() {
 
         {/* Right Details Panel */}
         {activeTab === "inventory" && selectedProduct && (
-          <aside 
-            className={`details-panel ${isDragging ? "dragging" : ""}`}
+          <ProductDetailPanel
+            selectedProduct={selectedProduct}
+            config={config}
+            productImages={productImages}
+            productPdfs={productPdfs}
+            productScreenshotPath={productScreenshotPath}
+            productHistory={productHistory}
+            productAuditLog={productAuditLog}
+            movementQty={movementQty}
+            setMovementQty={setMovementQty}
+            movementNote={movementNote}
+            setMovementNote={setMovementNote}
+            movementSuccess={movementSuccess}
+            movementError={movementError}
+            onStockMovement={handleStockMovement}
+            onRevertAudit={handleRevertAudit}
+            onClose={() => setSelectedProduct(null)}
+            openAutoFillModal={openAutoFillModal}
+            onOpenEdit={() => prepareEditForm(selectedProduct)}
+            onDeleteProduct={handleDeleteProduct}
+            onDeleteMedia={handleDeleteMedia}
+            onRenameMedia={handleRenameMedia}
+            onOpenPath={openPath}
+            onEnsureDirectory={async (path) => { await invoke("ensure_directory", { path }); }}
+            convertFileSrc={convertFileSrc}
+            isDragging={isDragging}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-          >
-            <div className="panel-header">
-              <span className="panel-title">Fiche : {selectedProduct.sku}</span>
-              <button className="panel-close" onClick={() => setSelectedProduct(null)}>×</button>
-            </div>
-            
-            <div className="panel-content">
-              <ScrapeProgressBadge 
-                sku={selectedProduct.sku} 
-                onOpenAutoFill={(sku) => openAutoFillModal(sku, true)}
-                onComplete={() => {
-                  if (config) {
-                    syncAndFetch(config);
-                  }
-                }}
-              />
-
-              {/* Image Container / Carousel */}
-              <div className="image-preview-container">
-                {productImages.length > 0 ? (
-                  <div className="carousel" style={{ position: "relative", width: "100%", height: "100%" }}>
-                     <img 
-                      src={convertFileSrc(`${config.network_path}/${productImages[activeImageIndex]}`.replace(/\\/g, "/"))} 
-                      alt={selectedProduct.label} 
-                      style={{ width: "100%", height: "100%", objectFit: "contain" }}
-                    />
-                    {inlineConfirm?.id === "image-delete" ? (
-                      <div className="inline-confirm" style={{ position: "absolute", top: "10px", right: "10px", backgroundColor: "rgba(239, 68, 68, 0.9)", padding: "4px 6px", borderRadius: "4px", zIndex: 10, display: "flex", gap: "6px", alignItems: "center" }}>
-                        <span style={{ color: "white", fontSize: "11px", fontWeight: "bold" }}>Supprimer ?</span>
-                        <button onClick={(e) => { e.stopPropagation(); inlineConfirm.action(); setInlineConfirm(null); }} style={{ background: "#fff", color: "var(--danger)", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "11px", fontWeight: "bold", padding: "2px 6px" }}>Oui</button>
-                        <button onClick={(e) => { e.stopPropagation(); setInlineConfirm(null); }} style={{ background: "rgba(0,0,0,0.3)", color: "white", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "11px", padding: "2px 6px" }}>Non</button>
-                      </div>
-                    ) : (
-                      <button
-                        className="btn-delete-media"
-                        title="Supprimer cette image"
-                        style={{ position: "absolute", top: "10px", right: "10px", backgroundColor: "rgba(239, 68, 68, 0.8)", border: "none", color: "#fff", borderRadius: "4px", padding: "4px 8px", cursor: "pointer", fontSize: "11px", fontWeight: "bold", zIndex: 10 }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setInlineConfirm({
-                            id: "image-delete",
-                            action: async () => {
-                              try {
-                                const imgPath = productImages[activeImageIndex];
-                                await invoke("delete_media", {
-                                  networkPath: config.network_path,
-                                  sku: selectedProduct.sku,
-                                  mediaType: "image",
-                                  filePath: imgPath,
-                                  trigramme: config.trigramme
-                                });
-                                const updatedImgs: string[] = await invoke("list_sku_images", { networkPath: config.network_path, sku: selectedProduct.sku });
-                                setProductImages(updatedImgs);
-                                setActiveImageIndex(0);
-                                syncAndFetch(config);
-                              } catch (err: any) {
-                                setAlertModal({ title: "Erreur de suppression", message: err.toString() });
-                              }
-                            }
-                          });
-                        }}
-                      >
-                        🗑️
-                      </button>
-                    )}
-                    {productImages.length > 1 && (
-                      <div className="carousel-controls" style={{ position: "absolute", bottom: "10px", left: 0, right: 0, display: "flex", justifyContent: "space-between", padding: "0 10px", alignItems: "center" }}>
-                        <button 
-                          className="carousel-btn"
-                          style={{ backgroundColor: "rgba(0,0,0,0.6)", color: "#fff", border: "none", borderRadius: "50%", width: "24px", height: "24px", cursor: "pointer" }}
-                          onClick={(e) => { e.stopPropagation(); setActiveImageIndex(prev => (prev === 0 ? productImages.length - 1 : prev - 1)); }}
-                        >
-                          ◀
-                        </button>
-                        <span className="carousel-indicator" style={{ backgroundColor: "rgba(0,0,0,0.6)", padding: "2px 6px", borderRadius: "10px", fontSize: "11px", color: "#fff" }}>
-                          {activeImageIndex + 1} / {productImages.length}
-                        </span>
-                        <button 
-                          className="carousel-btn"
-                          style={{ backgroundColor: "rgba(0,0,0,0.6)", color: "#fff", border: "none", borderRadius: "50%", width: "24px", height: "24px", cursor: "pointer" }}
-                          onClick={(e) => { e.stopPropagation(); setActiveImageIndex(prev => (prev === productImages.length - 1 ? 0 : prev + 1)); }}
-                        >
-                          ▶
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-muted)", fontSize: "12px", border: "2px dashed var(--border-color)", borderRadius: "8px" }}>
-                    <span>Pas d'image disponible</span>
-                    <span style={{ fontSize: "10px", marginTop: "4px" }}>Déposez des images ou PDFs ici</span>
-                  </div>
-                )}
-              </div>
-
-              {/* General Metadata */}
-              <div>
-                <h4 style={{ fontFamily: "var(--font-title)", marginBottom: "0.5rem" }}>{selectedProduct.label}</h4>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", fontSize: "12px" }}>
-                  <div>Marque: <strong>{selectedProduct.brand || "Inconnue"}</strong></div>
-                  <div>MPN: <strong>{selectedProduct.mpn}</strong></div>
-                  <div>SKU (Interne): <strong>{selectedProduct.sku}</strong></div>
-                  <div>Type d'article: <strong>{selectedProduct.item_type === "consumable" ? "Consommable" : "Standard"}</strong></div>
-                  <div>Famille: <strong>{selectedProduct.category || "-"}</strong></div>
-                  <div>Sous-Famille: <strong>{selectedProduct.sub_category || "-"}</strong></div>
-                  <div>Emplacement: <strong>{selectedProduct.location || "Non assigné"}</strong></div>
-                  <div>Stock Actuel: <strong>{selectedProduct.current_stock} u</strong></div>
-                  <div>Seuil Alerte: <strong>{selectedProduct.min_stock} u</strong></div>
-                  {(() => {
-                    const vpcCodeFull = getVpcCode(selectedProduct);
-                    if (vpcCodeFull) {
-                      const idx = vpcCodeFull.indexOf(":");
-                      const site = idx !== -1 ? vpcCodeFull.substring(0, idx).trim() : "VPC";
-                      const code = idx !== -1 ? vpcCodeFull.substring(idx + 1).trim() : vpcCodeFull;
-                      
-                      let url = `https://www.google.com/search?q=${encodeURIComponent(vpcCodeFull)}`;
-                      if (site.toLowerCase() === "rs" || site.toLowerCase().includes("rs component") || site.toLowerCase().includes("rs online")) {
-                        url = `https://fr.rs-online.com/web/c/?searchTerm=${encodeURIComponent(code)}`;
-                      } else if (site.toLowerCase().includes("farnell")) {
-                        url = `https://fr.farnell.com/w/c/?st=${encodeURIComponent(code)}`;
-                      } else if (site.toLowerCase().includes("mouser")) {
-                        url = `https://www.mouser.fr/Search/Refine?Keyword=${encodeURIComponent(code)}`;
-                      }
-                      
-                    
-  // Avoid unused variable compiler errors
-
-  return (
-                        <div style={{ gridColumn: "span 2", marginTop: "0.2rem" }}>
-                          Code VPC:{" "}
-                          <button
-                            type="button"
-                            className="btn-link"
-                            style={{ 
-                              background: "none", 
-                              border: "none", 
-                              color: "var(--primary)", 
-                              textDecoration: "underline", 
-                              cursor: "pointer", 
-                              padding: 0, 
-                              font: "inherit",
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: "0.2rem"
-                            }}
-                            onClick={async () => {
-                              try {
-                                await openPath(url);
-                              } catch (err) {
-                                console.error(err);
-                              }
-                            }}
-                          >
-                            🌐 {site} ({code})
-                          </button>
-                        </div>
-                      );
-                    }
-                    return null;
-                  })()}
-                  {(() => {
-                    const width = getAttribute(selectedProduct, "largeur");
-                    const height = getAttribute(selectedProduct, "hauteur");
-                    const depth = getAttribute(selectedProduct, "profondeur");
-                    const weight = getAttribute(selectedProduct, "poids");
-                    const tension = getAttribute(selectedProduct, "tension");
-                    
-                    if (width || height || depth || weight || tension) {
-                    
-  // Avoid unused variable compiler errors
-
-  return (
-                        <div style={{ gridColumn: "span 2", borderTop: "1px solid var(--border-color)", paddingTop: "0.4rem", marginTop: "0.4rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.3rem" }}>
-                          {width && <div>Largeur: <strong>{width} mm</strong></div>}
-                          {height && <div>Hauteur: <strong>{height} mm</strong></div>}
-                          {depth && <div>Profondeur: <strong>{depth} mm</strong></div>}
-                          {weight && <div>Poids: <strong>{weight} g</strong></div>}
-                          {tension && <div style={{ gridColumn: "span 2" }}>Tension: <strong>{tension}</strong></div>}
-                        </div>
-                      );
-                    }
-                    return null;
-                  })()}
-                  {(() => {
-                    const notes = getAttribute(selectedProduct, "notes");
-                    if (notes) {
-                    
-  // Avoid unused variable compiler errors
-
-  return (
-                        <div style={{ gridColumn: "span 2", borderTop: "1px solid var(--border-color)", paddingTop: "0.4rem", marginTop: "0.4rem" }}>
-                          <div style={{ fontWeight: "600", marginBottom: "0.3rem", fontSize: "11px", color: "var(--text-secondary)" }}>📝 Notes / Remarques :</div>
-                          <div style={{ fontSize: "12px", whiteSpace: "pre-wrap", color: "var(--text-primary)" }}>{notes}</div>
-                        </div>
-                      );
-                    }
-                    return null;
-                  })()}
-                  <div>
-                    {selectedProduct.pack_size > 1 ? "Prix du lot: " : "Prix unitaire: "}
-                    <strong>{selectedProduct.price.toFixed(2)} €</strong>
-                  </div>
-                  {selectedProduct.pack_size > 1 && (
-                    <>
-                      <div>Taille du lot: <strong>{selectedProduct.pack_size} u</strong></div>
-                      <div>Prix unitaire: <strong>{(selectedProduct.price / selectedProduct.pack_size).toFixed(4)} €</strong></div>
-                    </>
-                  )}
-                  <div>Valeur totale stock: <strong>{((selectedProduct.current_stock / (selectedProduct.pack_size || 1)) * selectedProduct.price).toFixed(2)} €</strong></div>
-                  
-                  {(() => {
-                    const priceUrl = getAttribute(selectedProduct, "scrape_price_url");
-                    const imageUrl = getAttribute(selectedProduct, "scrape_image_url");
-                    const docUrl = getAttribute(selectedProduct, "scrape_doc_url");
-                    
-                    if (priceUrl || imageUrl || docUrl) {
-                    
-  // Avoid unused variable compiler errors
-
-  return (
-                        <div style={{ gridColumn: "span 2", borderTop: "1px solid var(--border-color)", paddingTop: "0.4rem", marginTop: "0.4rem" }}>
-                          <div style={{ fontWeight: "600", marginBottom: "0.3rem", fontSize: "11px", color: "var(--text-secondary)" }}>Sources de scraping :</div>
-                          <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "11px" }}>
-                            {priceUrl && (
-                              <div>
-                                💸 Prix :{" "}
-                                <button
-                                  type="button"
-                                  className="btn-link"
-                                  style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
-                                  onClick={() => openPath(priceUrl)}
-                                >
-                                  Lien source
-                                </button>
-                                {productScreenshotPath && (
-                                  <>
-                                    {" | "}
-                                    <button
-                                      type="button"
-                                      className="btn-link"
-                                      style={{ background: "none", border: "none", color: "var(--success)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
-                                      onClick={() => openPath(`${config.network_path}/${productScreenshotPath}`.replace(/\//g, "\\"))}
-                                      title="Consulter la capture d'écran de la page source"
-                                    >
-                                      📸 Capture
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            )}
-                            {imageUrl && (
-                              <div>
-                                🖼️ Image :{" "}
-                                <button
-                                  type="button"
-                                  className="btn-link"
-                                  style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
-                                  onClick={() => openPath(imageUrl)}
-                                >
-                                  Lien source
-                                </button>
-                              </div>
-                            )}
-                            {docUrl && (
-                              <div>
-                                📄 Notice :{" "}
-                                <button
-                                  type="button"
-                                  className="btn-link"
-                                  style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
-                                  onClick={() => openPath(docUrl)}
-                                >
-                                  Lien source
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    }
-                    return null;
-                  })()}
-                </div>
-
-                <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
-                  <button
-                    type="button"
-                    className="btn btn-premium-scrape"
-                    style={{ flex: 1, padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px" }}
-                    onClick={() => openAutoFillModal(selectedProduct.sku, true)}
-                  >
-                    ✨ Voir les données scrapées
-                  </button>
-                </div>
-                {movementError && movementError.includes("déjà en cours") && (
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    style={{ marginTop: "0.5rem", fontSize: "11px", padding: "0.2rem 0.5rem", width: "100%", backgroundColor: "var(--danger-light)", color: "var(--danger)" }}
-                    onClick={async () => {
-                      await invoke("force_release_lock", { networkPath: config.network_path });
-                      setMovementError("");
-                      setAlertModal({ title: "Déverrouillage", message: "Verrou forcé et libéré !" });
-                    }}
-                  >
-                    🔓 Forcer le déverrouillage du Scraping
-                  </button>
-                )}
-
-                <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.8rem", marginBottom: "0.8rem" }}>
-                  <button 
-                    type="button" 
-                    className="btn btn-secondary" 
-                    style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "12px" }}
-                    onClick={() => {
-                      setEditSuccess("");
-                      setEditError("");
-                      setAutoFillSource(null);
-                      setAutoFillFallbackInfo(null);
-                      
-                      let site = "";
-                      let code = "";
-                      let attributesObj: any = {};
-                      try {
-                        attributesObj = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes || "{}") : selectedProduct.attributes;
-                        if (attributesObj && attributesObj.vpc) {
-                          const keys = Object.keys(attributesObj.vpc);
-                          if (keys.length > 0) {
-                            site = keys[0];
-                            code = attributesObj.vpc[site];
-                          }
-                        }
-                      } catch (e) {}
-                      setEditVpcSite(site);
-                      setEditVpcCode(code);
-
-                      const formatNum = (v: any) => {
-                        if (v === null || v === undefined) return "";
-                        return v.toString().replace(/\./g, ",");
-                      };
-
-                      setEditProduct({
-                        sku: selectedProduct.sku,
-                        mpn: selectedProduct.mpn,
-                        label: selectedProduct.label,
-                        brand: selectedProduct.brand,
-                        category: selectedProduct.category,
-                        sub_category: selectedProduct.sub_category,
-                        location: selectedProduct.location,
-                        min_stock: formatNum(selectedProduct.min_stock),
-                        price: formatNum(selectedProduct.price),
-                        item_type: selectedProduct.item_type,
-                        image_path: selectedProduct.image_path || null,
-                        pdf_path: selectedProduct.pdf_path || null,
-                        attributes: typeof selectedProduct.attributes === "string" ? selectedProduct.attributes : JSON.stringify(selectedProduct.attributes || {}),
-                        pack_size: formatNum(selectedProduct.pack_size || 1),
-                        largeur: formatNum(attributesObj.largeur || ""),
-                        hauteur: formatNum(attributesObj.hauteur || ""),
-                        profondeur: formatNum(attributesObj.profondeur || ""),
-                        poids: formatNum(attributesObj.poids || ""),
-                        notes: attributesObj.notes || ""
-                      });
-                      setAutofillType(site || "mpn");
-                      setAutofillCodeInput(code || selectedProduct.mpn || "");
-                      setShowEditModal(true);
-                    }}
-                  >
-                    ✏️ Modifier
-                  </button>
-                  {inlineConfirm?.id === "product-delete" ? (
-                    <div style={{ flex: 1, display: "flex", gap: "0.5rem", alignItems: "center", justifyContent: "center", backgroundColor: "rgba(239, 68, 68, 0.1)", borderRadius: "6px", padding: "0 0.5rem" }}>
-                      <span style={{ color: "var(--danger)", fontSize: "12px", fontWeight: "bold" }}>Sûr ?</span>
-                      <button type="button" className="btn" style={{ background: "var(--danger)", color: "#fff", padding: "0.3rem 0.6rem", fontSize: "12px" }} onClick={() => {
-                        inlineConfirm.action();
-                        setInlineConfirm(null);
-                      }}>Oui</button>
-                      <button type="button" className="btn" style={{ background: "var(--bg-lighter)", color: "var(--text-color)", padding: "0.3rem 0.6rem", fontSize: "12px" }} onClick={() => setInlineConfirm(null)}>Non</button>
-                    </div>
-                  ) : (
-                    <button 
-                      type="button" 
-                      className="btn btn-danger" 
-                      style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "12px", backgroundColor: "var(--danger)" }}
-                      onClick={() => {
-                        setInlineConfirm({
-                          id: "product-delete",
-                          action: async () => {
-                            try {
-                              await invoke("delete_product", {
-                                networkPath: config.network_path,
-                                trigramme: config.trigramme,
-                                sku: selectedProduct.sku
-                              });
-                              setSelectedProduct(null);
-                              syncAndFetch(config);
-                            } catch (err: any) {
-                              setAlertModal({ title: "Erreur de suppression", message: err.toString() });
-                            }
-                          }
-                        });
-                      }}
-                    >
-                      🗑️ Supprimer
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* PDF Document action */}
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.2rem" }}>
-                  <h4 style={{ fontFamily: "var(--font-title)", fontSize: "12px", margin: 0 }}>Documents PDF</h4>
-                  <button
-                    className="btn btn-secondary"
-                    style={{ padding: "0.25rem 0.5rem", fontSize: "10px" }}
-                    onClick={async () => {
-                      if (!config || !selectedProduct) return;
-                      const sanitizeFolderName = (name: string): string => {
-                        const clean = (name || "").trim()
-                          .replace(/\//g, "-")
-                          .replace(/\\/g, "-")
-                          .replace(/:/g, "-")
-                          .replace(/\*/g, "-")
-                          .replace(/\?/g, "-")
-                          .replace(/"/g, "-")
-                          .replace(/</g, "-")
-                          .replace(/>/g, "-")
-                          .replace(/\|/g, "-");
-                        return clean || "INCONNU";
-                      };
-                      const sanitizeSku = (sku: string): string => {
-                      
-  // Avoid unused variable compiler errors
-
-  return (sku || "").trim()
-                          .replace(/\s+/g, "")
-                          .replace(/\//g, "-")
-                          .replace(/\\/g, "-")
-                          .replace(/:/g, "-")
-                          .replace(/\*/g, "-")
-                          .replace(/\?/g, "-")
-                          .replace(/"/g, "-")
-                          .replace(/</g, "-")
-                          .replace(/>/g, "-")
-                          .replace(/\|/g, "-")
-                          .toUpperCase();
-                      };
-                      const brand = sanitizeFolderName(selectedProduct.brand);
-                      const cat = sanitizeFolderName(selectedProduct.category);
-                      const sub = sanitizeFolderName(selectedProduct.sub_category);
-                      const sku = sanitizeSku(selectedProduct.sku);
-                      const path = `${config.network_path}/documents/${brand}/${cat}/${sub}/${sku}`.replace(/\//g, "\\");
-                      try {
-                        await invoke("ensure_directory", { path });
-                        await openPath(path);
-                      } catch (err: any) {
-                        setMovementError(`Impossible d'ouvrir le dossier : ${err.toString()}`);
-                      }
-                    }}
-                  >
-                    📂 Ouvrir dossier
-                  </button>
-                </div>
-                {productPdfs.length > 0 ? (
-                  productPdfs.map((pdf, idx) => {
-                    const fileName = pdf.split("/").pop() || "Manuel PDF";
-                    const isEditing = editingPdfPath === pdf;
-                  
-  // Avoid unused variable compiler errors
-
-  return (
-                      <div key={idx} style={{ display: "flex", gap: "0.3rem" }}>
-                        {isEditing ? (
-                          <div style={{ display: "flex", gap: "0.2rem", flex: 1 }}>
-                            <input
-                              type="text"
-                              style={{ padding: "0.3rem 0.5rem", fontSize: "11px", flex: 1 }}
-                              value={newPdfName}
-                              onChange={(e) => setNewPdfName(e.target.value)}
-                            />
-                            <button
-                              className="btn"
-                              style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
-                              onClick={async () => {
-                                try {
-                                  await invoke("rename_media", {
-                                    networkPath: config.network_path,
-                                    sku: selectedProduct.sku,
-                                    mediaType: "pdf",
-                                    oldPath: pdf,
-                                    newName: newPdfName,
-                                    trigramme: config.trigramme
-                                  });
-                                  setEditingPdfPath(null);
-                                  const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
-                                  setProductPdfs(updatedPdfs);
-                                  syncAndFetch(config);
-                                } catch (err: any) {
-                                  setAlertModal({ title: "Erreur de renommage", message: err.toString() });
-                                }
-                              }}
-                            >
-                              ✔️
-                            </button>
-                            <button
-                              className="btn btn-secondary"
-                              style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
-                              onClick={() => setEditingPdfPath(null)}
-                            >
-                              ❌
-                            </button>
-                          </div>
-                        ) : (
-                          <>
-                            <button 
-                              className="btn btn-secondary"
-                              style={{ flex: 1, padding: "0.4rem 0.6rem", fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}
-                              onClick={async () => {
-                                const fullPath = `${config.network_path}/${pdf}`.replace(/\//g, "\\");
-                                try {
-                                  await openPath(fullPath);
-                                } catch (err: any) {
-                                  setMovementError(`Impossible d'ouvrir le PDF : ${err.toString()}`);
-                                }
-                              }}
-                            >
-                              📄 {fileName}
-                            </button>
-                            <button
-                              className="btn btn-secondary"
-                              title="Renommer"
-                              style={{ padding: "0.4rem 0.5rem", fontSize: "11px", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
-                              onClick={() => {
-                                setEditingPdfPath(pdf);
-                                setNewPdfName(fileName.replace(".pdf", "").replace(".PDF", ""));
-                              }}
-                            >
-                              ✏️
-                            </button>
-                          </>
-                        )}
-                        {inlineConfirm?.id === `pdf-delete-${fileName}` ? (
-                          <div style={{ display: "flex", gap: "4px", alignItems: "center", backgroundColor: "rgba(239, 68, 68, 0.9)", padding: "2px 4px", borderRadius: "4px", flexShrink: 0 }}>
-                            <span style={{ color: "white", fontSize: "10px", fontWeight: "bold" }}>Sûr ?</span>
-                            <button onClick={(e) => { e.stopPropagation(); inlineConfirm.action(); setInlineConfirm(null); }} style={{ background: "#fff", color: "var(--danger)", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "10px", fontWeight: "bold", padding: "2px 6px" }}>Oui</button>
-                            <button onClick={(e) => { e.stopPropagation(); setInlineConfirm(null); }} style={{ background: "rgba(0,0,0,0.3)", color: "white", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "10px", padding: "2px 6px" }}>Non</button>
-                          </div>
-                        ) : (
-                          <button
-                            className="btn btn-danger"
-                            title="Supprimer cette notice"
-                            style={{ backgroundColor: "var(--danger)", color: "#fff", padding: "0 0.5rem", border: "none", borderRadius: "6px", cursor: "pointer", flexShrink: 0 }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setInlineConfirm({
-                                id: `pdf-delete-${fileName}`,
-                                action: async () => {
-                                  try {
-                                    await invoke("delete_media", {
-                                      networkPath: config.network_path,
-                                      sku: selectedProduct.sku,
-                                      mediaType: "pdf",
-                                      filePath: pdf,
-                                      trigramme: config.trigramme
-                                    });
-                                    const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: selectedProduct.sku });
-                                    setProductPdfs(updatedPdfs);
-                                    syncAndFetch(config);
-                                  } catch (err: any) {
-                                    setAlertModal({ title: "Erreur de suppression", message: err.toString() });
-                                  }
-                                }
-                              });
-                            }}
-                          >
-                            🗑️
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div style={{ fontSize: "11px", color: "var(--text-muted)", textAlign: "center", padding: "0.5rem", border: "1px dashed var(--border-color)", borderRadius: "6px" }}>
-                    Aucune fiche technique PDF associée.
-                  </div>
-                )}
-              </div>
-
-              {/* Movement controls */}
-              <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "1rem" }}>
-                <h4 style={{ fontFamily: "var(--font-title)", marginBottom: "0.8rem" }}>Effectuer un mouvement</h4>
-                {movementSuccess && <div className="wizard-error" style={{ color: "var(--success)", backgroundColor: "var(--success-light)", borderColor: "rgba(16,185,129,0.2)" }}>{movementSuccess}</div>}
-                {movementError && <div className="wizard-error">{movementError}</div>}
-                
-                <div className="form-group" style={{ marginBottom: "0.8rem" }}>
-                  <label htmlFor="m-qty">Quantité :</label>
-                  <input
-                    id="m-qty"
-                    type="text"
-                    value={movementQty}
-                    onChange={(e) => setMovementQty(cleanNumericInput(e.target.value))}
-                  />
-                </div>
-                <div className="form-group" style={{ marginBottom: "0.8rem" }}>
-                  <label htmlFor="m-note">Note / Raison :</label>
-                  <input
-                    id="m-note"
-                    type="text"
-                    placeholder="ex: Commande client, Réception lot"
-                    value={movementNote}
-                    onChange={(e) => setMovementNote(e.target.value)}
-                  />
-                </div>
-                <div className="row" style={{ gap: "0.5rem" }}>
-                  <button 
-                    type="button" 
-                    className="btn" 
-                    style={{ flex: 1, backgroundColor: "var(--success)" }}
-                    onClick={() => handleStockMovement("STOCK_IN")}
-                  >
-                    📥 Entrée Stock
-                  </button>
-                  <button 
-                    type="button" 
-                    className="btn" 
-                    style={{ flex: 1, backgroundColor: "var(--danger)" }}
-                    onClick={() => handleStockMovement("STOCK_OUT")}
-                  >
-                    📤 Sortie Stock
-                  </button>
-                </div>
-              </div>
-
-              {/* Traceability list */}
-              <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "1rem" }}>
-                <h4 style={{ fontFamily: "var(--font-title)", marginBottom: "0.8rem" }}>Historique des Mouvements</h4>
-                <div className="history-list">
-                  {productHistory.length === 0 ? (
-                    <div style={{ padding: "0.8rem", color: "var(--text-muted)", fontSize: "11px" }}>
-                      Aucun mouvement sur cette référence.
-                    </div>
-                  ) : (
-                    productHistory.map((item, idx) => (
-                      <div key={idx} className="history-item">
-                        <div className="history-meta">
-                          <span>{new Date(item.timestamp).toLocaleString("fr-FR")}</span>
-                          <span>Par : {item.trigramme}</span>
-                        </div>
-                        <div>
-                          <strong>{item.event_type === "STOCK_IN" ? "Entrée" : "Sortie"}</strong> de{" "}
-                          <strong>{item.qty}</strong> unités — <em>{item.note}</em>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              {/* Audit Log */}
-              <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "1rem" }}>
-                <h4 style={{ fontFamily: "var(--font-title)", marginBottom: "0.8rem" }}>📋 Journal des Modifications</h4>
-                <div className="history-list">
-                  {productAuditLog.length === 0 ? (
-                    <div style={{ padding: "0.8rem", color: "var(--text-muted)", fontSize: "11px" }}>
-                      Aucune modification enregistrée.
-                    </div>
-                  ) : (
-                    productAuditLog.map((item) => {
-                      const date = new Date(item.timestamp);
-                      const dateStr = date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "2-digit" });
-                      const timeStr = date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-
-                      let badge = "🔵";
-                      let badgeClass = "audit-badge-update";
-                      let content: React.ReactNode = "";
-
-                      if (item.action === "CREATE") {
-                        badge = "🟢";
-                        badgeClass = "audit-badge-create";
-                        content = <span>Création de la référence</span>;
-                      } else if (item.action === "UPDATE") {
-                        badge = "🔵";
-                        badgeClass = "audit-badge-update";
-                        content = (
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
-                            <span>
-                              <strong>{item.field}</strong> : <span className="audit-old-value">{item.old_value || "—"}</span> → <span className="audit-new-value">{item.new_value || "—"}</span>
-                              {item.source_url && (
-                                <> {" "}
-                                  <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
-                                    🔗 source
-                                  </a>
-                                </>
-                              )}
-                            </span>
-                            {inlineConfirm?.id === `revert-audit-${item.audit_id}` ? (
-                              <div style={{ display: "inline-flex", gap: "4px", alignItems: "center", backgroundColor: "rgba(59, 130, 246, 0.15)", padding: "2px 6px", borderRadius: "4px", marginLeft: "0.5rem", flexShrink: 0 }}>
-                                <span style={{ fontSize: "10px", color: "var(--text-secondary)", fontWeight: "600" }}>Restaurer ?</span>
-                                <button 
-                                  type="button" 
-                                  onClick={(e) => { e.stopPropagation(); inlineConfirm.action(); setInlineConfirm(null); }} 
-                                  style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "9px", padding: "1px 5px", fontWeight: "bold" }}
-                                >
-                                  Oui
-                                </button>
-                                <button 
-                                  type="button" 
-                                  onClick={(e) => { e.stopPropagation(); setInlineConfirm(null); }} 
-                                  style={{ background: "var(--bg-lighter)", color: "var(--text-primary)", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "9px", padding: "1px 5px" }}
-                                >
-                                  Non
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                className="btn-link"
-                                style={{
-                                  background: "none",
-                                  border: "none",
-                                  color: "var(--accent)",
-                                  textDecoration: "underline",
-                                  cursor: "pointer",
-                                  padding: 0,
-                                  fontSize: "10px",
-                                  font: "inherit",
-                                  marginLeft: "0.5rem",
-                                  whiteSpace: "nowrap"
-                                }}
-                                onClick={() => setInlineConfirm({
-                                  id: `revert-audit-${item.audit_id}`,
-                                  action: () => handleRevertAudit(item)
-                                })}
-                              >
-                                ↩️ Restaurer
-                              </button>
-                            )}
-                          </div>
-                        );
-                      } else if (item.action === "SCRAPE_PRICE") {
-                        badge = "🟠";
-                        badgeClass = "audit-badge-scrape";
-                        content = (
-                          <span>
-                            Prix scrappé : <strong>{item.new_value} €</strong>
-                            {item.source_url && (
-                              <> {" "}
-                                <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
-                                  🔗 source
-                                </a>
-                              </>
-                            )}
-                          </span>
-                        );
-                      } else if (item.action === "SCRAPE_PDF") {
-                        badge = "📄";
-                        badgeClass = "audit-badge-scrape";
-                        content = (
-                          <span>
-                            Notice téléchargée{item.field ? ` (${item.field})` : ""}
-                            {item.source_url && (
-                              <> {" "}
-                                <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
-                                  🔗 source
-                                </a>
-                              </>
-                            )}
-                          </span>
-                        );
-                      } else if (item.action === "SCRAPE_IMAGE") {
-                        badge = "🖼️";
-                        badgeClass = "audit-badge-scrape";
-                        content = (
-                          <span>
-                            Image téléchargée
-                            {item.source_url && (
-                              <> {" "}
-                                <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="audit-link" title={item.source_url}>
-                                  🔗 source
-                                </a>
-                              </>
-                            )}
-                          </span>
-                        );
-                      }
-
-                    
-  // Avoid unused variable compiler errors
-
-  return (
-                        <div key={item.audit_id} className={`audit-item ${badgeClass}`}>
-                          <div className="audit-meta">
-                            <span className="audit-badge">{badge}</span>
-                            <span className="audit-date">{dateStr} {timeStr}</span>
-                            <span className="audit-trigramme">{item.trigramme}</span>
-                          </div>
-                          <div className="audit-content">{content}</div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-            </div>
-          </aside>
+          />
         )}
       </div>
 
       {/* Add SKU Modal */}
       {showAddModal && (
-        <div className="modal-overlay">
-          <div className="modal-container">
-            <div className="modal-header">
-              <h3>Ajouter un nouveau SKU</h3>
-              <button className="modal-close" onClick={() => { setShowAddModal(false); setAutoFillSource(null); setAutoFillFallbackInfo(null); setAutoFillChanges(null); }}>×</button>
-            </div>
-            <form onSubmit={handleCreateProduct}>
-              <div className="modal-body">
-                {createSuccess && <div className="wizard-error" style={{ color: "var(--success)", backgroundColor: "var(--success-light)", borderColor: "rgba(16,185,129,0.2)" }}>{createSuccess}</div>}
-                {createError && <div className="wizard-error">{createError}</div>}
-                {duplicateWarning && <div className="wizard-error" style={{ color: "var(--warning)", backgroundColor: "var(--warning-light)", borderColor: "rgba(245,158,11,0.2)" }}>{duplicateWarning}</div>}
-
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "0.8rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
-                  <div style={{ fontSize: "11px", fontWeight: "bold", color: "var(--text-secondary)" }}>
-                    🚀 Auto-remplissage rapide
-                  </div>
-                  <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                    <select
-                      id="modal-autofill-type"
-                      value={autofillType}
-                      onChange={(e) => setAutofillType(e.target.value)}
-                      style={{ width: "160px", padding: "0.3rem", fontSize: "12px", height: "32px" }}
-                    >
-                      <option value="mpn">Référence fabricant (MPN)</option>
-                      {config?.vpc_sites?.map(s => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </select>
-                    <input
-                      id="modal-autofill-code"
-                      type="text"
-                      placeholder="Saisir la référence / le code..."
-                      value={autofillCodeInput}
-                      onChange={(e) => setAutofillCodeInput(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleLaunchUnifiedScrape(false); } }}
-                      style={{ flex: 1, padding: "0.3rem", fontSize: "12px", height: "32px" }}
-                    />
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ padding: "0 1rem", fontSize: "12px", height: "32px" }}
-                      disabled={scrapeZoneLoading}
-                      onClick={() => handleLaunchUnifiedScrape(false)}
-                    >
-                      {scrapeZoneLoading ? "⏳ ..." : "🔍 Scraper"}
-                    </button>
-                  </div>
-                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.4rem" }}>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ flex: 1, fontSize: "12px", height: "32px", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", backgroundColor: "rgba(99, 102, 241, 0.15)", border: "1px solid rgba(99, 102, 241, 0.3)", color: "var(--primary-color)" }}
-                      onClick={() => openAutoFillModal(newProduct.sku, false)}
-                    >
-                      ✨ Auto-remplissage (Candidats)
-                    </button>
-                  </div>
-                </div>
-
-                {autoFillSource && (
-                  <div className="autofill-source-info">
-                    🌐 Source détectée : <a href={autoFillSource} target="_blank" rel="noopener noreferrer">{autoFillSource}</a>
-                  </div>
-                )}
-                {autoFillFallbackInfo && (
-                  <div className="autofill-fallback-info" style={{ fontSize: "11px", color: "var(--warning)", marginTop: "0.2rem", backgroundColor: "rgba(245,158,11,0.1)", padding: "0.4rem", borderRadius: "4px", border: "1px solid rgba(245,158,11,0.2)" }}>
-                    ⚠️ {autoFillFallbackInfo}
-                  </div>
-                )}
-
-                {autoFillChanges && (
-                  <div style={{ marginBottom: "0.8rem", backgroundColor: "rgba(99,102,241,0.08)", padding: "0.6rem 0.8rem", borderRadius: "6px", border: "1px solid rgba(99,102,241,0.25)" }}>
-                    <div style={{ fontSize: "11px", fontWeight: "bold", color: "var(--accent)", marginBottom: "0.3rem" }}>📋 Modifications à appliquer</div>
-                    <div style={{ fontSize: "11px", color: "var(--text-secondary)", display: "flex", flexWrap: "wrap", gap: "0.3rem 1rem" }}>
-                      {autoFillChanges.label && <span>🏷️ Désignation → <strong>{autoFillChanges.label}</strong></span>}
-                      {autoFillChanges.brand && <span>🏭 Marque → <strong>{autoFillChanges.brand}</strong></span>}
-                      {autoFillChanges.mpn && <span>🔢 MPN → <strong>{autoFillChanges.mpn}</strong></span>}
-                      {autoFillChanges.price !== undefined && <span>💰 Prix → <strong>{autoFillChanges.price} €</strong></span>}
-                      {autoFillChanges.largeur && <span>📐 Dims → <strong>{autoFillChanges.largeur}×{autoFillChanges.hauteur || "—"}×{autoFillChanges.profondeur || "—"}</strong></span>}
-                      {autoFillChanges.poids && <span>⚖️ Poids → <strong>{autoFillChanges.poids} g</strong></span>}
-                      {autoFillChanges.image_urls && autoFillChanges.image_urls.length > 0 && <span>🖼️ {autoFillChanges.image_urls.length} image(s)</span>}
-                    </div>
-                    <div style={{ fontSize: "10px", color: "var(--text-tertiary)", marginTop: "0.3rem" }}>Vérifie les champs ci-dessous puis clique sur "Créer" pour enregistrer.</div>
-                  </div>
-                )}
-
-                {/* 1. Identification */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">1. Identification</div>
-                  
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <label htmlFor="modal-p-sku">SKU (Référence Interne) *</label>
-                      <input
-                        id="modal-p-sku"
-                        type="text"
-                        required
-                        list="skus-datalist"
-                        value={newProduct.sku}
-                        onChange={(e) => handleSkuChange(e.target.value)}
-                        placeholder="ex: 6ES75070RA000AB0"
-                      />
-                    </div>
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="modal-p-mpn">Référence Fabricant (MPN)</label>
-                          <input
-                            id="modal-p-mpn"
-                            type="text"
-                            list="mpns-datalist"
-                            value={newProduct.mpn}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, mpn: e.target.value }))}
-                            placeholder="Identique SKU si vide"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 3 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="modal-p-label">Désignation Produit *</label>
-                          <input
-                            id="modal-p-label"
-                            type="text"
-                            required
-                            list="labels-datalist"
-                            value={newProduct.label}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, label: e.target.value }))}
-                            placeholder="ex: Siemens S7-1500 PS 60W"
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="modal-p-brand">Marque</label>
-                          <input
-                            id="modal-p-brand"
-                            type="text"
-                            list="brands-datalist"
-                            value={newProduct.brand}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, brand: e.target.value }))}
-                            placeholder="ex: Siemens"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 2. Fournisseur VPC */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span>2. Fournisseur VPC</span>
-                    {!newVpcCode.trim() && (
-                      <button
-                        type="button"
-                        className="btn-field-autofill"
-                        style={{
-                          marginTop: 0,
-                          height: "22px",
-                          width: "auto",
-                          padding: "0 0.5rem",
-                          fontSize: "10px",
-                          backgroundColor: "var(--accent)",
-                          color: "#fff",
-                          borderColor: "var(--accent)",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.2rem"
-                        }}
-                        disabled={scrapeZoneLoading}
-                        onClick={() => handleLaunchUnifiedScrape(false)}
-                      >
-                        {scrapeZoneLoading ? "⏳ ..." : "🔍 Rechercher un revendeur"}
-                      </button>
-                    )}
-                  </div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="modal-p-vpc-site">Fournisseur VPC</label>
-                      <select
-                        id="modal-p-vpc-site"
-                        value={newVpcSite}
-                        onChange={(e) => setNewVpcSite(e.target.value)}
-                      >
-                        <option value="">Sélectionner</option>
-                        {config?.vpc_sites?.map(s => <option key={s} value={s}>{s}</option>)}
-                      </select>
-                    </div>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="modal-p-vpc-code">Code VPC (Catalogue)</label>
-                      <input
-                        id="modal-p-vpc-code"
-                        type="text"
-                        placeholder="ex: RS-123-456"
-                        value={newVpcCode}
-                        onChange={(e) => setNewVpcCode(e.target.value)}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* 3. Classification */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">3. Classification</div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="modal-p-cat">Famille (Sans auto-remplissage)</label>
-                      <input
-                        id="modal-p-cat"
-                        type="text"
-                        list="categories-datalist"
-                        value={newProduct.category}
-                        onChange={(e) => setNewProduct(prev => ({ ...prev, category: e.target.value }))}
-                        placeholder="ex: Automatisme"
-                      />
-                    </div>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="modal-p-subcat">Sous-Famille (Sans auto-remplissage)</label>
-                      <input
-                        id="modal-p-subcat"
-                        type="text"
-                        list="add-subcategories-datalist"
-                        value={newProduct.sub_category}
-                        onChange={(e) => setNewProduct(prev => ({ ...prev, sub_category: e.target.value }))}
-                        placeholder="ex: Alimentation"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* 4. Logistique */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">4. Logistique</div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <label htmlFor="modal-p-loc">Emplacement Physique</label>
-                      <input
-                        id="modal-p-loc"
-                        type="text"
-                        list="locations-datalist"
-                        value={newProduct.location}
-                        onChange={(e) => setNewProduct(prev => ({ ...prev, location: e.target.value }))}
-                        placeholder="ex: MAG-A1-E2-B3"
-                      />
-                    </div>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="modal-p-min">Seuil Alerte Stock</label>
-                      <input
-                        id="modal-p-min"
-                        type="text"
-                        list="minstocks-datalist"
-                        value={newProduct.min_stock}
-                        onChange={(e) => setNewProduct(prev => ({ ...prev, min_stock: cleanNumericInput(e.target.value) }))}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="modal-p-initial-stock" style={{ color: "var(--success)", fontWeight: 600 }}>
-                        📦 Stock initial (à la création)
-                      </label>
-                      <input
-                        id="modal-p-initial-stock"
-                        type="text"
-                        placeholder="0"
-                        value={newProduct.initial_stock}
-                        onChange={(e) => setNewProduct(prev => ({ ...prev, initial_stock: cleanNumericInput(e.target.value) }))}
-                        style={{ borderColor: Number(newProduct.initial_stock) > 0 ? "var(--success)" : undefined }}
-                      />
-                      {Number(newProduct.initial_stock) > 0 && (
-                        <span style={{ fontSize: "11px", color: "var(--success)", marginTop: "2px", display: "block" }}>
-                          Un mouvement d'entrée de {newProduct.initial_stock} unité(s) sera créé automatiquement.
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="modal-p-price">Prix d'Achat (€)</label>
-                          <input
-                            id="modal-p-price"
-                            type="text"
-                            list="prices-datalist"
-                            value={newProduct.price}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, price: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="modal-p-pack">Taille du Lot (pack)</label>
-                          <input
-                            id="modal-p-pack"
-                            type="text"
-                            value={newProduct.pack_size}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, pack_size: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 5. Caractéristiques Physiques */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">5. Caractéristiques Physiques</div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="modal-p-largeur">Largeur (mm)</label>
-                          <input
-                            id="modal-p-largeur"
-                            type="text"
-                            placeholder="Largeur"
-                            value={newProduct.largeur}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, largeur: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="modal-p-hauteur">Hauteur (mm)</label>
-                          <input
-                            id="modal-p-hauteur"
-                            type="text"
-                            placeholder="Hauteur"
-                            value={newProduct.hauteur}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, hauteur: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="modal-p-profondeur">Profondeur (mm)</label>
-                          <input
-                            id="modal-p-profondeur"
-                            type="text"
-                            placeholder="Profondeur"
-                            value={newProduct.profondeur}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, profondeur: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="modal-p-poids">Poids (g)</label>
-                          <input
-                            id="modal-p-poids"
-                            type="text"
-                            placeholder="Poids"
-                            value={newProduct.poids}
-                            onChange={(e) => setNewProduct(prev => ({ ...prev, poids: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 6. Notes / Remarques */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">6. Notes / Remarques</div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="modal-p-notes">Notes / Remarques</label>
-                      <textarea
-                        id="modal-p-notes"
-                        placeholder="Notes de maintenance, observations, etc."
-                        value={newProduct.notes}
-                        onChange={(e) => setNewProduct(prev => ({ ...prev, notes: e.target.value }))}
-                        style={{ width: "100%", height: "80px", padding: "0.5rem", borderRadius: "4px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-primary)", color: "var(--text-primary)", resize: "vertical", fontSize: "12px", fontFamily: "inherit" }}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-              </div>
-              <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => { setShowAddModal(false); setAutoFillSource(null); setAutoFillChanges(null); }}>Annuler</button>
-                <button type="submit" className="btn">Créer le SKU</button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <ProductForm
+          mode="create"
+          productData={newProduct}
+          setProductData={setNewProduct}
+          onChangeSku={handleSkuChange}
+          vpcSite={newVpcSite}
+          vpcCode={newVpcCode}
+          setVpcSite={setNewVpcSite}
+          setVpcCode={setNewVpcCode}
+          config={config}
+          onSubmit={handleCreateProduct}
+          onClose={() => {
+            setShowAddModal(false);
+            setAutoFillSource(null);
+            setAutoFillFallbackInfo(null);
+            setAutoFillChanges(null);
+          }}
+          autofillType={autofillType}
+          setAutofillType={setAutofillType}
+          autofillCodeInput={autofillCodeInput}
+          setAutofillCodeInput={setAutofillCodeInput}
+          scrapeZoneLoading={scrapeZoneLoading}
+          onScrape={handleLaunchUnifiedScrape}
+          onOpenAutoFill={openAutoFillModal}
+          autoFillSource={autoFillSource}
+          autoFillFallbackInfo={autoFillFallbackInfo}
+          autoFillChanges={autoFillChanges}
+          successMessage={createSuccess}
+          errorMessage={createError}
+          duplicateWarning={duplicateWarning}
+        />
       )}
 
       {/* Edit SKU Modal */}
       {showEditModal && (
-        <div className="modal-overlay">
-          <div className="modal-container">
-            <div className="modal-header">
-              <h3>Modifier le SKU : {editProduct.sku}</h3>
-              <button className="modal-close" onClick={() => { setShowEditModal(false); setAutoFillSource(null); setAutoFillFallbackInfo(null); setAutoFillChanges(null); }}>×</button>
-            </div>
-            <form onSubmit={handleEditProduct}>
-              <div className="modal-body">
-                {editSuccess && <div className="wizard-error" style={{ color: "var(--success)", backgroundColor: "var(--success-light)", borderColor: "rgba(16,185,129,0.2)" }}>{editSuccess}</div>}
-                {editError && <div className="wizard-error">{editError}</div>}
-
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "0.8rem", backgroundColor: "var(--bg-secondary)", padding: "0.8rem", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
-                  <div style={{ fontSize: "11px", fontWeight: "bold", color: "var(--text-secondary)" }}>
-                    🚀 Auto-remplissage rapide
-                  </div>
-                  <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                    <select
-                      value={autofillType}
-                      onChange={(e) => setAutofillType(e.target.value)}
-                      style={{ width: "160px", padding: "0.3rem", fontSize: "12px", height: "32px" }}
-                    >
-                      <option value="mpn">Référence fabricant (MPN)</option>
-                      {config?.vpc_sites?.map(s => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </select>
-                    <input
-                      type="text"
-                      placeholder="Saisir la référence / le code..."
-                      value={autofillCodeInput}
-                      onChange={(e) => setAutofillCodeInput(e.target.value)}
-                      style={{ flex: 1, padding: "0.3rem", fontSize: "12px", height: "32px" }}
-                    />
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ padding: "0 1rem", fontSize: "12px", height: "32px" }}
-                      disabled={scrapeZoneLoading}
-                      onClick={() => handleLaunchUnifiedScrape(true)}
-                    >
-                      {scrapeZoneLoading ? "⏳ ..." : "🔍 Scraper"}
-                    </button>
-                  </div>
-                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.4rem" }}>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ flex: 1, fontSize: "12px", height: "32px", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", backgroundColor: "rgba(99, 102, 241, 0.15)", border: "1px solid rgba(99, 102, 241, 0.3)", color: "var(--primary-color)" }}
-                      onClick={() => openAutoFillModal(editProduct.sku, true)}
-                    >
-                      ✨ Auto-remplissage (Candidats)
-                    </button>
-                  </div>
-                </div>
-
-                {autoFillSource && (
-                  <div className="autofill-source-info">
-                    🌐 Source détectée : <a href={autoFillSource} target="_blank" rel="noopener noreferrer">{autoFillSource}</a>
-                  </div>
-                )}
-                {autoFillFallbackInfo && (
-                  <div className="autofill-fallback-info" style={{ fontSize: "11px", color: "var(--warning)", marginTop: "0.2rem", backgroundColor: "rgba(245,158,11,0.1)", padding: "0.4rem", borderRadius: "4px", border: "1px solid rgba(245,158,11,0.2)" }}>
-                    ⚠️ {autoFillFallbackInfo}
-                  </div>
-                )}
-
-                {autoFillChanges && (
-                  <div style={{ marginBottom: "0.8rem", backgroundColor: "rgba(99,102,241,0.08)", padding: "0.6rem 0.8rem", borderRadius: "6px", border: "1px solid rgba(99,102,241,0.25)" }}>
-                    <div style={{ fontSize: "11px", fontWeight: "bold", color: "var(--accent)", marginBottom: "0.3rem" }}>📋 Modifications à appliquer</div>
-                    <div style={{ fontSize: "11px", color: "var(--text-secondary)", display: "flex", flexWrap: "wrap", gap: "0.3rem 1rem" }}>
-                      {autoFillChanges.label && <span>🏷️ Désignation → <strong>{autoFillChanges.label}</strong></span>}
-                      {autoFillChanges.brand && <span>🏭 Marque → <strong>{autoFillChanges.brand}</strong></span>}
-                      {autoFillChanges.mpn && <span>🔢 MPN → <strong>{autoFillChanges.mpn}</strong></span>}
-                      {autoFillChanges.price !== undefined && <span>💰 Prix → <strong>{autoFillChanges.price} €</strong></span>}
-                      {autoFillChanges.largeur && <span>📐 Dims → <strong>{autoFillChanges.largeur}×{autoFillChanges.hauteur || "—"}×{autoFillChanges.profondeur || "—"}</strong></span>}
-                      {autoFillChanges.poids && <span>⚖️ Poids → <strong>{autoFillChanges.poids} g</strong></span>}
-                      {autoFillChanges.image_urls && autoFillChanges.image_urls.length > 0 && <span>🖼️ {autoFillChanges.image_urls.length} image(s)</span>}
-                    </div>
-                    <div style={{ fontSize: "10px", color: "var(--text-tertiary)", marginTop: "0.3rem" }}>Vérifie les champs ci-dessous puis clique sur "Enregistrer" pour sauvegarder.</div>
-                  </div>
-                )}
-
-                {/* 1. Identification */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">1. Identification</div>
-                  
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="edit-p-mpn">Référence Fabricant (MPN)</label>
-                          <input
-                            id="edit-p-mpn"
-                            type="text"
-                            list="mpns-datalist"
-                            value={editProduct.mpn}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, mpn: e.target.value }))}
-                            placeholder="Identique SKU si vide"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 3 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="edit-p-label">Désignation Produit *</label>
-                          <input
-                            id="edit-p-label"
-                            type="text"
-                            required
-                            list="labels-datalist"
-                            value={editProduct.label}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, label: e.target.value }))}
-                            placeholder="ex: Siemens S7-1500 PS 60W"
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="edit-p-brand">Marque</label>
-                          <input
-                            id="edit-p-brand"
-                            type="text"
-                            list="brands-datalist"
-                            value={editProduct.brand}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, brand: e.target.value }))}
-                            placeholder="ex: Siemens"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 2. Fournisseur VPC */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span>2. Fournisseur VPC</span>
-                    {!editVpcCode.trim() && (
-                      <button
-                        type="button"
-                        className="btn-field-autofill"
-                        style={{
-                          marginTop: 0,
-                          height: "22px",
-                          width: "auto",
-                          padding: "0 0.5rem",
-                          fontSize: "10px",
-                          backgroundColor: "var(--accent)",
-                          color: "#fff",
-                          borderColor: "var(--accent)",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.2rem"
-                        }}
-                        disabled={scrapeZoneLoading}
-                        onClick={() => handleLaunchUnifiedScrape(true)}
-                      >
-                        {scrapeZoneLoading ? "⏳ ..." : "🔍 Rechercher un revendeur"}
-                      </button>
-                    )}
-                  </div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="edit-p-vpc-site">Fournisseur VPC</label>
-                      <select
-                        id="edit-p-vpc-site"
-                        value={editVpcSite}
-                        onChange={(e) => setEditVpcSite(e.target.value)}
-                      >
-                        <option value="">Sélectionner</option>
-                        {config?.vpc_sites?.map(s => <option key={s} value={s}>{s}</option>)}
-                      </select>
-                    </div>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="edit-p-vpc-code">Code VPC (Catalogue)</label>
-                      <input
-                        id="edit-p-vpc-code"
-                        type="text"
-                        placeholder="ex: RS-123-456"
-                        value={editVpcCode}
-                        onChange={(e) => setEditVpcCode(e.target.value)}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* 3. Classification */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">3. Classification</div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="edit-p-cat">Famille (Sans auto-remplissage)</label>
-                      <input
-                        id="edit-p-cat"
-                        type="text"
-                        list="categories-datalist"
-                        value={editProduct.category}
-                        onChange={(e) => setEditProduct(prev => ({ ...prev, category: e.target.value }))}
-                        placeholder="ex: Automatisme"
-                      />
-                    </div>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="edit-p-subcat">Sous-Famille (Sans auto-remplissage)</label>
-                      <input
-                        id="edit-p-subcat"
-                        type="text"
-                        list="edit-subcategories-datalist"
-                        value={editProduct.sub_category}
-                        onChange={(e) => setEditProduct(prev => ({ ...prev, sub_category: e.target.value }))}
-                        placeholder="ex: Alimentation"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* 4. Logistique */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">4. Logistique</div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <label htmlFor="edit-p-loc">Emplacement Physique</label>
-                      <input
-                        id="edit-p-loc"
-                        type="text"
-                        list="locations-datalist"
-                        value={editProduct.location}
-                        onChange={(e) => setEditProduct(prev => ({ ...prev, location: e.target.value }))}
-                        placeholder="ex: MAG-A1-E2-B3"
-                      />
-                    </div>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="edit-p-min">Seuil Alerte Stock</label>
-                      <input
-                        id="edit-p-min"
-                        type="text"
-                        list="minstocks-datalist"
-                        value={editProduct.min_stock}
-                        onChange={(e) => setEditProduct(prev => ({ ...prev, min_stock: cleanNumericInput(e.target.value) }))}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="edit-p-price">Prix d'Achat (€)</label>
-                          <input
-                            id="edit-p-price"
-                            type="text"
-                            list="prices-datalist"
-                            value={editProduct.price}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, price: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="edit-p-pack">Taille du Lot (pack)</label>
-                          <input
-                            id="edit-p-pack"
-                            type="text"
-                            value={editProduct.pack_size}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, pack_size: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 5. Caractéristiques Physiques */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">5. Caractéristiques Physiques</div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="edit-p-largeur">Largeur (mm)</label>
-                          <input
-                            id="edit-p-largeur"
-                            type="text"
-                            placeholder="Largeur"
-                            value={editProduct.largeur}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, largeur: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="edit-p-hauteur">Hauteur (mm)</label>
-                          <input
-                            id="edit-p-hauteur"
-                            type="text"
-                            placeholder="Hauteur"
-                            value={editProduct.hauteur}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, hauteur: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="edit-p-profondeur">Profondeur (mm)</label>
-                          <input
-                            id="edit-p-profondeur"
-                            type="text"
-                            placeholder="Profondeur"
-                            value={editProduct.profondeur}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, profondeur: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <div className="field-with-autofill">
-                        <div style={{ flex: 1 }}>
-                          <label htmlFor="edit-p-poids">Poids (g)</label>
-                          <input
-                            id="edit-p-poids"
-                            type="text"
-                            placeholder="Poids"
-                            value={editProduct.poids}
-                            onChange={(e) => setEditProduct(prev => ({ ...prev, poids: cleanNumericInput(e.target.value) }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 6. Notes / Remarques */}
-                <div className="modal-field-group">
-                  <div className="modal-field-group-title">6. Notes / Remarques</div>
-                  <div className="modal-field-row">
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="edit-p-notes">Notes / Remarques</label>
-                      <textarea
-                        id="edit-p-notes"
-                        placeholder="Notes de maintenance, observations, etc."
-                        value={editProduct.notes}
-                        onChange={(e) => setEditProduct(prev => ({ ...prev, notes: e.target.value }))}
-                        style={{ width: "100%", height: "80px", padding: "0.5rem", borderRadius: "4px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-primary)", color: "var(--text-primary)", resize: "vertical", fontSize: "12px", fontFamily: "inherit" }}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-              </div>
-              <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => { setShowEditModal(false); setAutoFillSource(null); setAutoFillChanges(null); }}>Annuler</button>
-                <button type="submit" className="btn">Enregistrer</button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <ProductForm
+          mode="edit"
+          productData={editProduct}
+          setProductData={setEditProduct}
+          vpcSite={editVpcSite}
+          vpcCode={editVpcCode}
+          setVpcSite={setEditVpcSite}
+          setVpcCode={setEditVpcCode}
+          config={config}
+          onSubmit={handleEditProduct}
+          onClose={() => {
+            setShowEditModal(false);
+            setAutoFillSource(null);
+            setAutoFillChanges(null);
+          }}
+          autofillType={autofillType}
+          setAutofillType={setAutofillType}
+          autofillCodeInput={autofillCodeInput}
+          setAutofillCodeInput={setAutofillCodeInput}
+          scrapeZoneLoading={scrapeZoneLoading}
+          onScrape={handleLaunchUnifiedScrape}
+          onOpenAutoFill={openAutoFillModal}
+          autoFillSource={autoFillSource}
+          autoFillFallbackInfo={autoFillFallbackInfo}
+          autoFillChanges={autoFillChanges}
+          successMessage={editSuccess}
+          errorMessage={editError}
+        />
       )}
 
       {/* Datalists for autocompletion */}
@@ -5433,448 +3935,6 @@ function App() {
         {uniquePrices.map(p => <option key={p} value={p} />)}
       </datalist>
 
-      {/* Scrape Progress Modal (Disabled) */}
-      {false && scrapeModalOpen && (
-        <div 
-          className="modal-overlay"
-          style={isScrapeModalMinimized ? {
-            position: "fixed",
-            top: "auto",
-            left: "auto",
-            right: "20px",
-            bottom: "20px",
-            width: "auto",
-            height: "auto",
-            backgroundColor: "transparent",
-            pointerEvents: "none",
-            zIndex: 1000,
-            display: "flex"
-          } : {}}
-        >
-          <div 
-            className="modal-container" 
-            style={isScrapeModalMinimized ? {
-              width: "320px",
-              maxWidth: "320px",
-              pointerEvents: "auto",
-              boxShadow: "var(--shadow-lg)",
-              border: "1px solid var(--border-color)",
-              borderRadius: "8px",
-              backgroundColor: "var(--bg-secondary)",
-              display: "flex",
-              flexDirection: "column"
-            } : { 
-              maxWidth: isImageValidationMode ? "650px" : isPdfValidationMode ? "550px" : "450px" 
-            }}
-          >
-            <div className="modal-header" style={isScrapeModalMinimized ? { padding: "0.6rem 0.8rem" } : {}}>
-              <h3 style={isScrapeModalMinimized ? { fontSize: "13px" } : {}}>
-                {isScrapeModalMinimized ? `⏳ Scraping : ${selectedProduct?.sku || ""}` : scrapeModalTitle}
-              </h3>
-              <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
-                {isScrapeModalMinimized ? (
-                  <button
-                    title="Agrandir"
-                    type="button"
-                    style={{ background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer", fontSize: "14px", padding: "2px 6px" }}
-                    onClick={() => setIsScrapeModalMinimized(false)}
-                  >
-                    🗖
-                  </button>
-                ) : (
-                  <button
-                    title="Réduire"
-                    type="button"
-                    style={{ background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer", fontSize: "14px", padding: "2px 6px" }}
-                    onClick={() => setIsScrapeModalMinimized(true)}
-                  >
-                    ➖
-                  </button>
-                )}
-                <button 
-                  className="modal-close" 
-                  onClick={handleCancelScrape}
-                  style={isScrapeModalMinimized ? { fontSize: "16px", padding: "2px 6px" } : {}}
-                >
-                  ×
-                </button>
-              </div>
-            </div>
-
-            {!isScrapeModalMinimized ? (
-              <>
-                <div className="modal-body" style={{ padding: "1.5rem" }}>
-                  {isImageValidationMode ? (
-                    <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.8rem" }}>
-                        <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
-                          Sélectionnez les images à importer. Chargez uniquement celles qui correspondent.
-                        </span>
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          style={{ padding: "0.2rem 0.5rem", fontSize: "11px" }}
-                          onClick={() => {
-                            if (selectedImageUrls.length === scrapedImageCandidates.length) {
-                              setSelectedImageUrls([]);
-                            } else {
-                              setSelectedImageUrls(scrapedImageCandidates.map(c => c.url));
-                            }
-                          }}
-                        >
-                          {selectedImageUrls.length === scrapedImageCandidates.length ? "Tout décocher" : "Tout cocher"}
-                        </button>
-                      </div>
-
-                      <div 
-                        style={{ 
-                          display: "grid", 
-                          gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", 
-                          gap: "0.8rem", 
-                          maxHeight: "350px", 
-                          overflowY: "auto", 
-                          padding: "0.5rem", 
-                          border: "1px solid var(--border-color)", 
-                          borderRadius: "6px",
-                          backgroundColor: "rgba(0,0,0,0.05)"
-                        }}
-                      >
-                        {scrapedImageCandidates.map((candidate, idx) => {
-                          const isChecked = selectedImageUrls.includes(candidate.url);
-                        
-  // Avoid unused variable compiler errors
-
-  return (
-                            <div
-                              key={idx}
-                              onClick={() => {
-                                setSelectedImageUrls(prev => 
-                                  isChecked ? prev.filter(u => u !== candidate.url) : [...prev, candidate.url]
-                                );
-                              }}
-                              style={{
-                                border: isChecked ? "2px solid var(--accent)" : "1px solid var(--border-color)",
-                                borderRadius: "6px",
-                                overflow: "hidden",
-                                backgroundColor: "var(--bg-secondary)",
-                                cursor: "pointer",
-                                display: "flex",
-                                flexDirection: "column",
-                                position: "relative",
-                                transition: "all 0.2s ease"
-                              }}
-                            >
-                              <div style={{ position: "relative", width: "100%", paddingBottom: "100%", overflow: "hidden", backgroundColor: "#fff" }}>
-                                <img
-                                  src={candidate.url}
-                                  alt={candidate.title || "Scraped candidate"}
-                                  referrerPolicy="no-referrer"
-                                  style={{
-                                    position: "absolute",
-                                    top: 0,
-                                    left: 0,
-                                    width: "100%",
-                                    height: "100%",
-                                    objectFit: "contain"
-                                  }}
-                                />
-                                <div
-                                  style={{
-                                    position: "absolute",
-                                    top: "4px",
-                                    right: "4px",
-                                    width: "18px",
-                                    height: "18px",
-                                    borderRadius: "50%",
-                                    border: "1px solid var(--border-color)",
-                                    backgroundColor: isChecked ? "var(--accent)" : "rgba(255,255,255,0.8)",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    color: "#fff",
-                                    fontSize: "10px",
-                                    fontWeight: "bold",
-                                    zIndex: 10
-                                  }}
-                                >
-                                  {isChecked && "✓"}
-                                </div>
-                              </div>
-                              <div style={{ padding: "0.3rem", fontSize: "10px", display: "flex", flexDirection: "column", gap: "0.1rem", minHeight: "44px", borderTop: "1px solid var(--border-color)", justifyContent: "space-between" }}>
-                                <span style={{ fontWeight: "600", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {candidate.domain}
-                                </span>
-                                {candidate.title && (
-                                  <span 
-                                    title={candidate.title}
-                                    style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", fontSize: "9px", lineHeight: "1.1" }}
-                                  >
-                                    {candidate.title}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ) : isPdfValidationMode ? (
-                    <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.8rem" }}>
-                        <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
-                          Sélectionnez la notice PDF technique à importer pour cette référence.
-                        </span>
-                      </div>
-
-                      <div 
-                        className="scrape-candidates-list"
-                        style={{ 
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "0.6rem", 
-                          maxHeight: "260px", 
-                          overflowY: "auto", 
-                          padding: "0.5rem", 
-                          border: "1px solid var(--border-color)", 
-                          borderRadius: "6px",
-                          backgroundColor: "rgba(0,0,0,0.05)"
-                        }}
-                      >
-                        {scrapedPdfCandidates.map((candidate, idx) => {
-                          const isSelected = selectedPdfUrl === candidate.url;
-                        
-  // Avoid unused variable compiler errors
-
-  return (
-                            <div
-                              key={idx}
-                              className="candidate-item"
-                              onClick={() => {
-                                setSelectedPdfUrl(candidate.url);
-                                setSelectedPdfType(sanitizeTitleForDocType(candidate.title, selectedProduct?.sku || ""));
-                              }}
-                              style={{
-                                border: isSelected ? "2px solid var(--accent)" : "1px solid var(--border-color)",
-                                borderRadius: "6px",
-                                padding: "0.8rem",
-                                backgroundColor: isSelected ? "var(--accent-light)" : "var(--bg-secondary)",
-                                cursor: "pointer",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "0.8rem",
-                                transition: "all 0.2s ease"
-                              }}
-                            >
-                              <input
-                                type="radio"
-                                name="selectedPdf"
-                                checked={isSelected}
-                                onChange={() => {
-                                  setSelectedPdfUrl(candidate.url);
-                                  setSelectedPdfType(sanitizeTitleForDocType(candidate.title, selectedProduct?.sku || ""));
-                                }}
-                                style={{ width: "auto", cursor: "pointer" }}
-                              />
-                              <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, gap: "0.2rem" }}>
-                                <span style={{ fontWeight: "600", color: "var(--text-primary)", fontSize: "12px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
-                                  {candidate.title || "Fiche Technique / Notice"}
-                                </span>
-                                <span style={{ fontSize: "10px", color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                                  🌐 {candidate.domain}
-                                  <span 
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      openPath(candidate.url);
-                                    }} 
-                                    style={{ color: "var(--accent)", textDecoration: "underline", marginLeft: "0.5rem", cursor: "pointer" }}
-                                  >
-                                    Ouvrir le lien source
-                                  </span>
-                                </span>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      {/* Qualification du type de document */}
-                      <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                        <label style={{ fontSize: "11px", fontWeight: "600", color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-                          Type / Suffixe du document :
-                          <input 
-                            type="text"
-                            value={selectedPdfType}
-                            onChange={(e) => {
-                              setSelectedPdfType(e.target.value.toLowerCase().replace(/[^a-z0-9àéèçùœ\s-_/]/g, ""));
-                            }}
-                            placeholder="Ex: fiche_technique, notice, schema..."
-                            style={{
-                              width: "100%",
-                              padding: "0.5rem 0.75rem",
-                              borderRadius: "4px",
-                              border: "1px solid var(--border-color)",
-                              backgroundColor: "var(--bg-primary)",
-                              color: "var(--text-primary)",
-                              fontSize: "13px",
-                              outline: "none"
-                            }}
-                          />
-                        </label>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginTop: "0.2rem" }}>
-                          {[
-                            { label: "Fiche technique", value: "fiche_technique" },
-                            { label: "Notice / Manuel", value: "notice_manuel" },
-                            { label: "Schéma / Plan", value: "schema_plan" },
-                            { label: "Certificat", value: "certificat" }
-                          ].map((chip) => {
-                            const isActive = selectedPdfType === chip.value;
-                          
-  // Avoid unused variable compiler errors
-
-  return (
-                              <button
-                                key={chip.value}
-                                type="button"
-                                onClick={() => setSelectedPdfType(chip.value)}
-                                style={{
-                                  padding: "0.25rem 0.6rem",
-                                  borderRadius: "12px",
-                                  border: isActive ? "1px solid var(--accent)" : "1px solid var(--border-color)",
-                                  backgroundColor: isActive ? "var(--accent)" : "var(--bg-secondary)",
-                                  color: isActive ? "#ffffff" : "var(--text-primary)",
-                                  fontSize: "11px",
-                                  cursor: "pointer",
-                                  transition: "all 0.15s ease",
-                                  outline: "none"
-                                }}
-                              >
-                                {chip.label}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="scrape-steps-list" style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
-                      {scrapeSteps.map((step, idx) => {
-                        let statusIcon = "⏳";
-                        let statusClass = "step-pending";
-                        if (step.status === "active") {
-                          statusIcon = "🌀";
-                          statusClass = "step-active";
-                        } else if (step.status === "success") {
-                          statusIcon = "✔️";
-                          statusClass = "step-success";
-                        } else if (step.status === "error") {
-                          statusIcon = "❌";
-                          statusClass = "step-error";
-                        }
-                      
-  // Avoid unused variable compiler errors
-
-  return (
-                          <div key={idx} className={`scrape-step ${statusClass}`} style={{ display: "flex", alignItems: "flex-start", gap: "0.8rem" }}>
-                            <span className="step-icon" style={{ fontSize: "1.2rem", lineHeight: 1 }}>{statusIcon}</span>
-                            <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", flex: 1, minWidth: 0 }}>
-                              <span className="step-label" style={{ fontWeight: step.status === "active" ? "600" : "500", color: step.status === "pending" ? "var(--text-muted)" : "var(--text-primary)" }}>
-                                {step.label}
-                              </span>
-                              {step.details && (
-                                <span className="step-details" style={{ fontSize: "11px", color: step.status === "error" ? "var(--danger)" : "var(--text-secondary)", wordBreak: "break-all", whiteSpace: "normal", display: "block" }}>
-                                  {step.details}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {scrapeError && (
-                    <div className="wizard-error" style={{ marginTop: "1.5rem", marginBottom: 0 }}>
-                      {scrapeError}
-                    </div>
-                  )}
-                </div>
-                <div className="modal-footer">
-                  {isImageValidationMode ? (
-                    <>
-                      <button 
-                        type="button" 
-                        className="btn btn-secondary" 
-                        onClick={handleCancelScrape}
-                        disabled={isSavingImages}
-                      >
-                        Annuler
-                      </button>
-                      <button 
-                        type="button" 
-                        className="btn btn-primary" 
-                        disabled={selectedImageUrls.length === 0 || isSavingImages}
-                        onClick={handleSaveSelectedImages}
-                      >
-                        {isSavingImages ? "Importation..." : `Valider l'importation (${selectedImageUrls.length})`}
-                      </button>
-                    </>
-                  ) : isPdfValidationMode ? (
-                    <>
-                      <button 
-                        type="button" 
-                        className="btn btn-secondary" 
-                        onClick={handleCancelScrape}
-                        disabled={isSavingPdf}
-                      >
-                        Annuler
-                      </button>
-                      <button 
-                        type="button" 
-                        className="btn btn-primary" 
-                        disabled={!selectedPdfUrl || isSavingPdf}
-                        onClick={handleSaveSelectedPdf}
-                      >
-                        {isSavingPdf ? "Importation..." : "Valider l'importation"}
-                      </button>
-                    </>
-                  ) : (
-                    <button 
-                      type="button" 
-                      className="btn" 
-                      onClick={handleCancelScrape}
-                    >
-                      {isScrapingMedia ? "Annuler" : "Fermer"}
-                    </button>
-                  )}
-                </div>
-              </>
-            ) : (
-              <div 
-                onClick={() => setIsScrapeModalMinimized(false)}
-                style={{ 
-                  padding: "0.8rem 1rem", 
-                  fontSize: "12px", 
-                  color: "var(--text-secondary)", 
-                  cursor: "pointer", 
-                  backgroundColor: "var(--bg-tertiary)",
-                  borderBottomLeftRadius: "8px",
-                  borderBottomRightRadius: "8px",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center"
-                }}
-              >
-                <span>
-                  {isImageValidationMode 
-                    ? `Validation : ${selectedImageUrls.length} / ${scrapedImageCandidates.length} image(s)` 
-                    : "Recherche en cours..."}
-                </span>
-                <span style={{ fontSize: "11px", color: "var(--accent)", fontWeight: "600" }}>Restaurer 🗖</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Price Confirmation Modal Overlay */}
       {showPriceConfirmModal && pendingScrapeDetails && (
