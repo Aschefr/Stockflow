@@ -1,4 +1,4 @@
-# 📈 StockFlow (v1.4.3)
+# 📈 StockFlow (v1.4.4)
 
 **StockFlow** est un outil intelligent de gestion d'inventaire industriel conçu pour fonctionner simplement dans les environnements d'entreprise sous Windows.
 
