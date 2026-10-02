@@ -261,9 +261,12 @@ fn create_product(
                     ("Famille", old.category.clone(), category.trim().to_string()),
                     ("Sous-famille", old.sub_category.clone(), sub_category.trim().to_string()),
                     ("Emplacement", old.location.clone(), location.trim().to_string()),
+                    ("Type d'article", old.item_type.clone(), item_type.trim().to_string()),
                     ("Seuil d'alerte", format!("{}", old.min_stock), format!("{}", min_stock)),
                     ("Prix", format!("{:.2}", old.price), format!("{:.2}", price)),
                     ("Taille lot", format!("{}", old.pack_size), format!("{}", pack_size)),
+                    ("Image principale", old.image_path.clone().unwrap_or_default(), image_path.clone().unwrap_or_default()),
+                    ("Notice principale", old.pdf_path.clone().unwrap_or_default(), pdf_path.clone().unwrap_or_default()),
                 ];
 
                 for (field_name, old_val, new_val) in diffs {
@@ -288,7 +291,7 @@ fn create_product(
                     );
                 }
 
-                // Comparer les dimensions, poids et notes dans les attributs
+                // Comparer les dimensions, poids, notes et URLs dans les attributs
                 if let Ok(old_attrs) = serde_json::from_str::<serde_json::Value>(&old.attributes) {
                     let fields_to_check: Vec<(&str, &str)> = vec![
                         ("largeur", "Largeur"),
@@ -297,6 +300,10 @@ fn create_product(
                         ("poids", "Poids"),
                         ("notes", "Notes"),
                         ("scrape_image_urls", "Images"),
+                        ("scrape_image_url", "URL image"),
+                        ("scrape_doc_url", "URL document"),
+                        ("scrape_price_url", "URL source prix"),
+                        ("scrape_pdf_urls", "Documents"),
                     ];
                     for (key, display_name) in fields_to_check {
                         let old_val = old_attrs.get(key).map(|v| match v {
@@ -364,33 +371,40 @@ fn delete_product(
     // Récupérer les métadonnées (brand, category, sub_category) pour construire le chemin cascade des PDF
     if let Some(db_path) = events::get_db_path() {
         if let Ok(conn) = Connection::open(&db_path) {
-            let row_opt: Option<(String, String, String)> = conn.query_row(
-                "SELECT brand, category, sub_category FROM products WHERE sku = ?",
+            let row_opt: Option<(String, String, String, String)> = conn.query_row(
+                "SELECT brand, category, sub_category, label FROM products WHERE sku = ?",
                 [&clean_sku],
                 |r| {
                     Ok((
                         r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                         r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                         r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(3)?.unwrap_or_default(),
                     ))
                 }
             ).ok();
 
-            if let Some((brand, category, sub_category)) = row_opt {
+            if let Some((brand, category, sub_category, label)) = row_opt {
                 // 1. Supprimer le dossier cascade de notices PDF
                 let clean_brand = csv_importer::sanitize_folder_name(&brand, "INCONNUE");
                 let clean_cat = csv_importer::sanitize_folder_name(&category, "SANS_FAMILLE");
                 let clean_subcat = csv_importer::sanitize_folder_name(&sub_category, "SANS_SOUS_FAMILLE");
+                let clean_desc = csv_importer::sanitize_folder_name(&label, "");
+                let sku_folder = if clean_desc.is_empty() { clean_sku.clone() } else { format!("{} - {}", clean_sku, clean_desc) };
                 
-                let doc_dir = std::path::Path::new(&network_path)
+                let subcat_path = std::path::Path::new(&network_path)
                     .join("documents")
                     .join(&clean_brand)
                     .join(&clean_cat)
-                    .join(&clean_subcat)
-                    .join(&clean_sku);
-                    
+                    .join(&clean_subcat);
+
+                let doc_dir = subcat_path.join(&sku_folder);
                 if doc_dir.exists() {
                     let _ = std::fs::remove_dir_all(&doc_dir);
+                }
+                let old_doc_dir = subcat_path.join(&clean_sku);
+                if old_doc_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&old_doc_dir);
                 }
 
                 // 2. Supprimer les images associées dans le dossier images/
@@ -487,31 +501,33 @@ fn upload_media(
     let dest_dir = if media_type == "image" {
         std::path::Path::new(&network_path).join("images")
     } else {
-        // Résoudre la structure hiérarchique documents/{Brand}/{Category}/{SubCategory}/{SKU}/
-        // comme le fait le scraper, avec fallback si la DB est inaccessible.
+        // Résoudre la structure hiérarchique documents/{Brand}/{Category}/{SubCategory}/{SKU} - {Description}/
         let hierarchical = events::get_db_path().and_then(|db_path| {
             Connection::open(&db_path).ok().and_then(|conn| {
                 conn.query_row(
-                    "SELECT brand, category, sub_category FROM products WHERE sku = ?",
+                    "SELECT brand, category, sub_category, label FROM products WHERE sku = ?",
                     [&sku_upper],
                     |row| {
                         Ok((
                             row.get::<_, Option<String>>(0)?.unwrap_or_default(),
                             row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                             row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                            row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                         ))
                     },
                 ).ok()
             })
         });
 
-        if let Some((brand, category, sub_category)) = hierarchical {
+        if let Some((brand, category, sub_category, label)) = hierarchical {
+            let clean_desc = csv_importer::sanitize_folder_name(&label, "");
+            let sku_folder = if clean_desc.is_empty() { sku_upper.clone() } else { format!("{} - {}", sku_upper, clean_desc) };
             std::path::Path::new(&network_path)
                 .join("documents")
                 .join(csv_importer::sanitize_folder_name(&brand, "INCONNU"))
                 .join(csv_importer::sanitize_folder_name(&category, "INCONNU"))
                 .join(csv_importer::sanitize_folder_name(&sub_category, "INCONNU"))
-                .join(&sku_upper)
+                .join(&sku_folder)
         } else {
             // Fallback : structure plate si la DB est inaccessible
             std::path::Path::new(&network_path).join("documents").join(&sku_upper)
@@ -541,12 +557,12 @@ fn upload_media(
         &trigramme,
         "UPLOAD_MEDIA",
         Some(&media_type),
-        Some(&relative_path),
         None,
+        Some(&relative_path),
         None,
     );
 
-    // Mettre à jour image_path / pdf_path en DB si aucune référence n'est encore définie
+    // Mettre à jour image_path / pdf_path en DB si aucune référence n'est encore définie ou si c'était un lien web externe
     if let Some(db_path) = events::get_db_path() {
         if let Ok(conn) = Connection::open(&db_path) {
             let col = if media_type == "image" { "image_path" } else { "pdf_path" };
@@ -555,7 +571,8 @@ fn upload_media(
                 [&sku_upper],
                 |row| row.get(0),
             ).unwrap_or(None);
-            if current.is_none() {
+            let should_update = current.is_none() || current.as_ref().map(|s| s.starts_with("http")).unwrap_or(false);
+            if should_update {
                 let _ = conn.execute(
                     &format!("UPDATE products SET {} = ? WHERE sku = ?", col),
                     (&relative_path, &sku_upper),
@@ -607,8 +624,8 @@ fn list_sku_pdfs_sync(network_path: &str, sku: &str) -> Result<Vec<String>, Stri
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     
     let sku_upper = sku.to_uppercase();
-    let (pdf_path_opt, brand, category, sub_category) = conn.query_row(
-        "SELECT pdf_path, brand, category, sub_category FROM products WHERE sku = ?",
+    let (pdf_path_opt, brand, category, sub_category, label) = conn.query_row(
+        "SELECT pdf_path, brand, category, sub_category, label FROM products WHERE sku = ?",
         [&sku_upper],
         |row| {
             Ok((
@@ -616,50 +633,116 @@ fn list_sku_pdfs_sync(network_path: &str, sku: &str) -> Result<Vec<String>, Stri
                 row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(4)?.unwrap_or_default(),
             ))
         }
-    ).unwrap_or((None, String::new(), String::new(), String::new()));
-
-    let pdfs_dir = if let Some(ref path) = pdf_path_opt {
-        let full_path = std::path::Path::new(network_path).join(path);
-        if full_path.is_file() {
-            full_path.parent().unwrap_or(std::path::Path::new("")).to_path_buf()
-        } else {
-            full_path
-        }
-    } else {
-        let clean_brand = csv_importer::sanitize_folder_name(&brand, "INCONNU");
-        let clean_category = csv_importer::sanitize_folder_name(&category, "INCONNU");
-        let clean_subcategory = csv_importer::sanitize_folder_name(&sub_category, "INCONNU");
-        let clean_sku = db::sanitize_sku(sku);
-        std::path::Path::new(network_path)
-            .join("documents")
-            .join(&clean_brand)
-            .join(&clean_category)
-            .join(&clean_subcategory)
-            .join(&clean_sku)
-    };
-
-    if !pdfs_dir.exists() {
-        return Ok(Vec::new());
-    }
+    ).unwrap_or((None, String::new(), String::new(), String::new(), String::new()));
 
     let mut pdfs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&pdfs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    if file_name.to_lowercase().ends_with(".pdf") {
-                        let relative_to_network = path.strip_prefix(network_path)
-                            .map(|p| p.to_string_lossy().to_string().replace("\\", "/"))
-                            .unwrap_or_else(|_| format!("documents/{}", file_name));
-                        pdfs.push(relative_to_network);
+    let mut checked_dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // 1. Si pdf_path est un chemin local existant
+    if let Some(ref path) = pdf_path_opt {
+        if !path.starts_with("http://") && !path.starts_with("https://") {
+            let full_path = std::path::Path::new(network_path).join(path);
+            if full_path.is_file() {
+                if let Some(parent) = full_path.parent() {
+                    checked_dirs.push(parent.to_path_buf());
+                }
+            } else if full_path.is_dir() {
+                checked_dirs.push(full_path);
+            }
+        }
+    }
+
+    // 2. Dossier hiérarchique documents/{Brand}/{Category}/{SubCategory}/
+    let clean_brand = csv_importer::sanitize_folder_name(&brand, "INCONNU");
+    let clean_category = csv_importer::sanitize_folder_name(&category, "INCONNU");
+    let clean_subcategory = csv_importer::sanitize_folder_name(&sub_category, "INCONNU");
+    let clean_desc = csv_importer::sanitize_folder_name(&label, "");
+
+    let subcat_dir = std::path::Path::new(network_path)
+        .join("documents")
+        .join(&clean_brand)
+        .join(&clean_category)
+        .join(&clean_subcategory);
+
+    if subcat_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&subcat_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    if let Some(folder_name) = entry.file_name().to_str() {
+                        let f_up = folder_name.to_uppercase();
+                        if f_up == sku_upper || f_up.starts_with(&format!("{sku_upper} - ")) || f_up.starts_with(&format!("{sku_upper}_")) {
+                            checked_dirs.push(entry.path());
+                        }
                     }
                 }
             }
         }
     }
+
+    // 3. Dossier cible précis si non encore existant
+    if !clean_desc.is_empty() {
+        let expected_dir = subcat_dir.join(format!("{sku_upper} - {clean_desc}"));
+        if expected_dir.is_dir() && !checked_dirs.contains(&expected_dir) {
+            checked_dirs.push(expected_dir);
+        }
+    }
+
+    // 4. Fallback plat documents/{SKU}
+    let flat_dir = std::path::Path::new(network_path).join("documents").join(&sku_upper);
+    if flat_dir.is_dir() && !checked_dirs.contains(&flat_dir) {
+        checked_dirs.push(flat_dir);
+    }
+
+    // Scanner tous les dossiers collectés pour les .pdf
+    let mut seen = std::collections::HashSet::new();
+    for dir in checked_dirs {
+        if dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                            if file_name.to_lowercase().ends_with(".pdf") {
+                                if let Ok(rel) = path.strip_prefix(network_path) {
+                                    let rel_str = rel.to_string_lossy().to_string().replace('\\', "/");
+                                    if seen.insert(rel_str.clone()) {
+                                        pdfs.push(rel_str);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Scanner la racine de documents/ pour les fichiers nommés {SKU}_*.pdf
+    let docs_root = std::path::Path::new(network_path).join("documents");
+    if docs_root.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&docs_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                        let name_up = file_name.to_uppercase();
+                        if name_up.ends_with(".PDF") && (name_up.starts_with(&format!("{sku_upper}_")) || name_up.starts_with(&format!("{sku_upper}."))) {
+                            if let Ok(rel) = path.strip_prefix(network_path) {
+                                let rel_str = rel.to_string_lossy().to_string().replace('\\', "/");
+                                if seen.insert(rel_str.clone()) {
+                                    pdfs.push(rel_str);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pdfs.sort();
     Ok(pdfs)
 }

@@ -5,9 +5,8 @@
  * est en cours, avec le pourcentage de progression et un bouton d'annulation.
  */
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { invoke, listen, openPath } from "./services/api";
+import { detectDocumentType, getDocumentTypeOption } from "./utils/documentUtils";
 
 interface ScrapeProgressBadgeProps {
   sku: string;
@@ -219,6 +218,7 @@ interface DimensionInfo {
 
 interface ResourceCandidate {
   url: string;
+  thumbnail_url?: string;
   title: string;
   domain: string;
   source: CandidateSource;
@@ -287,6 +287,7 @@ export interface AutoFillSelections {
   screenshot_path?: string;
   image_urls?: string[];
   pdf_urls?: string[];
+  pdf_meta?: Array<{ url: string; title?: string; docType?: string; docTypeLabel?: string }>;
 }
 
 export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _networkPath, currentProduct }: AutoFillModalProps) {
@@ -427,6 +428,19 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
 
     if (selectedPdfUrls.size > 0) {
       selections.pdf_urls = Array.from(selectedPdfUrls);
+      selections.pdf_meta = Array.from(selectedPdfUrls).map(u => {
+        const cand = candidates.pdf_candidates.find(c => c.url === u);
+        const title = cand?.title || u.split("/").pop()?.split("?")[0] || "Notice technique";
+        const detected = detectDocumentType(u, title);
+        const docType = (cand as any)?.doc_type || detected.value;
+        const docTypeLabel = (cand as any)?.doc_type_label || detected.label;
+        return {
+          url: u,
+          title,
+          docType,
+          docTypeLabel,
+        };
+      });
     }
 
     const bestSource = candidates.sources_visited.find(s => s.success);
@@ -459,7 +473,9 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
       setError(null);
       // Écouter l'événement de fin
       const unlisten = await listen<{ sku: string; candidates_count: number }>("scrape-task-complete", (event) => {
-        if (event.payload.sku === sku.toUpperCase()) {
+        const evNorm = (event.payload.sku || "").replace(/[^A-Z0-9]/g, "").toUpperCase();
+        const skuNorm = sku.replace(/[^A-Z0-9]/g, "").toUpperCase();
+        if (event.payload.sku === sku.toUpperCase() || (evNorm && evNorm === skuNorm)) {
           unlisten();
           loadCandidates();
         }
@@ -777,6 +793,26 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
                             </span>
                             <span className="resource-title" style={{ flex: 1, marginRight: "0.5rem" }}>{pdf.title || "PDF"}</span>
                             <span className="resource-domain">{pdf.domain}</span>
+                            {(() => {
+                              const detected = detectDocumentType(pdf.url, pdf.title);
+                              const dtypeVal = (pdf as any).doc_type || detected.value;
+                              const dtypeLabel = (pdf as any).doc_type_label || detected.label;
+                              const opt = getDocumentTypeOption(dtypeVal);
+                              return (
+                                <span style={{
+                                  marginLeft: "0.5rem",
+                                  padding: "2px 6px",
+                                  fontSize: "10px",
+                                  fontWeight: "bold",
+                                  borderRadius: "4px",
+                                  color: "#fff",
+                                  backgroundColor: opt.badgeColor || "#3b82f6",
+                                  flexShrink: 0
+                                }}>
+                                  {dtypeLabel}
+                                </span>
+                              );
+                            })()}
                             {badgeText && (
                               <span style={{
                                 marginLeft: "0.5rem",
@@ -835,7 +871,12 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
                                 alt={img.title || `Image ${i + 1}`}
                                 loading="lazy"
                                 onError={(e) => {
-                                  (e.target as HTMLImageElement).style.display = "none";
+                                  const el = e.target as HTMLImageElement;
+                                  if (img.thumbnail_url && el.src !== img.thumbnail_url) {
+                                    el.src = img.thumbnail_url;
+                                    return;
+                                  }
+                                  el.style.display = "none";
                                   // Décrémenter le compteur d'images valides
                                   setValidImageCount(prev => Math.max(0, prev - 1));
                                 }}

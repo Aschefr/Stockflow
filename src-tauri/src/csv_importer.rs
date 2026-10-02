@@ -173,13 +173,15 @@ pub fn import_csv_file(
                 let clean_brand = sanitize_folder_name(&marque, "INCONNUE");
                 let clean_cat = sanitize_folder_name(&famille, "SANS_FAMILLE");
                 let clean_subcat = sanitize_folder_name(&sous_famille, "SANS_SOUS_FAMILLE");
+                let clean_desc = sanitize_folder_name(&desc_str, "");
+                let sku_folder = if clean_desc.is_empty() { sku.clone() } else { format!("{} - {}", sku, clean_desc) };
 
                 let dest_pdf_dir = Path::new(network_path)
                     .join("documents")
                     .join(&clean_brand)
                     .join(&clean_cat)
                     .join(&clean_subcat)
-                    .join(&sku);
+                    .join(&sku_folder);
 
                 let _ = fs::create_dir_all(&dest_pdf_dir); // S'assurer que le sous-dossier existe
                 
@@ -199,7 +201,7 @@ pub fn import_csv_file(
                         }
                     }
                     if success_copy {
-                        pdf_path = Some(format!("documents/{}/{}/{}/{}", clean_brand, clean_cat, clean_subcat, sku));
+                        pdf_path = Some(format!("documents/{}/{}/{}/{}", clean_brand, clean_cat, clean_subcat, sku_folder));
                     } else {
                         report.errors.push(format!("Aucun fichier PDF copié depuis le dossier pour {}", sku));
                     }
@@ -208,7 +210,7 @@ pub fn import_csv_file(
                     let dest_pdf_path = dest_pdf_dir.join(file_name);
                     match fs::copy(&src_pdf_file, &dest_pdf_path) {
                         Ok(_) => {
-                            pdf_path = Some(format!("documents/{}/{}/{}/{}/{}", clean_brand, clean_cat, clean_subcat, sku, file_name));
+                            pdf_path = Some(format!("documents/{}/{}/{}/{}/{}", clean_brand, clean_cat, clean_subcat, sku_folder, file_name));
                         }
                         Err(e) => {
                             report.errors.push(format!("Échec copie PDF pour {} : {}", sku, e));
@@ -280,6 +282,17 @@ pub fn import_csv_file(
 
             if super::events::write_event_file(network_path, "PRODUCT_CREATE", trigramme, create_payload).is_ok() {
                 event_written = true;
+                if existing.is_none() {
+                    let _ = super::events::write_audit_file(
+                        network_path, &sku, trigramme, "CREATE",
+                        Some("Import initial CSV"), None, None, None,
+                    );
+                } else {
+                    let _ = super::events::write_audit_file(
+                        network_path, &sku, trigramme, "UPDATE",
+                        Some("Import CSV"), None, None, None,
+                    );
+                }
             } else {
                 report.errors.push(format!("Impossible d'écrire l'événement de création pour {}", sku));
             }

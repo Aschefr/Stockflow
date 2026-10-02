@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { ScrapeProgressBadge } from "./ScrapeComponents";
+import { invoke, isTauri } from "./services/api";
 
 interface Product {
   sku: string;
@@ -69,7 +70,7 @@ interface ProductDetailPanelProps {
   // Actions
   onClose: () => void;
   openAutoFillModal: (sku: string, isEdit: boolean) => void;
-  onOpenEdit: () => void;
+  onOpenEdit: (tab?: "general" | "images" | "documents") => void;
   onDeleteProduct: () => void;
   onDeleteMedia: (mediaType: "image" | "pdf", filePath: string) => Promise<void>;
   onRenameMedia: (mediaType: "pdf", oldPath: string, newName: string) => Promise<void>;
@@ -118,6 +119,145 @@ export function ProductDetailPanel({
   const [editingPdfPath, setEditingPdfPath] = useState<string | null>(null);
   const [newPdfName, setNewPdfName] = useState("");
   const [inlineConfirm, setInlineConfirm] = useState<{ id: string; action: () => void } | null>(null);
+
+  // Vérifier si des candidats existent pour ce SKU (pour afficher/masquer le bouton)
+  const [hasCandidates, setHasCandidates] = useState(false);
+  useEffect(() => {
+    let isMounted = true;
+    setHasCandidates(false);
+    if (selectedProduct?.sku) {
+      invoke("get_scrape_candidates", { sku: selectedProduct.sku.toUpperCase() })
+        .then((res: any) => {
+          if (isMounted && res && (res.image_candidates?.length > 0 || res.pdf_candidates?.length > 0 || res.properties)) {
+            setHasCandidates(true);
+          }
+        })
+        .catch(() => {});
+    }
+    return () => { isMounted = false; };
+  }, [selectedProduct?.sku]);
+
+  // Fallback interne pour charger les images du SKU si la prop productImages est vide
+  const [internalImages, setInternalImages] = useState<string[]>([]);
+  useEffect(() => {
+    let isMounted = true;
+    if (selectedProduct?.sku && productImages.length === 0) {
+      invoke<string[]>("list_sku_images", { sku: selectedProduct.sku, networkPath: config?.network_path })
+        .then((imgs) => {
+          if (isMounted && imgs && imgs.length > 0) {
+            setInternalImages(imgs);
+          }
+        })
+        .catch(() => {});
+    } else {
+      setInternalImages([]);
+    }
+    return () => { isMounted = false; };
+  }, [selectedProduct?.sku, productImages.length, config?.network_path]);
+
+  // Rassembler toutes les images disponibles : dossier réseau, image_path du produit, ou scraping
+  const allImages = useMemo(() => {
+    const list = [...productImages];
+    for (const img of internalImages) {
+      if (img && !list.includes(img)) list.push(img);
+    }
+    if (selectedProduct?.image_path && !list.includes(selectedProduct.image_path)) {
+      list.push(selectedProduct.image_path);
+    }
+    if (selectedProduct?.attributes) {
+      try {
+        const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes) : selectedProduct.attributes;
+        if (attrs?.scrape_image_urls && Array.isArray(attrs.scrape_image_urls)) {
+          for (const u of attrs.scrape_image_urls) {
+            if (u && !list.includes(u)) list.push(u);
+          }
+        } else if (attrs?.scrape_image_url && !list.includes(attrs.scrape_image_url)) {
+          list.push(attrs.scrape_image_url);
+        }
+      } catch {}
+    }
+    return list;
+  }, [productImages, internalImages, selectedProduct]);
+
+  // Rassembler tous les documents PDF disponibles : dossier réseau/disque local, pdf_path du produit, ou URLs enregistrées/scrapées
+  const allPdfs = useMemo(() => {
+    const list: Array<{ path: string; isRemote: boolean; title?: string }> = [];
+    const seen = new Set<string>();
+
+    for (const pdf of productPdfs) {
+      if (pdf && !seen.has(pdf)) {
+        seen.add(pdf);
+        list.push({
+          path: pdf,
+          isRemote: pdf.startsWith("http://") || pdf.startsWith("https://")
+        });
+      }
+    }
+    if (selectedProduct?.pdf_path && !seen.has(selectedProduct.pdf_path)) {
+      const normalizedPdfPath = selectedProduct.pdf_path.replace(/\\/g, "/");
+      const alreadyCovered = productPdfs.some(p => {
+        const normP = p.replace(/\\/g, "/");
+        return normP.startsWith(normalizedPdfPath) || normalizedPdfPath.startsWith(normP);
+      });
+      if (!alreadyCovered) {
+        seen.add(selectedProduct.pdf_path);
+        list.push({
+          path: selectedProduct.pdf_path,
+          isRemote: selectedProduct.pdf_path.startsWith("http://") || selectedProduct.pdf_path.startsWith("https://")
+        });
+      }
+    }
+    if (selectedProduct?.attributes) {
+      try {
+        const attrs = typeof selectedProduct.attributes === "string" ? JSON.parse(selectedProduct.attributes) : selectedProduct.attributes;
+        if (attrs?.scrape_pdf_urls && Array.isArray(attrs.scrape_pdf_urls)) {
+          for (const u of attrs.scrape_pdf_urls) {
+            if (u && typeof u === "string" && !seen.has(u)) {
+              seen.add(u);
+              list.push({ path: u, isRemote: true });
+            }
+          }
+        }
+        if (attrs?.scrape_doc_url && typeof attrs.scrape_doc_url === "string" && !seen.has(attrs.scrape_doc_url)) {
+          seen.add(attrs.scrape_doc_url);
+          list.push({ path: attrs.scrape_doc_url, isRemote: true });
+        }
+      } catch {}
+    }
+    return list;
+  }, [productPdfs, selectedProduct]);
+
+  const currentImg = allImages[activeImageIndex] || "";
+  const [resolvedSrc, setResolvedSrc] = useState<string>("");
+
+  useEffect(() => {
+    let isMounted = true;
+    if (!currentImg) {
+      setResolvedSrc("");
+      return;
+    }
+    if (currentImg.startsWith("http://") || currentImg.startsWith("https://") || currentImg.startsWith("blob:") || currentImg.startsWith("data:")) {
+      setResolvedSrc(currentImg);
+      return;
+    }
+    if (isTauri()) {
+      const full = config?.network_path ? `${config.network_path}/${currentImg}`.replace(/\\/g, "/") : currentImg;
+      setResolvedSrc(convertFileSrc(full));
+      return;
+    }
+    const sync = convertFileSrc(currentImg) || (config?.network_path ? convertFileSrc(`${config.network_path}/${currentImg}`.replace(/\\/g, "/")) : "");
+    if (sync) {
+      setResolvedSrc(sync);
+      return;
+    }
+    invoke<string>("resolve_media", { path: currentImg })
+      .then((url) => {
+        if (isMounted && url) setResolvedSrc(url);
+      })
+      .catch(() => {});
+
+    return () => { isMounted = false; };
+  }, [currentImg, config?.network_path]);
 
   function getVpcCode(prod: Product): string {
     try {
@@ -203,10 +343,10 @@ export function ProductDetailPanel({
 
         {/* Image Container / Carousel */}
         <div className="image-preview-container">
-          {productImages.length > 0 ? (
+          {allImages.length > 0 ? (
             <div className="carousel" style={{ position: "relative", width: "100%", height: "100%" }}>
               <img
-                src={convertFileSrc(`${config?.network_path}/${productImages[activeImageIndex]}`.replace(/\\/g, "/"))}
+                src={resolvedSrc || (allImages[activeImageIndex]?.startsWith("http") || allImages[activeImageIndex]?.startsWith("blob:") ? allImages[activeImageIndex] : (convertFileSrc(allImages[activeImageIndex]) || (config?.network_path ? convertFileSrc(`${config.network_path}/${allImages[activeImageIndex]}`.replace(/\\/g, "/")) : "")))}
                 alt={selectedProduct.label}
                 style={{ width: "100%", height: "100%", objectFit: "contain" }}
               />
@@ -287,7 +427,7 @@ export function ProductDetailPanel({
                     setInlineConfirm({
                       id: "image-delete",
                       action: async () => {
-                        const imgPath = productImages[activeImageIndex];
+                        const imgPath = allImages[activeImageIndex];
                         await onDeleteMedia("image", imgPath);
                         setActiveImageIndex(0);
                       },
@@ -297,7 +437,7 @@ export function ProductDetailPanel({
                   🗑️
                 </button>
               )}
-              {productImages.length > 1 && (
+              {allImages.length > 1 && (
                 <div
                   className="carousel-controls"
                   style={{
@@ -324,7 +464,7 @@ export function ProductDetailPanel({
                     }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveImageIndex((prev) => (prev === 0 ? productImages.length - 1 : prev - 1));
+                      setActiveImageIndex((prev) => (prev === 0 ? allImages.length - 1 : prev - 1));
                     }}
                   >
                     ◀
@@ -339,7 +479,7 @@ export function ProductDetailPanel({
                       color: "#fff",
                     }}
                   >
-                    {activeImageIndex + 1} / {productImages.length}
+                    {activeImageIndex + 1} / {allImages.length}
                   </span>
                   <button
                     className="carousel-btn"
@@ -354,7 +494,7 @@ export function ProductDetailPanel({
                     }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveImageIndex((prev) => (prev === productImages.length - 1 ? 0 : prev + 1));
+                      setActiveImageIndex((prev) => (prev === allImages.length - 1 ? 0 : prev + 1));
                     }}
                   >
                     ▶
@@ -374,10 +514,25 @@ export function ProductDetailPanel({
                 fontSize: "12px",
                 border: "2px dashed var(--border-color)",
                 borderRadius: "8px",
+                padding: "0.8rem",
               }}
             >
               <span>Pas d'image disponible</span>
               <span style={{ fontSize: "10px", marginTop: "4px" }}>Déposez des images ou PDFs ici</span>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{
+                  fontSize: "10.5px",
+                  padding: "0.25rem 0.6rem",
+                  marginTop: "8px",
+                  color: "var(--accent)",
+                  borderColor: "var(--accent)",
+                }}
+                onClick={() => onOpenEdit("images")}
+              >
+                ➕ Ajouter ou scraper une image
+              </button>
             </div>
           )}
         </div>
@@ -568,7 +723,7 @@ export function ProductDetailPanel({
                               font: "inherit",
                             }}
                             onClick={() =>
-                              onOpenPath(`${config?.network_path}/${productScreenshotPath}`.replace(/\//g, "\\"))
+                              onOpenPath(isTauri() ? `${config?.network_path}/${productScreenshotPath}`.replace(/\//g, "\\") : (productScreenshotPath || ""))
                             }
                             title="Consulter la capture d'écran de la page source"
                           >
@@ -626,6 +781,7 @@ export function ProductDetailPanel({
           </div>
         </div>
 
+        {hasCandidates && (
         <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
           <button
             type="button"
@@ -640,17 +796,19 @@ export function ProductDetailPanel({
               gap: "6px",
             }}
             onClick={() => openAutoFillModal(selectedProduct.sku, true)}
+            title="Consulter ou appliquer les propositions trouvées par le scraping pour cet article"
           >
-            ✨ Auto-remplissage (Candidats)
+            🎯 Revoir les variantes du scraping
           </button>
         </div>
+        )}
 
         <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.8rem", marginBottom: "0.8rem" }}>
           <button
             type="button"
             className="btn btn-secondary"
             style={{ flex: 1, padding: "0.3rem 0.6rem", fontSize: "12px" }}
-            onClick={onOpenEdit}
+            onClick={() => onOpenEdit("general")}
           >
             ✏️ Modifier
           </button>
@@ -710,33 +868,105 @@ export function ProductDetailPanel({
         <div style={{ display: "flex", gap: "0.5rem", flexDirection: "column" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.2rem" }}>
             <h4 style={{ fontFamily: "var(--font-title)", fontSize: "12px", margin: 0 }}>Documents PDF</h4>
-            <button
-              className="btn btn-secondary"
-              style={{ padding: "0.25rem 0.5rem", fontSize: "10px" }}
-              onClick={async () => {
-                const sanitize = (name: string): string => {
-                  return (name || "").trim().replace(/[\/:*?"<>|]/g, "-") || "INCONNU";
-                };
-                const brand = sanitize(selectedProduct.brand);
-                const cat = sanitize(selectedProduct.category);
-                const sub = sanitize(selectedProduct.sub_category);
-                const sku = sanitize(selectedProduct.sku).replace(/\s+/g, "").toUpperCase();
-                const path = `${config?.network_path}/documents/${brand}/${cat}/${sub}/${sku}`.replace(/\//g, "\\");
-                try {
-                  await onEnsureDirectory(path);
-                  await onOpenPath(path);
-                } catch (err: any) {
-                  console.error(err);
-                }
-              }}
-            >
-              📂 Ouvrir dossier
-            </button>
+            <div style={{ display: "flex", gap: "4px" }}>
+              {allPdfs.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ padding: "0.25rem 0.5rem", fontSize: "10px" }}
+                  title="Ouvrir le premier document PDF"
+                  onClick={async () => {
+                    const firstPdf = allPdfs[0];
+                    if (firstPdf) {
+                      try {
+                        const path = isTauri()
+                          ? (firstPdf.path.startsWith("http") ? firstPdf.path : `${config?.network_path}/${firstPdf.path}`.replace(/\//g, "\\"))
+                          : firstPdf.path;
+                        await onOpenPath(path);
+                      } catch (err) {
+                        console.warn("Impossible d'ouvrir le document :", err);
+                      }
+                    }
+                  }}
+                >
+                  📄 Ouvrir ({allPdfs.length})
+                </button>
+              )}
+              {isTauri() && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ padding: "0.25rem 0.5rem", fontSize: "10px" }}
+                  title="Ouvrir le dossier dans l'explorateur Windows"
+                  onClick={async () => {
+                    const sanitize = (name: string): string => {
+                      return (name || "").trim().replace(/[\\/:*?"<>|]/g, "-") || "INCONNU";
+                    };
+                    const sku = sanitize(selectedProduct.sku).replace(/\s+/g, "").toUpperCase();
+                    const path = `${config?.network_path}/documents/${sku}`.replace(/\//g, "\\");
+                    try {
+                      await onEnsureDirectory(path);
+                      await onOpenPath(path);
+                    } catch (err: any) {
+                      console.error(err);
+                    }
+                  }}
+                >
+                  📂 Dossier
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ padding: "0.25rem 0.5rem", fontSize: "10px" }}
+                title="Gérer ou ajouter des documents"
+                onClick={() => onOpenEdit("documents")}
+              >
+                ➕ Gérer
+              </button>
+            </div>
           </div>
-          {productPdfs.length > 0 ? (
-            productPdfs.map((pdf, idx) => {
-              const fileName = pdf.split("/").pop() || "Manuel PDF";
+          {allPdfs.length > 0 ? (
+            allPdfs.map((pdfItem, idx) => {
+              const pdf = pdfItem.path;
+              const isRemote = pdfItem.isRemote;
+              const rawName = pdf.split("/").pop() || "Notice PDF";
+              const fileName = decodeURIComponent(rawName.split("?")[0]);
               const isEditing = editingPdfPath === pdf;
+
+              if (isRemote) {
+                return (
+                  <div key={idx} style={{ display: "flex", gap: "0.3rem" }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{
+                        flex: 1,
+                        padding: "0.4rem 0.6rem",
+                        fontSize: "11px",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        textAlign: "left",
+                        color: "var(--accent)",
+                      }}
+                      title={pdf}
+                      onClick={() => onOpenPath(pdf)}
+                    >
+                      🌐 {fileName}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      title="Ouvrir dans un nouvel onglet"
+                      style={{ padding: "0.4rem 0.5rem", fontSize: "11px", display: "inline-flex", alignItems: "center" }}
+                      onClick={() => onOpenPath(pdf)}
+                    >
+                      🔗
+                    </button>
+                  </div>
+                );
+              }
 
               return (
                 <div key={idx} style={{ display: "flex", gap: "0.3rem" }}>
@@ -779,7 +1009,7 @@ export function ProductDetailPanel({
                           whiteSpace: "nowrap",
                           textAlign: "left",
                         }}
-                        onClick={() => onOpenPath(`${config?.network_path}/${pdf}`.replace(/\//g, "\\"))}
+                        onClick={() => onOpenPath(isTauri() ? (pdf.startsWith("http") ? pdf : `${config?.network_path}/${pdf}`.replace(/\//g, "\\")) : pdf)}
                       >
                         📄 {fileName}
                       </button>
@@ -879,12 +1109,29 @@ export function ProductDetailPanel({
                 fontSize: "11px",
                 color: "var(--text-muted)",
                 textAlign: "center",
-                padding: "0.5rem",
+                padding: "0.6rem 0.5rem",
                 border: "1px dashed var(--border-color)",
                 borderRadius: "6px",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: "0.4rem",
               }}
             >
-              Aucune fiche technique PDF associée.
+              <span>Aucune fiche technique PDF associée.</span>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{
+                  fontSize: "10.5px",
+                  padding: "0.25rem 0.6rem",
+                  color: "var(--accent)",
+                  borderColor: "var(--accent)",
+                }}
+                onClick={() => onOpenEdit("documents")}
+              >
+                ➕ Ajouter ou scraper une notice
+              </button>
             </div>
           )}
         </div>
@@ -984,29 +1231,127 @@ export function ProductDetailPanel({
                 const dateStr = date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "2-digit" });
                 const timeStr = date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
 
-                const badge = item.action === "CREATE" ? "🟢" : item.action === "SCRAPE_PRICE" ? "🟠" : "🔵";
+                let badge = "🔵";
                 let content: React.ReactNode = "";
 
                 if (item.action === "CREATE") {
-                  content = <span>Création de la référence</span>;
+                  badge = "🟢";
+                  content = <span>Création de la référence{item.field ? ` (${item.field})` : ""}</span>;
+                } else if (item.action === "DELETE") {
+                  badge = "🔴";
+                  content = <span>Référence supprimée</span>;
+                } else if (item.action === "UPLOAD_MEDIA") {
+                  badge = "📥";
+                  const rawPath = item.new_value || item.old_value || "";
+                  const fileName = rawPath.split(/[/\\]/).pop();
+                  const mediaLabel = item.field === "image" ? "image" : item.field === "screenshot" ? "capture d'écran" : "notice PDF";
+                  content = (
+                    <span>
+                      Ajout {mediaLabel} : <strong>{fileName || "fichier"}</strong>
+                      {rawPath && (
+                        <button
+                          type="button"
+                          className="btn-link"
+                          onClick={() => onOpenPath(rawPath)}
+                          style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: "0 0.3rem", font: "inherit", fontSize: "10px" }}
+                          title="Ouvrir le fichier"
+                        >
+                          👁️ voir
+                        </button>
+                      )}
+                    </span>
+                  );
+                } else if (item.action === "DELETE_MEDIA") {
+                  badge = "🗑️";
+                  const fileName = (item.old_value || item.new_value || "").split(/[/\\]/).pop();
+                  const mediaLabel = item.field === "image" ? "l'image" : "la notice PDF";
+                  content = <span>Suppression de {mediaLabel} <strong>{fileName || ""}</strong></span>;
+                } else if (item.action === "RENAME_MEDIA") {
+                  badge = "✏️";
+                  const oldName = (item.old_value || "").split(/[/\\]/).pop();
+                  const newName = (item.new_value || "").split(/[/\\]/).pop();
+                  content = (
+                    <span>
+                      Renommage média : <span className="audit-old-value">{oldName}</span> → <span className="audit-new-value">{newName}</span>
+                    </span>
+                  );
+                } else if (item.action === "SCRAPE_PDF") {
+                  badge = "📄";
+                  const docLabel = item.field || "Notice technique";
+                  const fileName = (item.new_value || "").split(/[/\\]/).pop();
+                  content = (
+                    <span>
+                      Notice téléchargée ({docLabel}) : <strong>{fileName || item.new_value || "PDF"}</strong>
+                      {item.source_url && (
+                        <button
+                          type="button"
+                          className="btn-link"
+                          onClick={() => onOpenPath(item.source_url!)}
+                          title={item.source_url}
+                          style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: "0 0.3rem", font: "inherit", fontSize: "10px" }}
+                        >
+                          🔗 source
+                        </button>
+                      )}
+                    </span>
+                  );
+                } else if (item.action === "SCRAPE_IMAGE") {
+                  badge = "🖼️";
+                  const fileName = (item.new_value || "").split(/[/\\]/).pop();
+                  content = (
+                    <span>
+                      Image téléchargée : <strong>{fileName || "Image"}</strong>
+                      {item.source_url && (
+                        <button
+                          type="button"
+                          className="btn-link"
+                          onClick={() => onOpenPath(item.source_url!)}
+                          title={item.source_url}
+                          style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: "0 0.3rem", font: "inherit", fontSize: "10px" }}
+                        >
+                          🔗 source
+                        </button>
+                      )}
+                    </span>
+                  );
+                } else if (item.action === "SCRAPE_PRICE") {
+                  badge = "🟠";
+                  content = (
+                    <span>
+                      Mise à jour Prix (Scraping) :{" "}
+                      <strong>
+                        {item.old_value ? parseFloat(item.old_value).toFixed(2) : "—"} € →{" "}
+                        {item.new_value ? parseFloat(item.new_value).toFixed(2) : "—"} €
+                      </strong>
+                      {item.source_url && (
+                        <button
+                          type="button"
+                          className="btn-link"
+                          onClick={() => onOpenPath(item.source_url!)}
+                          title={item.source_url}
+                          style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: "0 0.3rem", font: "inherit", fontSize: "10px" }}
+                        >
+                          🔗 source
+                        </button>
+                      )}
+                    </span>
+                  );
                 } else if (item.action === "UPDATE") {
+                  badge = "🔵";
                   content = (
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
                       <span>
                         <strong>{item.field}</strong> : <span className="audit-old-value">{item.old_value || "—"}</span> → <span className="audit-new-value">{item.new_value || "—"}</span>
                         {item.source_url && (
-                          <>
-                            {" "}
-                            <button
-                              type="button"
-                              className="btn-link"
-                              onClick={() => onOpenPath(item.source_url!)}
-                              title={item.source_url}
-                              style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
-                            >
-                              🔗 source
-                            </button>
-                          </>
+                          <button
+                            type="button"
+                            className="btn-link"
+                            onClick={() => onOpenPath(item.source_url!)}
+                            title={item.source_url}
+                            style={{ background: "none", border: "none", color: "var(--accent)", textDecoration: "underline", cursor: "pointer", padding: "0 0.3rem", font: "inherit" }}
+                          >
+                            🔗 source
+                          </button>
                         )}
                       </span>
                       {inlineConfirm?.id === `revert-audit-${item.audit_id}` ? (
@@ -1090,14 +1435,12 @@ export function ProductDetailPanel({
                       )}
                     </div>
                   );
-                } else if (item.action === "SCRAPE_PRICE") {
+                } else {
+                  badge = "ℹ️";
                   content = (
                     <span>
-                      Mise à jour Prix (Scraping) :{" "}
-                      <strong>
-                        {item.old_value ? parseFloat(item.old_value).toFixed(2) : "—"} € →{" "}
-                        {item.new_value ? parseFloat(item.new_value).toFixed(2) : "—"} €
-                      </strong>
+                      {item.field ? <strong>{item.field} : </strong> : null}
+                      {item.new_value || item.old_value || item.action}
                     </span>
                   );
                 }

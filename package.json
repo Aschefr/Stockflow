@@ -1,11 +1,12 @@
 {
   "name": "tauri-app",
   "private": true,
-  "version": "1.4.4",
+  "version": "1.5.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:web": "tsc && vite build --config vite.config.web.ts && node -e \"const fs = require('fs'); fs.copyFileSync('dist-web/index.html', 'dist-web/StockFlow.html'); if (!fs.existsSync('release_bin')) fs.mkdirSync('release_bin'); fs.copyFileSync('dist-web/index.html', 'release_bin/StockFlow.html'); console.log('✅ Livrable généré : release_bin/StockFlow.html');\"",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:e2e": "cargo build --manifest-path src-tauri/Cargo.toml && playwright test"
@@ -31,6 +32,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "playwright": "^1.60.0",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vite-plugin-singlefile": "^2.3.3"
   }
 }

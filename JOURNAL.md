@@ -5,6 +5,174 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.5.2] - 2026-10-02
+
+### Exhaustivité & Parité Totale de l'Historique des Modifications (Audit Log)
+- **Rendu Visuel Complet des 8 Actions (`ProductDetailPanel.tsx`) :**
+  - Prise en charge avec badges et titres stylisés pour toutes les actions : `CREATE` (Création référence), `DELETE` (Suppression référence), `UPDATE` (Modification champ), `UPLOAD_MEDIA` (Ajout média image/pdf/screenshot), `DELETE_MEDIA` (Suppression média), `RENAME_MEDIA` (Renommage média avec ancien et nouveau nom), `SCRAPE_PDF` (Notice PDF récupérée avec type), `SCRAPE_IMAGE` (Image récupérée), et repli défensif pour tout événement personnalisé futur.
+  - Boutons d'action contextuels cliquables : `👁️ voir` pour ouvrir le fichier/dossier local via `onOpenPath` et `🔗 source` pour ouvrir le lien web distant d'origine.
+- **Audit Exhaustif des Champs Moteur Tauri (`src-tauri/src/lib.rs`) :**
+  - Prise en compte dans le diff de création/mise à jour de : `Type d'article`, `Image principale`, `Notice principale`, `URL image`, `URL document`, `URL source prix`, `Documents`.
+- **Audit de Chaque Image Téléchargée (`src-tauri/src/scraper.rs`) :**
+  - Suppression de la condition restrictive `if count == 1` sur l'écriture de l'audit pour tracer l'ensemble des images sauvegardées avec leur chemin relatif `images/...` et URL source.
+- **Parité Totale du Moteur Pur Web (`src/services/webBackend.ts`) :**
+  - Intégration de `writeAuditToDirectory` sur l'ensemble des opérations (`create_product`, `delete_product`, `upload_media`, `delete_media`, `rename_media`, `save_selected_images`, `save_selected_pdf`) avec calcul de diffs champ par champ identique au moteur Rust et enregistrement dans IndexedDB `audit_log` ainsi que sur le partage réseau `audit/*.json`.
+- **Restauration Universelle des Champs (`src/App.tsx`) :**
+  - Extension de `handleRevertAudit` pour restaurer en un clic `Type d'article`, `Image principale`, `Notice principale`, `URL document`, `URL source prix`, `URL image` et `Documents`.
+- **Traçabilité des Imports CSV (`csv_importer.rs` & `webCsvImporter.ts`) :**
+  - Enregistrement automatique d'un audit `CREATE` (« Import initial CSV ») ou `UPDATE` (« Import CSV ») pour chaque article importé ou actualisé.
+
+---
+
+## [1.5.1] - 2026-10-01
+
+### Organisation des Modales, Badges Modernes & Refonte de l'Algorithme de Scraping
+- **Restauration de la navigation par onglets :** Les onglets (`📝 Général`, `🖼️ Images`, `📄 Documents`) reprennent leur place au sommet de la modale d'ajout/modification de SKU, offrant une vue dégagée dès l'ouverture.
+- **Badges d'options modernes :** Remplacement des cases à cocher standard par des boutons-pilules interactifs stylisés (`[+ 🖼️ Images]`, `[+ 📄 Notices & PDF]`) avec état actif lumineux (`[✓ 🖼️ Images]`).
+- **Refonte intégrale de l'algorithme d'extraction & détection des marques :**
+  - **Diagnostic :** L'ancien algorithme parcourait bêtement un tableau statique de marques et s'arrêtait (`break`) dès la première correspondance trouvée dans le texte concaténé. Comme `Schneider` était en première position et apparaissait dans des liens de catégories ou pieds de page de distributeurs (RS/Sonepar), il était sélectionné à tort avec 92% de confiance même quand tous les résultats et domaines officiels provenaient de `Siemens`.
+  - **Système de notation multi-critères (`scoreAndRankBrands`) :**
+    - Pondération forte des domaines constructeurs officiels (+40 points pour `*.siemens.com`, `*.se.com`, `*.phoenixcontact.com`, etc.).
+    - Pondération par rang et position dans les titres (+22 points pour le titre #1, +16 pour le #2, etc.).
+    - Détection contextuelle des alias (`SIMATIC`, `SITOP`, `SIRIUS` -> Siemens).
+    - Classement des candidats par score décroissant avec confiances réelles.
+  - **Nettoyage intelligent des désignations (`cleanProductTitle`) :** Suppression du préfixe SKU/MPN (ex: `6GK... | `) au début des titres et des suffixes boutiques (` | RS`, ` - Sonepar`, ` - SiePortal`) pour obtenir une désignation claire et lisible.
+  - **Correction du parseur RS :** Extension de la limite de longueur du MPN de 15 à 35 caractères (`{4,35}`), permettant la capture immédiate des références longues Siemens/Schneider.
+  - **Détection des références MPN officielles formatées :** Extraction automatique de la référence avec tirets de catalogue (ex: `6GK7543-6WX00-0XE0` si l'utilisateur a saisi `6GK75436WX000XE0`).
+  - **Extraction des dimensions, poids et conditionnements :** Remplissage automatique des propriétés à partir des motifs textuels des extraits de recherche.
+- **Classification Intelligente & Détection du Type de Document (Historique Excel) :**
+  - **Algorithme d'analyse textuelle contextuelle (`documentUtils.ts`, `scraper.rs`, `webScraperService.ts`) :**
+    - Remplacement du type rigide `"datasheet"` par défaut par un algorithme heuristique analysant les termes dans l'URL, le nom de fichier, le titre et les extraits environnants (anglais, français, allemand).
+    - Détection de 8 familles de documents techniques : `Fiche technique` (`fiche_technique`), `Manuel` (`manuel`), `Guide rapide` (`guide_rapide`), `Installation` (`installation`), `Information Produit` (`information_produit`), `Schéma / Plan` (`schema`), `Certificat` (`certificat`), `Catalogue` (`catalogue`), et repli sur `Autre` (`autre`).
+  - **Badges visuels de type sur les candidats :**
+    - Affichage d'un badge pilule coloré sur chaque candidat dans la liste de scraping (`ProductForm.tsx` et `ScrapeComponents.tsx`) indiquant son type détecté dès la recherche.
+  - **Sélecteur déroulant de type modifiable par l'utilisateur :**
+    - Intégration d'un menu déroulant `<select>` stylisé pour chaque document sélectionné dans la liste « Documents pour cet article ». L'utilisateur peut modifier en un clic la catégorie assignée au document avant la validation de la fiche.
+  - **Intégration dans la convention de renommage (`{Type}`) :**
+    - La balise `{Type}` configurée dans la convention de nommage (`pdf_rename_convention`) utilise désormais le slug du type choisi (`manuel`, `guide_rapide`, `installation`, etc.) pour le nom physique du fichier sur le disque au lieu du mot générique fixe `datasheet`.
+- **Tri Interactif par Colonnes & Réinitialisation du Tri (Tableaux de Références) :**
+  - **Tri multi-types intelligent (`compareProducts`) :**
+    - Prise en charge du tri sur l'ensemble des colonnes : textuelles (SKU, MPN, Code VPC, Marque, Famille, Sous-famille, Désignation, Emplacement, Notes) via tri naturel insensible à la casse et aux accents (`localeCompare` avec `{ numeric: true }`), et numériques (Stock Actuel, Seuil Alerte, Prix Unitaire, Taille du lot, Valeur Totale, Largeur, Hauteur, Profondeur, Poids).
+    - Gestion robuste des valeurs vides : systématiquement reléguées en fin de liste pour ne pas masquer les données utiles.
+  - **Cycle de tri 3 états sur les en-têtes de colonnes :**
+    - Clic 1 : Tri croissant (`▲`), mise en surbrillance de l'en-tête de colonne avec couleur d'accent.
+    - Clic 2 : Tri décroissant (`▼`).
+    - Clic 3 : Réinitialisation du tri et retour automatique à l'ordre par défaut (sans tri).
+  - **Boutons explicites de réinitialisation :**
+    - Bouton d'annulation rapide `✕` rouge intégré directement dans l'en-tête de la colonne triée.
+    - Bouton dynamique dans la barre d'outils au-dessus du tableau (`✕ Tri : [NomColonne] (▲ croissant / ▼ décroissant)`) permettant de réinitialiser le tri en un seul clic.
+    - Option de réinitialisation ajoutée dans la modale de configuration des colonnes (`⚙️ Colonnes`).
+    - Préservation totale de l'action de redimensionnement de colonne (séparation stricte des événements de glisser/déposer via `stopPropagation`).
+  - **Disponibilité universelle :** Fonctionne à la fois sur le tableau d'inventaire principal (`App.tsx`) et dans le sélecteur de références des Nomenclatures (`BomTab.tsx`).
+- **Fermeture Immédiate des Modales & Téléchargements Médias en Arrière-Plan :**
+  - **Diagnostic :** Lors de l'enregistrement d'une fiche avec des images ou des documents distants sélectionnés, le modal restait bloqué plusieurs secondes car `save_selected_images` et `save_selected_pdf` téléchargeaient l'ensemble des fichiers sur le réseau de manière bloquante avant de fermer la fenêtre.
+  - **Fermeture instantanée :** Dès que l'écriture rapide de la référence en base de données locale (< 50 ms) est validée, le modal se ferme immédiatement et l'état du formulaire est réinitialisé.
+  - **Micro-animation du bouton :** Remplacement instantané du libellé du bouton par `Enregistrement...` ou `Création...` avec spinner rotatif dès le clic, empêchant les doubles clics accidentels.
+  - **Tâche d'arrière-plan non bloquante :** L'upload des fichiers locaux et le téléchargement HTTP des images et notices PDF s'exécutent en tâche asynchrone en arrière-plan sans ralentir l'utilisateur. Dès l'achèvement, les listes de médias de la fiche active sont rafraîchies automatiquement.
+- **Centrage Automatique & Surbrillance de la Ligne (Auto-scroll & Pulse Highlight) :**
+  - **Navigation automatique vers la position du SKU :** Dès la création ou la modification d'un SKU, l'application bascule sur l'onglet inventaire (`activeTab = "inventory"`), réinitialise les filtres de recherche ou de catégorie s'ils masquaient la référence, et scrolle en douceur (`scrollIntoView({ behavior: "smooth", block: "center" })`) jusqu'à la ligne concernée dans le tableau.
+  - **Surbrillance visuelle temporaire (`rowHighlightPulse`) :** La ligne du tableau bénéficie d'une animation CSS lumineuse avec halo d'accentuation (`box-shadow: inset`) et contour marqué pendant 4 secondes avant de revenir à son état sélectionné habituel, guidant immédiatement le regard de l'utilisateur vers son nouvel article.
+- **Interactions Avancées du Tableau de Bord & Filtrage par Statut de Stock :**
+  - **Cartes de statistiques cliquables :**
+    - Clic sur « Stock Bas Alertes » : bascule vers l'inventaire avec le filtre `Stock bas` actif (`current_stock <= min_stock AND min_stock > 0`).
+    - Clic sur « Ruptures Totales » : bascule vers l'inventaire avec le filtre `Rupture` actif (`current_stock <= 0`).
+    - Clic sur « Total Références » : bascule vers l'inventaire avec tous les filtres réinitialisés.
+  - **Badges / Pilules de filtre de stock dans la barre d'outils d'inventaire :**
+    - Ajout de 3 pilules interactives : `Tous (N)`, `⚠️ Stock bas (N)`, `🛑 Rupture (N)`.
+    - Bouton d'annulation explicite `✕ Filtre stock : [Nom]` à côté du bouton de réinitialisation de tri.
+    - Possibilité de basculer/annuler le filtre en recliquant simplement sur la pilule active ou sur le badge d'annulation.
+  - **Derniers Mouvements de Stock cliquables avec Auto-scroll & Highlight :**
+    - Clic sur une ligne de mouvement ou d'audit du tableau de bord : réinitialisation automatique des filtres masquants, sélection de l'article avec ouverture de sa fiche technique dans le volet latéral, navigation instantanée vers l'inventaire, centrage fluide de la ligne dans le tableau et surbrillance lumineuse pulsée de 4 secondes.
+
+---
+
+## [1.5.0] - 2026-09-30
+
+### Architecture Dual-Target : Package de Distribution Pure Web (.html) & Moteur Hybride
+- **Objectif & Session Restreinte :**
+  - Permettre le fonctionnement de Stockflow sur des postes d'entreprise à session restreinte où même les exécutables portables (`.exe`) sont bloqués par les règles de sécurité (AppLocker/SRP).
+  - Génération d'un package de distribution sous la forme d'un fichier HTML unique (`Stockflow.html`), exécutable directement dans Microsoft Edge sans droits d'administration.
+- **Conception Dual-Target (Codebase Unique) :**
+  - Les deux versions partagent 100% des composants graphiques (React 19, TypeScript, CSS).
+  - Couche d'abstraction API universelle (`src/services/api.ts`) détectant automatiquement l'environnement d'exécution (`isTauri`).
+  - Moteur Web autonome (`webBackend.ts`) reproduisant le rejeu des événements JSON dans IndexedDB et permettant la lecture/écriture sur le partage réseau via l'API File System Access de Chromium.
+  - Moteur de migration CSV pur Web (`webCsvImporter.ts`) : sélection du fichier CSV et des dossiers sources médias (images, notices PDF), transcodage Windows-1252 et copie vers le partage réseau via des descripteurs de fichiers du navigateur.
+  - Conservation intégrale de la version Desktop Tauri sans aucune régression.
+- **Assistant de Scraping Navigateur & Capture Fournisseur (Mode Web) :**
+  - **Favori Bookmarklet Edge/Chrome 1-Clic :** Bouton draggable interactif et bouton de copie de code dans l'onglet *Paramètres* (`src/services/webScraperAssistant.ts`, `src/App.tsx`). Extraction en un clic des données riches (JSON-LD, marque, MPN, code commande, prix, dimensions, liens images et fiches PDF) directement sur les pages fournisseurs (RS, Farnell, Mouser...) et transmission automatique vers StockFlow via `localStorage` et presse-papiers.
+  - **Fonctionnalité « 📋 Coller fiche fournisseur » :** Bouton rapide et modale de saisie assistée dans `ProductForm.tsx`. Analyseur heuristique et syntaxique intelligent (`parseSupplierData`) convertissant tout texte brut ou JSON fournisseur collé en champs de formulaire et en candidats médias/documents.
+  - **Gestion des médias Web :** Prise en charge du téléchargement et suppression des images et PDF dans le sous-système réseau (`webBackend.ts`).
+- **Correctif d'enregistrement des nomenclatures (IndexedDB DataError) :**
+  - Résolution de l'erreur `DataError: Evaluating the object store's key path yielded a value that is not a valid key` lors de l'enregistrement d'une nomenclature (BOM).
+  - Prise en charge des paramètres camelCase (`bomId`, `equipmentNote`, `eventType`) transmis par les vues frontend dans `webBackend.ts`.
+  - Sécurisation de l'assignation de l'ID primaire de nomenclature dans `webEventProcessor.ts` et garde-fou défensif dans `idbPut` (`webDatabase.ts`).
+- **Colonne « Image produit » & Tailles de ligne dans le PDF Atelier (BOM) :**
+  - Ajout de la colonne `Image produit` (`ALL_AVAILABLE_COLUMNS`) dans la configuration et réorganisation des colonnes du PDF Atelier.
+  - Intégration d'un sélecteur déroulant « Taille image / Hauteur de ligne » dans le panneau de configuration du PDF (12 mm, 16 mm, 20 mm, 25 mm, 30 mm) mémorisé dans le `localStorage` (`sf_bom_pdf_img_size`).
+  - Adaptation dynamique de la hauteur des lignes (`minCellHeight = imgSizeMm + 4`) et de la largeur de la colonne dans `jspdf-autotable`.
+  - Préchargement asynchrone des images avec gestion des ratios d'aspect (portrait/paysage) et centrage optique dans chaque cellule via `didDrawCell`.
+  - Aperçu interactif immédiat dans la vue de prévisualisation (tableau HTML reflétant les dimensions choisies) et support natif bi-moteur (Blob URLs résolues en mode Web, `convertFileSrc` en mode Tauri Desktop).
+- **Chargement instantané depuis le cache local & Indicateur de synchronisation (Mode Web) :**
+  - Au rechargement de la page (F5), les produits sont désormais chargés instantanément depuis IndexedDB (cache local) avant le démarrage de la synchronisation réseau, éliminant l'écran vide pendant le chargement.
+  - La synchronisation avec le dossier partagé s'effectue en arrière-plan de manière transparente ; les données sont mises à jour automatiquement une fois la lecture distante terminée.
+  - Ajout d'un indicateur de synchronisation en 3 états dans le header (mode Web uniquement) : `⏳ Synchronisation…` (spinner orange), `✅ Synchronisé` (badge vert), `● Cache local / Hors-ligne` (badge par défaut ou rouge).
+  - Amélioration de l'affichage du chemin réseau en mode Web : le champ est en lecture seule (le chemin manuel ne fonctionne pas via l'API File System Access), un clic ouvre directement le sélecteur, et un message informatif explique la restriction de sécurité du navigateur.
+- **Résolution du bug de synchronisation des Nomenclatures entre postes (Mode Web) :**
+  - **Diagnostic :** Sur un poste secondaire, la page des nomenclatures restait vide car (1) `BomTab` ne rechargeait les données qu'une seule fois à son montage (`useEffect(..., [])`) sans écouter la boucle de synchronisation réseau de 4s (`syncAndFetch`), (2) la synchronisation initiale de plus de 1 100 fichiers d'événements prenait plusieurs dizaines de secondes et la nomenclature créée en dernier sur le poste 1 n'était pas encore traitée lors de l'ouverture de l'onglet, et (3) lors d'un rechargement (F5), l'API File System Access de Chromium repasse systématiquement la permission du handle de dossier stocké en état `"prompt"`, ce qui désactivait silencieusement la lecture réseau tout en affichant les produits du cache local.
+  - **Rechargement dynamique :** Ajout de la prop `syncCounter` dans `BomTab` déclenchant automatiquement le rechargement de la liste dès qu'un cycle de synchronisation se termine.
+  - **Bouton d'actualisation manuelle :** Ajout d'un bouton « 🔄 Actualiser » dans la barre d'outils de `BomTab` pour forcer la mise à jour immédiate à tout moment.
+  - **Reconnexion 1-Clic du dossier réseau :** Détection de l'état déconnecté suite à un rechargement avec affichage du badge `⚠️ Dossier non connecté (Cliquer pour réactiver)` et commande `reconnect_network_directory` pour réautoriser l'accès au dossier partagé par un simple clic sans devoir naviguer dans l'explorateur.
+  - **Tri des nomenclatures :** Tri automatique par date de modification décroissante (`updated_at DESC`) dans `get_boms` (`webBackend.ts`).
+- **Suppression sécurisée des Nomenclatures (Desktop & Web) :**
+  - Ajout d'un bouton de suppression rapide `🗑️` dans la colonne Actions du tableau de la vue principale et d'un bouton `🗑️ Supprimer` dans la barre d'outils d'édition d'un projet (`BomTab.tsx`).
+  - Dialogue de confirmation préalable avant suppression définitive.
+  - Gestion intelligente des réservations : si la nomenclature supprimée était au statut `RESERVED`, le système lève automatiquement toutes les réservations associées (`STOCK_UNRESERVE`), remettant instantanément les stocks physiques en réserve à disposition.
+  - Émission de l'événement réseau `BOM_DELETE` partagé entre les postes et suppression immédiate des tables/stores locaux (`boms` et `bom_items`).
+- **Persistance intégrale et synchrone des Paramètres dans le LocalStorage :**
+  - **Diagnostic :** Confirmation du problème suspecté par l'utilisateur. Dans le moteur web (`webBackend.ts`), l'enregistrement de la configuration tronquait silencieusement 6 champs critiques (`searxng_url`, `searxng_urls`, `max_image_candidates`, `vpc_sites`, `pdf_rename_convention`, `image_rename_convention`), causant leur réinitialisation aux valeurs par défaut à chaque réouverture ou rechargement. De plus, les paramètres de sauvegarde (`stockflow_backup_config`) n'étaient conservés que dans IndexedDB sans miroir dans le `localStorage`.
+  - **Mise à niveau du modèle de données (`AppConfig`) :** Intégration de l'ensemble des 14 champs de configuration applicative dans `src/types/index.ts`.
+  - **Double persistance immédiate (`webBackend.ts`) :** Conservation de tous les champs sans aucune perte dans `localStorage` (`stockflow_config`) et IndexedDB (`app_config`), avec synchronisation miroir des paramètres de backup (`stockflow_backup_config`).
+  - **Préchargement synchrone & Écriture directe (`App.tsx`) :**
+    - Lecture synchrone de `localStorage.getItem("stockflow_config")` dès le montage du composant `App` avant même la résolution de `invoke("get_config")`, garantissant un affichage instantané et éliminant tout clignotement ou décalage de formulaire.
+    - Écriture directe et instantanée dans le `localStorage` lors de la sauvegarde manuelle (`handleSaveSettings`) et de l'auto-sauvegarde à la perte de focus (`triggerAutoSave`).
+- **Affichage du numéro de version dans la version Web :**
+  - **Diagnostic :** La commande `get_app_version` n'était pas implémentée dans `WebBackend.handle`, renvoyant `null`. Le composant `App` écrasait alors sa valeur par défaut avec `null`, affichant un badge avec seulement `"v"`.
+  - **Prise en charge universelle de la version :** Création de [`src/version.ts`](file:///d:/Code%20Projects/Stockflow/src/version.ts) avec `APP_VERSION = "1.5.0"`.
+  - **Synchronisation :** Mise à niveau des versions dans `package.json`, `Cargo.toml` et `tauri.conf.json` vers `1.5.0`.
+  - **Prise en charge Web :** Implémentation du handler `get_app_version` dans `webBackend.ts` renvoyant `APP_VERSION`, et initialisation robuste du state `appVersion` dans `App.tsx` (ignorant les retours falsy). Le badge dans le header affiche désormais fièrement `v1.5.0`.
+- **Moteur de Recherche Manuel Intelligent et Tolérant (`searchUtils.ts`) :**
+  - **Recherche multi-termes (ET logique) :** Découpage de la requête en mots-clés indépendants. Par exemple, la saisie de `"Alim 24v"` trouve instantanément `"Alimentation - 230V - 24V"`, même si d'autres mots ou caractères séparent les termes.
+  - **Insensibilité stricte à la casse et aux accents :** Normalisation NFD automatique (`boîtier` trouve `boitier`, `câble` trouve `cable`).
+  - **Tolérance sur les espaces et unités matérielles :** Gestion intelligente des notations numériques industrielles (`"24v"` trouve `"24 V"` et vice-versa, `"230v"` trouve `"230 V"`, `"1.5mm"` trouve `"1,5 mm"`).
+  - **Recherche transversale sur tous les champs :** Analyse simultanée de la désignation (`label`), de la référence interne (`sku`), de la référence fabricant (`mpn`), de la marque (`brand`), de la famille (`category`), de la sous-famille (`sub_category`), de l'emplacement (`location`) et des attributs techniques (`attributes`).
+  - **Tolérance aux abréviations & sous-chaînes :** Préfixes techniques immédiatement reconnus (`alim` => `alimentation`, `disj` => `disjoncteur`, `diff` => `différentiel`, `transfo` => `transformateur`).
+  - **Tolérance aux fautes de frappe (Levenshtein) :** Prise en charge des coquilles sur les mots de 4 lettres et plus (ex: `"scheinder"` trouve `"Schneider"`).
+  - **Classement par pertinence (Scoring) :** Tri dynamique plaçant en tête les correspondances exactes sur la désignation ou les références clés.
+  - **Intégration universelle :** Appliqué à la fois sur la table principale d'inventaire (`App.tsx`) et sur le sélecteur d'articles des Nomenclatures (`BomTab.tsx`).
+- **Optimisation de la Synchronisation Multi-Utilisateurs & Économie Réseau :**
+  - **Allègement du polling de fond :** Intervalle porté de 4s à 15s (réduction immédiate de 73% des requêtes SMB/NAS par poste).
+  - **Rechargement conditionnel intelligent :** Si aucun nouvel événement n'est présent sur le réseau (`newEventsCount === 0`), l'application ignore les requêtes `get_products`, `get_dashboard_stats`, `list_sku_images/pdfs` et évite tout re-render React superflu, économisant 95% du CPU et des E/S disques.
+  - **Mise en veille sur masquage (`document.hidden`) :** Suspension totale du polling passif lorsque l'application ou l'onglet est en arrière-plan.
+  - **Synchronisation immédiate sur reprise d'activité (`focus` & `visibilitychange`) :** Rafraîchissement instantané des données dès que l'utilisateur revient sur la fenêtre.
+- **Moteur de Web Scraping Pur Navigateur & Intégration SearXNG Sécurisée (Mode Web) :**
+  - **Objectif :** Remplacer le scraper lourd Desktop en permettant à la version HTML autonome (`StockFlow.html`) de rechercher des métadonnées, des images et des notices PDF directement depuis le navigateur, à l'image du fichier Excel historique (`Gestion de Stock R&T.xlsm`).
+  - **Architecture CORS & Cloudflare :** Configuration des en-têtes CORS (`Access-Control-Allow-Origin: *`, `GET, POST, OPTIONS`) sur le tunnel Cloudflare de l'instance SearXNG privée (`search.amify-studio.fr`) avec rate limiting.
+  - **Service de Scraping Dédié (`webScraperService.ts`) :**
+    - `searchSearxngImages` : Requête SearXNG en catégorie `images` avec extraction des URLs directes et des miniatures Google/Bing.
+    - `searchSearxngPdfs` : Requête SearXNG ciblée sur les fiches techniques (`filetype:pdf`) avec filtrage automatique.
+    - `searchSearxngGeneral` : Recherche générale pour auto-remplissage des champs (désignation épurée des suffixes VPC, marque reconnue par heuristique industrielle, MPN, prix HT).
+    - Respect strict du rate limiting Cloudflare grâce à une temporisation asynchrone courtoise entre les requêtes (800ms / 600ms).
+    - Caching persistant des candidats dans IndexedDB (`candidates_{sku}`).
+  - **Gestion Robuste des Médias et Téléchargement Sécurisé (`webBackend.ts`) :**
+    - `save_selected_images` : Téléchargement du blob image avec repli automatique (*fallback*) sur la miniature SearXNG si le CDN du fabricant bloque le hotlinking direct (403/CORS), enregistrement dans le dossier `images/` via l'API File System Access et mise en cache `mediaUrlCache`.
+    - `save_selected_pdf` : Téléchargement du document technique dans `documents/{sku}/`, mise à jour automatique de la fiche produit (`pdf_path`).
+    - `upload_media` & `rename_media` : Prise en charge complète du téléversement manuel et du renommage des médias en mode Web.
+  - **Compatibilité Visuelle et Fallback d'Affichage :**
+    - Ajout de `<meta name="referrer" content="no-referrer" />` dans `index.html` pour contourner les protections anti-hotlink des CDN industriels.
+    - Gestionnaires `onError` sur les balises images (`ProductForm.tsx`, `ScrapeComponents.tsx`) basculant dynamiquement sur la miniature de secours pour une prévisualisation infaillible.
+  - **Verrou anti-concurrence (`isSyncingRef`) :** Élimination de tout risque de requêtes de synchronisation qui se chevauchent sur les connexions réseau lentes.
+  - **Immédiateté locale préservée :** Les actions initiées par l'utilisateur (création, mouvement de stock, suppression, etc.) continuent d'exécuter un rechargement forcé instantané sans aucun délai.
+
 ## [1.4.4] - 2026-07-08
 
 ### Pertinence de recherche, scoring, correctifs d'auto-remplissage et confirmations inline
@@ -339,4 +507,27 @@ Ne pas oublier de le remplir pendant le developpement.
   - **Extraction contextuelle (Rust) :** Ajout de la fonction `extract_link_text` dans `scraper.rs` qui analyse le HTML environnant pour récupérer le texte exact du lien (`<a href>Texte</a>`).
   - **Nommage Dynamique :** La fonction `detect_doc_type` a été adaptée pour lire ce texte extrait et assigner un type de document ultra-pertinent au lieu du type générique 'Datasheet'.
   - **Coupe-circuit SearxNG :** Ajout d'une condition interrompant totalement la recherche fallback sur le moteur de recherche public dès lors que la page VPC (ex: RS) a retourné au moins un PDF valide.
-  - **Déduplication agressive :** Modification du seuil de tolérance PDF : maximum de 3 fichiers gardés en mémoire, et suppression des doublons sur le seul critère du type de document si la taille est similaire.
+- **Refonte Ergonomique du Scraping & Réconciliation des Candidats :**
+  - **Réconciliation des clés de cache SKU/MPN (`webScraperService.ts`, `webBackend.ts`) :**
+    - Résolution du bug où un scraping lancé avec une référence brute sans tiret (ex: `6GK75436WX000XE0`) n'était plus retrouvé lorsque le formulaire adoptait le format officiel avec tirets (`6GK7543-6WX00-0XE0`).
+    - `getStoredScrapeCandidates` et `save_scrape_candidates` effectuent désormais une recherche multi-niveaux : clé brute, clé alphanumérique normalisée (`replace(/[^A-Z0-9]/g, "")`), et balayage de secours sur toutes les clés de cache candidates.
+    - Synchronisation automatique des candidats dans IndexedDB vers le nouveau SKU dès l'application d'un MPN.
+  - **Clarification UX du bouton "Données récupérées" (`ProductForm.tsx`, `ProductDetailPanel.tsx`) :**
+    - Suppression du libellé trompeur `📦 Données récupérées` qui laissait penser à une étape d'importation obligatoire non accomplie.
+    - Remplacement par `🎯 Revoir les variantes` lorsque les données sont déjà appliquées (pour permettre de réajuster ou choisir un autre titre / photos / notices sans confusion), ou `✨ Appliquer les candidats` si non encore appliqués.
+  - **Bannière récapitulative explicite :**
+    - Remplacement de l'intitulé ambigu `📋 Modifications à appliquer` par `✅ Données pré-remplies par le scraping` avec un bouton d'accès rapide `🎯 Revoir les variantes`.
+    - Message clarifié : les données sont bien injectées dans le formulaire et l'utilisateur n'a plus qu'à cliquer sur Créer.
+
+- **Sélection Différée des Médias & Consultation ('Voir') (`ProductForm.tsx`, `App.tsx`) :**
+  - **Inversion des interactions Clic / Bouton :**
+    - Sur chaque image ou document candidat, le bouton d'action devient **`👁️ Voir`** et ouvre la ressource dans un nouvel onglet sans déclencher d'importation.
+    - Cliquer sur la vignette de l'image ou sur la ligne du document **sélectionne / désélectionne** (toggle) l'élément pour le rattacher au SKU.
+    - Retour visuel immédiat : bordure illuminée, fond accentué, badge vert avec coche `✓`.
+  - **Résolution du bug d'affichage des documents importés :**
+    - L'ancien comportement tentait un téléchargement réseau immédiat sur disque via `save_selected_pdf`, bloqué par CORS en mode Web pour les PDF externes sans que l'élément n'apparaisse dans la liste locale des fichiers physiques.
+    - La liste du haut affiche désormais tous les **documents et images sélectionnés pour cet article** (fichiers existants sur disque + éléments candidats sélectionnés), avec badges explicites (`💾 Disque`, `✓ Prêt à enregistrer`), boutons `👁️ Voir` et `✕ Retirer`.
+  - **Importation différée à la validation finale du JSON :**
+    - Les URLs sélectionnées sont attachées aux attributs du produit en mémoire (`scrape_image_urls`, `scrape_pdf_urls`).
+    - Le téléchargement physique en tâche de fond n'est exécuté qu'au clic final sur **"Créer"** (ou "Enregistrer"), garantissant une création instantanée et sans blocage.
+

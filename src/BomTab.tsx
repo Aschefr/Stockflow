@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc, isTauri } from "./services/api";
+import { createProductSearchMatcher } from "./utils/searchUtils";
+import type { Product } from "./types";
 import * as XLSX from "xlsx-js-style";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -61,6 +63,7 @@ export interface Bom {
 
 const ALL_AVAILABLE_COLUMNS: Record<string, string> = {
   checkbox: "[ ] Case à cocher",
+  image: "Image produit",
   sku: "SKU Interne",
   mpn: "MPN (Ref Fabricant)",
   label: "Désignation",
@@ -81,6 +84,7 @@ const ALL_AVAILABLE_COLUMNS: Record<string, string> = {
 
 const COLUMN_HEADERS: Record<string, string> = {
   checkbox: "[ ]",
+  image: "Photo",
   sku: "SKU",
   mpn: "MPN",
   label: "Désignation",
@@ -106,11 +110,55 @@ export default function BomTab({
   renderProductTable,
   selectedSkus,
   setSelectedSkus,
-  onEditingChange
+  onEditingChange,
+  onImageHover,
+  onImageLeave,
+  syncCounter
 }: any) {
   const [boms, setBoms] = useState<Bom[]>([]);
   const [editingBom, setEditingBom] = useState<Bom | null>(null);
   useEffect(() => { onEditingChange?.(editingBom !== null); }, [editingBom]);
+
+  // Hover Thumbnail handler & state (fallback for standalone usage)
+  const [localHoveredImage, setLocalHoveredImage] = useState<string | null>(null);
+  const [localHoverPosition, setLocalHoverPosition] = useState({ x: 0, y: 0 });
+
+  const handleItemImageHover = (e: React.MouseEvent, imageRelativePath: string | null | undefined, colId?: string, fallbackProd?: Product) => {
+    if (onImageHover) {
+      onImageHover(e, imageRelativePath, fallbackProd, colId);
+      return;
+    }
+    const savedSetting = localStorage.getItem("sf_hover_preview_column") || "all";
+    if (savedSetting === "none") {
+      setLocalHoveredImage(null);
+      return;
+    }
+    if (savedSetting !== "all") {
+      if (savedSetting === "sku_label" && colId !== "sku" && colId !== "label") {
+        setLocalHoveredImage(null);
+        return;
+      } else if (savedSetting !== "sku_label" && colId !== savedSetting && !(savedSetting === "vpc_code" && colId === "vpcCode")) {
+        setLocalHoveredImage(null);
+        return;
+      }
+    }
+    if (!imageRelativePath || !networkPath) return;
+    const absolutePath = convertFileSrc(`${networkPath}/${imageRelativePath}`);
+    setLocalHoveredImage(absolutePath);
+    let x = e.clientX + 15;
+    let y = e.clientY + 15;
+    if (x + 210 > window.innerWidth) x = Math.max(10, e.clientX - 215);
+    if (y + 210 > window.innerHeight) y = Math.max(10, e.clientY - 215);
+    setLocalHoverPosition({ x, y });
+  };
+
+  const handleItemImageLeave = () => {
+    if (onImageLeave) {
+      onImageLeave();
+      return;
+    }
+    setLocalHoveredImage(null);
+  };
 
   const [excelColumns, setExcelColumns] = useState(() => {
     const saved = localStorage.getItem("sf_bom_excel_columns");
@@ -158,6 +206,10 @@ export default function BomTab({
 
   const [pdfLineBreakBy, setPdfLineBreakBy] = useState(() => {
     return localStorage.getItem("sf_bom_pdf_line_break_by") || "none";
+  });
+
+  const [pdfImageSize, setPdfImageSize] = useState<number>(() => {
+    return Number(localStorage.getItem("sf_bom_pdf_img_size")) || 16;
   });
 
   const [tableColumns, setTableColumns] = useState(() => {
@@ -208,16 +260,17 @@ export default function BomTab({
   };
 
   const calculateProjectTotal = (bom: Bom) => {
+    if (!bom || !Array.isArray(bom.items)) return 0;
     return bom.items.reduce((sum, item) => {
-      const p = products.find((prod: any) => prod.sku === item.sku);
+      const p = (products || []).find((prod: any) => prod.sku === item.sku);
       const price = p?.price !== undefined ? p.price : 0;
-      return sum + (price * item.qty);
+      return sum + (price * (item.qty || 0));
     }, 0);
   };
 
   useEffect(() => {
     fetchBoms();
-  }, []);
+  }, [syncCounter]);
 
   const fetchBoms = async () => {
     try {
@@ -345,6 +398,49 @@ export default function BomTab({
     }
   };
 
+  const handleDeleteBom = async (bom: Bom) => {
+    if (!bom) return;
+    const confirmMsg = bom.status === "RESERVED"
+      ? `Êtes-vous sûr de vouloir supprimer la nomenclature "${bom.name}" ?\n\nAttention : cette nomenclature comporte des articles réservés. La réservation de ces stocks sera automatiquement annulée.`
+      : `Êtes-vous sûr de vouloir supprimer définitivement la nomenclature "${bom.name}" ?`;
+
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      // Si la nomenclature était réservée, lever la réservation pour remettre les stocks à disposition
+      if (bom.status === "RESERVED" && Array.isArray(bom.items)) {
+        for (const item of bom.items) {
+          try {
+            await invoke("add_movement", {
+              networkPath,
+              trigramme,
+              eventType: "STOCK_UNRESERVE",
+              sku: item.sku,
+              qty: item.qty,
+              note: `Suppression nomenclature: ${bom.name}`
+            });
+          } catch (e) {
+            console.warn("Erreur dé-réservation", e);
+          }
+        }
+      }
+
+      await invoke("delete_bom", {
+        networkPath,
+        trigramme,
+        bomId: bom.id,
+      });
+
+      if (editingBom?.id === bom.id) {
+        setEditingBom(null);
+      }
+
+      fetchBoms();
+    } catch (e) {
+      alert("Erreur lors de la suppression de la nomenclature : " + e);
+    }
+  };
+
   const loadImage = (path: string): Promise<HTMLImageElement | null> => {
     return new Promise((resolve) => {
       if (!path) return resolve(null);
@@ -370,6 +466,7 @@ export default function BomTab({
 
     switch (colId) {
       case "checkbox": return "";
+      case "image": return p?.image_path || "";
       case "sku": return item.sku;
       case "mpn": return p?.mpn || "";
       case "label": return p?.label || "Inconnu";
@@ -428,40 +525,94 @@ export default function BomTab({
       
       const activeCols = pdfColumns.filter((c: any) => c.enabled);
       const headRow = activeCols.map((c: any) => c.label);
-      
-      // Sort items
-      const sortedItems = [...editingBom.items].sort((a, b) => {
-        const pA = products.find((prod: any) => prod.sku === a.sku);
-        const pB = products.find((prod: any) => prod.sku === b.sku);
-        
-        let valA = "";
-        let valB = "";
+      const hasImageCol = activeCols.some((c: any) => c.id === "image");
+      const imageColIdx = activeCols.findIndex((c: any) => c.id === "image");
+      const imgSizeMm = pdfImageSize || 16;
+      const rowHeightMm = imgSizeMm + 4;
+
+      const sortedItems = [...editingBom.items].sort((a: BomItem, b: BomItem) => {
+        const prodA = products.find((p: any) => p.sku === a.sku);
+        const prodB = products.find((p: any) => p.sku === b.sku);
         
         if (pdfSortBy === "category") {
-          valA = pA?.category || "";
-          valB = pB?.category || "";
+          return (prodA?.category || "").localeCompare(prodB?.category || "");
         } else if (pdfSortBy === "sub_category") {
-          valA = pA?.sub_category || "";
-          valB = pB?.sub_category || "";
+          return (prodA?.sub_category || "").localeCompare(prodB?.sub_category || "");
         } else if (pdfSortBy === "location") {
-          valA = pA?.location || "";
-          valB = pB?.location || "";
+          return (prodA?.location || "").localeCompare(prodB?.location || "");
         } else if (pdfSortBy === "sku") {
-          valA = a.sku || "";
-          valB = b.sku || "";
+          return a.sku.localeCompare(b.sku);
         } else if (pdfSortBy === "label") {
-          valA = pA?.label || "";
-          valB = pB?.label || "";
-        } else {
-          return 0;
+          return (prodA?.label || "").localeCompare(prodB?.label || "");
         }
-        
-        const comp = valA.localeCompare(valB, undefined, { numeric: true, sensitivity: 'base' });
-        if (comp !== 0) return comp;
-        return a.sku.localeCompare(b.sku);
+        return 0;
       });
 
+      // Préchargement des images de produits pour la colonne Image
+      const loadedImages = new Map<string, { dataUrl?: string; img?: HTMLImageElement; aspect: number }>();
+      if (hasImageCol) {
+        for (const item of sortedItems) {
+          const p = products.find((prod: any) => prod.sku === item.sku);
+          if (p && !loadedImages.has(item.sku)) {
+            let relPath = p.image_path || "";
+            let resolvedSrc = "";
+
+            if (!isTauri() && relPath) {
+              try {
+                const blobUrl = await invoke<string>("resolve_media", { path: relPath });
+                if (blobUrl) resolvedSrc = blobUrl;
+              } catch (e) {}
+            }
+
+            if (!resolvedSrc && (relPath || networkPath)) {
+              const fullPath = networkPath && relPath ? `${networkPath}/${relPath}`.replace(/\\/g, "/") : relPath;
+              resolvedSrc = convertFileSrc(fullPath);
+            }
+
+            if (!resolvedSrc && p.sku) {
+              try {
+                const imgs: string[] = await invoke("list_sku_images", { networkPath, sku: p.sku });
+                if (imgs && imgs.length > 0) {
+                  if (!isTauri()) {
+                    const blobUrl = await invoke<string>("resolve_media", { path: imgs[0] });
+                    if (blobUrl) resolvedSrc = blobUrl;
+                  }
+                  if (!resolvedSrc) {
+                    const full = networkPath ? `${networkPath}/${imgs[0]}`.replace(/\\/g, "/") : imgs[0];
+                    resolvedSrc = convertFileSrc(full);
+                  }
+                }
+              } catch (e) {}
+            }
+
+            if (resolvedSrc) {
+              const imgEl = await loadImage(resolvedSrc);
+              if (imgEl && imgEl.naturalWidth && imgEl.naturalHeight) {
+                const aspect = imgEl.naturalWidth / imgEl.naturalHeight;
+                let dataUrl: string | undefined = undefined;
+                try {
+                  const canvas = document.createElement("canvas");
+                  canvas.width = imgEl.naturalWidth;
+                  canvas.height = imgEl.naturalHeight;
+                  const ctx = canvas.getContext("2d");
+                  if (ctx) {
+                    ctx.drawImage(imgEl, 0, 0);
+                    dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+                  }
+                } catch (e) {}
+                loadedImages.set(item.sku, { dataUrl, img: imgEl, aspect });
+              } else {
+                loadedImages.set(item.sku, { aspect: 1 });
+              }
+            } else {
+              loadedImages.set(item.sku, { aspect: 1 });
+            }
+          }
+        }
+      }
+
       const tableData: string[][] = [];
+      const rowItems: (BomItem | null)[] = [];
       let prevGroupVal = "";
 
       sortedItems.forEach((item, index) => {
@@ -478,13 +629,16 @@ export default function BomTab({
         
         if (pdfLineBreakBy !== "none" && index > 0 && currentGroupVal !== prevGroupVal) {
           tableData.push(activeCols.map(() => ""));
+          rowItems.push(null);
         }
         
         const rowData = activeCols.map((col: any) => {
+          if (col.id === "image") return ""; // Cellule réservée au dessin de l'image
           const val = getColumnValue(item, p, col.id);
           return val === null || val === undefined ? "" : val.toString();
         });
         tableData.push(rowData);
+        rowItems.push(item);
         
         prevGroupVal = currentGroupVal;
       });
@@ -494,6 +648,48 @@ export default function BomTab({
         margin: { top: isMinimal ? 10 : 15, left: startX, right: startX, bottom: isMinimal ? 10 : 15 },
         head: [headRow],
         body: tableData,
+        styles: {
+          valign: "middle",
+          fontSize: 8.5,
+          ...(hasImageCol ? { minCellHeight: rowHeightMm } : {}),
+        },
+        columnStyles: {
+          ...(hasImageCol ? {
+            [imageColIdx]: {
+              cellWidth: imgSizeMm + 4,
+              minCellHeight: rowHeightMm,
+              halign: "center",
+            }
+          } : {})
+        },
+        didDrawCell: (data) => {
+          if (hasImageCol && data.column.index === imageColIdx && data.cell.section === "body") {
+            const item = rowItems[data.row.index];
+            if (item) {
+              const entry = loadedImages.get(item.sku);
+              if (entry && (entry.dataUrl || entry.img)) {
+                try {
+                  let drawW = imgSizeMm;
+                  let drawH = imgSizeMm;
+                  if (entry.aspect >= 1) {
+                    drawH = imgSizeMm / entry.aspect;
+                  } else {
+                    drawW = imgSizeMm * entry.aspect;
+                  }
+                  const posX = data.cell.x + (data.cell.width - drawW) / 2;
+                  const posY = data.cell.y + (data.cell.height - drawH) / 2;
+                  if (entry.dataUrl) {
+                    doc.addImage(entry.dataUrl, "JPEG", posX, posY, drawW, drawH);
+                  } else if (entry.img) {
+                    doc.addImage(entry.img, "JPEG", posX, posY, drawW, drawH);
+                  }
+                } catch (err) {
+                  console.warn("Erreur dessin image PDF :", err);
+                }
+              }
+            }
+          }
+        },
       });
       
       const pdfOutput = doc.output("arraybuffer");
@@ -815,6 +1011,12 @@ export default function BomTab({
       
       const rowData = activeCols.map((col: any) => {
         if (col.id === "checkbox") return "[ ]";
+        if (col.id === "image") {
+          const raw = getColumnValue(item, p, col.id);
+          if (!raw) return "";
+          const full = networkPath && !raw.startsWith("http") && !raw.startsWith("blob:") ? `${networkPath}/${raw}`.replace(/\\/g, "/") : raw;
+          return convertFileSrc(full);
+        }
         const val = getColumnValue(item, p, col.id);
         return val === null || val === undefined ? "" : val.toString();
       });
@@ -915,6 +1117,14 @@ export default function BomTab({
           <button className="btn btn-secondary" onClick={() => setIsPdfPreviewOpen(true)}>📄 PDF Atelier</button>
           <button className="btn btn-secondary" onClick={() => setIsExcelPreviewOpen(true)}>📊 Excel Achat</button>
           <button className="btn btn-secondary" onClick={() => setIsTableConfigOpen(true)}>⚙️ Affichage</button>
+          <button 
+            className="btn btn-secondary" 
+            onClick={() => handleDeleteBom(editingBom)}
+            style={{ marginLeft: "auto", color: "var(--danger, #ef4444)", borderColor: "rgba(239, 68, 68, 0.5)" }}
+            title="Supprimer définitivement cette nomenclature"
+          >
+            🗑️ Supprimer
+          </button>
         </div>
 
         {(() => {
@@ -927,19 +1137,8 @@ export default function BomTab({
             .filter(Boolean)
           ))];
 
-          const filteredPickerProducts = products.filter((p: any) => {
-            const query = pickerSearchQuery.toLowerCase().trim();
-            if (query) {
-              const matchesSku = p.sku?.toLowerCase().includes(query);
-              const matchesMpn = p.mpn?.toLowerCase().includes(query);
-              const matchesBrand = p.brand?.toLowerCase().includes(query);
-              const matchesLabel = p.label?.toLowerCase().includes(query);
-              const matchesCategory = p.category?.toLowerCase().includes(query);
-              const matchesSubCategory = p.sub_category?.toLowerCase().includes(query);
-              if (!matchesSku && !matchesMpn && !matchesBrand && !matchesLabel && !matchesCategory && !matchesSubCategory) {
-                return false;
-              }
-            }
+          const pickerMatcher = createProductSearchMatcher(pickerSearchQuery);
+          const categoryFilteredPicker = products.filter((p: any) => {
             if (pickerCategoryFilter !== "all" && p.category !== pickerCategoryFilter) {
               return false;
             }
@@ -948,6 +1147,7 @@ export default function BomTab({
             }
             return true;
           });
+          const filteredPickerProducts = pickerMatcher.filterAndSort(categoryFilteredPicker);
 
           return (
             <div className="modal-overlay" onClick={() => setIsPickerOpen(false)}>
@@ -1021,7 +1221,12 @@ export default function BomTab({
                           const p = products.find((prod: any) => prod.sku === sku);
                           const currentQty = pickerQuantities[sku] !== undefined ? pickerQuantities[sku] : 1;
                           return (
-                            <div key={sku} style={{ display: "flex", flexDirection: "column", gap: "0.25rem", padding: "0.5rem", borderRadius: "6px", backgroundColor: "var(--bg-tertiary)", border: "1px solid var(--border-color)" }}>
+                            <div 
+                              key={sku} 
+                              style={{ display: "flex", flexDirection: "column", gap: "0.25rem", padding: "0.5rem", borderRadius: "6px", backgroundColor: "var(--bg-tertiary)", border: "1px solid var(--border-color)" }}
+                              onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "sku")}
+                              onMouseLeave={handleItemImageLeave}
+                            >
                               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                                 <span style={{ fontFamily: "var(--font-mono)", fontWeight: "600", fontSize: "0.8rem", color: "var(--text-primary)" }}>{sku}</span>
                                 <button 
@@ -1417,7 +1622,11 @@ export default function BomTab({
                   }
 
                   rows.push(
-                    <tr key={item.sku} style={{ cursor: "default" }}>
+                    <tr 
+                      key={item.sku} 
+                      style={{ cursor: "default" }}
+                      onMouseLeave={handleItemImageLeave}
+                    >
                       {activeCols.map((col: any) => {
                         const cellWidth = `${col.width || 120}px`;
                         const cellStyle = {
@@ -1430,14 +1639,43 @@ export default function BomTab({
                         };
                         switch (col.id) {
                           case "sku":
-                            return <td key="sku" style={{ ...cellStyle, fontFamily: "var(--font-mono)" }}>{item.sku}</td>;
+                            return (
+                              <td 
+                                key="sku" 
+                                style={{ ...cellStyle, fontFamily: "var(--font-mono)" }}
+                                onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "sku", p)}
+                              >
+                                {item.sku}
+                              </td>
+                            );
                           case "label":
-                            return <td key="label" style={cellStyle} title={p?.label}>{p?.label || <span style={{ color: "var(--text-muted)" }}>Article inconnu</span>}</td>;
+                            return (
+                              <td 
+                                key="label" 
+                                style={cellStyle} 
+                                title={p?.label}
+                                onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "label", p)}
+                              >
+                                {p?.label || <span style={{ color: "var(--text-muted)" }}>Article inconnu</span>}
+                              </td>
+                            );
                           case "location":
-                            return <td key="location" style={cellStyle}>{p?.location || "-"}</td>;
+                            return (
+                              <td 
+                                key="location" 
+                                style={cellStyle}
+                                onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "location", p)}
+                              >
+                                {p?.location || "-"}
+                              </td>
+                            );
                           case "note":
                             return (
-                              <td key="note" style={cellStyle}>
+                              <td 
+                                key="note" 
+                                style={cellStyle}
+                                onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "note", p)}
+                              >
                                 <input
                                   type="text"
                                   value={item.note || ""}
@@ -1461,7 +1699,11 @@ export default function BomTab({
                             );
                           case "qty":
                             return (
-                              <td key="qty" style={cellStyle}>
+                              <td 
+                                key="qty" 
+                                style={cellStyle}
+                                onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "qty", p)}
+                              >
                                 <input 
                                   type="number" 
                                   value={item.qty}
@@ -1474,17 +1716,21 @@ export default function BomTab({
                                   style={{ 
                                     width: "100%", 
                                     padding: "0.2rem 0.4rem", 
-                                    backgroundColor: "var(--bg-primary)",
-                                    border: "1px solid var(--border-color)",
-                                    color: "var(--text-primary)",
-                                    borderRadius: "4px"
+                                    backgroundColor: "var(--bg-primary)", 
+                                    border: "1px solid var(--border-color)", 
+                                    color: "var(--text-primary)", 
+                                    borderRadius: "4px" 
                                   }}
                                 />
                               </td>
                             );
                           case "current_stock":
                             return (
-                              <td key="current_stock" style={cellStyle}>
+                              <td 
+                                key="current_stock" 
+                                style={cellStyle}
+                                onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "current_stock", p)}
+                              >
                                 {p ? (
                                   <span className={`stock-status-badge ${hasSufficientStock ? "stock-ok" : "stock-empty"}`}>
                                     {p.current_stock}
@@ -1492,10 +1738,40 @@ export default function BomTab({
                                 ) : "?"}
                               </td>
                             );
+                          case "image": {
+                            const raw = p?.image_path ? (networkPath ? `${networkPath}/${p.image_path}`.replace(/\\/g, "/") : p.image_path) : "";
+                            const url = raw ? convertFileSrc(raw) : "";
+                            return (
+                              <td 
+                                key="image" 
+                                style={{ ...cellStyle, textAlign: "center", padding: "2px" }}
+                                onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "image", p)}
+                              >
+                                {url ? (
+                                  <img
+                                    src={url}
+                                    alt="Img"
+                                    style={{ maxHeight: "24px", maxWidth: "36px", objectFit: "contain", verticalAlign: "middle", borderRadius: "2px" }}
+                                  />
+                                ) : (
+                                  <span style={{ color: "var(--text-muted)", fontSize: "10px" }}>—</span>
+                                )}
+                              </td>
+                            );
+                          }
                           default: {
                             const val = getColumnValue(item, p, col.id);
                             const valStr = val === null || val === undefined ? "" : val.toString();
-                            return <td key={col.id} style={cellStyle} title={valStr}>{valStr}</td>;
+                            return (
+                              <td 
+                                key={col.id} 
+                                style={cellStyle} 
+                                title={valStr}
+                                onMouseMove={(e) => handleItemImageHover(e, p?.image_path, col.id, p)}
+                              >
+                                {valStr}
+                              </td>
+                            );
                           }
                         }
                       })}
@@ -1825,6 +2101,30 @@ export default function BomTab({
                     </select>
                   </div>
 
+                  {/* Image Size / Row Height Config */}
+                  <div>
+                    <h4 style={{ margin: "0 0 0.5rem 0", color: "var(--text-primary)", fontSize: "0.95rem" }}>Taille image / Hauteur de ligne</h4>
+                    <select
+                      id="pdf-image-size-select"
+                      value={pdfImageSize}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setPdfImageSize(val);
+                        localStorage.setItem("sf_bom_pdf_img_size", String(val));
+                      }}
+                      style={{ width: "100%", padding: "0.4rem", backgroundColor: "var(--bg-primary)", color: "var(--text-primary)", border: "1px solid var(--border-color)", borderRadius: "4px" }}
+                    >
+                      <option value={12}>Petite (12 mm — ligne ~16 mm)</option>
+                      <option value={16}>Standard (16 mm — ligne ~20 mm)</option>
+                      <option value={20}>Moyenne (20 mm — ligne ~24 mm)</option>
+                      <option value={25}>Grande (25 mm — ligne ~29 mm)</option>
+                      <option value={30}>Très grande (30 mm — ligne ~34 mm)</option>
+                    </select>
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem", display: "block" }}>
+                      Ajuste la largeur de colonne et la hauteur de ligne dans le PDF et l'aperçu si la colonne Image est activée.
+                    </span>
+                  </div>
+
                   {/* Columns Config */}
                   <div>
                     <h4 style={{ margin: "0 0 0.5rem 0", color: "var(--text-primary)", fontSize: "0.95rem" }}>Colonnes du tableau</h4>
@@ -2016,13 +2316,56 @@ export default function BomTab({
                           </tr>
                         </thead>
                         <tbody>
-                          {getPdfPreviewData().map((row: any, rIdx: number) => (
-                            <tr key={rIdx}>
-                              {row.map((val: any, cIdx: number) => (
-                                <td key={cIdx}>{val}</td>
-                              ))}
-                            </tr>
-                          ))}
+                          {getPdfPreviewData().map((row: any, rIdx: number) => {
+                            const activeCols = pdfColumns.filter((c: any) => c.enabled);
+                            const hasImageCol = activeCols.some((c: any) => c.id === "image");
+                            return (
+                              <tr key={rIdx} style={{ height: hasImageCol ? `${pdfImageSize * 3.2}px` : "auto" }}>
+                                {row.map((val: any, cIdx: number) => {
+                                  const col = activeCols[cIdx];
+                                  if (col && col.id === "image") {
+                                    return (
+                                      <td 
+                                        key={cIdx} 
+                                        style={{ 
+                                          textAlign: "center", 
+                                          verticalAlign: "middle", 
+                                          padding: "2px", 
+                                          width: `${pdfImageSize * 3.4}px`, 
+                                          minWidth: `${pdfImageSize * 3.4}px` 
+                                        }}
+                                      >
+                                        {val ? (
+                                          <img
+                                            src={val}
+                                            alt="Thumb"
+                                            style={{
+                                              maxHeight: `${pdfImageSize * 2.7}px`,
+                                              maxWidth: `${pdfImageSize * 2.7}px`,
+                                              objectFit: "contain",
+                                              display: "inline-block",
+                                              verticalAlign: "middle",
+                                              borderRadius: "2px"
+                                            }}
+                                            onError={(e) => {
+                                              (e.target as HTMLElement).style.display = "none";
+                                            }}
+                                          />
+                                        ) : (
+                                          <span style={{ color: "var(--text-muted)", fontSize: "10px" }}>—</span>
+                                        )}
+                                      </td>
+                                    );
+                                  }
+                                  return (
+                                    <td key={cIdx} style={{ verticalAlign: "middle" }}>
+                                      {val}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -2044,6 +2387,15 @@ export default function BomTab({
             </div>
           </div>
         )}
+        {/* Fallback Hover Image Preview Overlay */}
+        {!onImageHover && localHoveredImage && (
+          <div 
+            className="hover-thumb-card" 
+            style={{ top: localHoverPosition.y, left: localHoverPosition.x }}
+          >
+            <img src={localHoveredImage} alt="Preview" onError={() => setLocalHoveredImage(null)} />
+          </div>
+        )}
       </div>
     );
   }
@@ -2052,7 +2404,10 @@ export default function BomTab({
     <div style={{ padding: "1.5rem", display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
         <h1 style={{ fontFamily: "var(--font-title)", fontSize: "1.8rem", fontWeight: "700", color: "var(--text-primary)" }}>Nomenclatures & Projets</h1>
-        <button className="btn" onClick={handleCreateNew}>➕ Nouveau Projet</button>
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <button className="btn btn-secondary" onClick={fetchBoms} title="Actualiser la liste">🔄 Actualiser</button>
+          <button className="btn" onClick={handleCreateNew}>➕ Nouveau Projet</button>
+        </div>
       </div>
 
       <div className="table-container" style={{ flex: 1, border: "1px solid var(--border-color)", borderRadius: "8px" }}>
@@ -2084,13 +2439,27 @@ export default function BomTab({
                   <td>{new Date(bom.updated_at).toLocaleString()}</td>
                   <td style={{ fontWeight: "600", color: "var(--text-primary)" }}>{totalVal.toFixed(2)} €</td>
                   <td>
-                    <button 
-                      className="btn btn-secondary" 
-                      onClick={() => handleDuplicate(bom)}
-                      style={{ padding: "0.2rem 0.6rem", minHeight: "auto" }}
-                    >
-                      👯 Dupliquer
-                    </button>
+                    <div style={{ display: "flex", gap: "0.4rem" }}>
+                      <button 
+                        className="btn btn-secondary" 
+                        onClick={() => handleDuplicate(bom)}
+                        style={{ padding: "0.2rem 0.6rem", minHeight: "auto" }}
+                        title="Dupliquer la nomenclature"
+                      >
+                        👯 Dupliquer
+                      </button>
+                      <button 
+                        className="btn btn-secondary" 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteBom(bom);
+                        }}
+                        style={{ padding: "0.2rem 0.6rem", minHeight: "auto", color: "var(--danger, #ef4444)", borderColor: "rgba(239, 68, 68, 0.4)" }}
+                        title="Supprimer la nomenclature"
+                      >
+                        🗑️
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );
@@ -2105,6 +2474,15 @@ export default function BomTab({
           </tbody>
         </table>
       </div>
+      {/* Fallback Hover Image Preview Overlay */}
+      {!onImageHover && localHoveredImage && (
+        <div 
+          className="hover-thumb-card" 
+          style={{ top: localHoverPosition.y, left: localHoverPosition.x }}
+        >
+          <img src={localHoveredImage} alt="Preview" onError={() => setLocalHoveredImage(null)} />
+        </div>
+      )}
     </div>
   );
 }

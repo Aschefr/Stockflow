@@ -362,6 +362,7 @@ fn apply_single_event(conn: &Connection, event: &Event) -> Result<(), String> {
         "BOM_DELETE" => {
             let p = event.payload.clone();
             let bom_id = p["bom_id"].as_str().unwrap_or("");
+            let _ = conn.execute("DELETE FROM bom_items WHERE bom_id = ?", [bom_id]);
             conn.execute("DELETE FROM boms WHERE id = ?", [bom_id]).map_err(|e| e.to_string())?;
         }
         _ => {}
@@ -509,6 +510,7 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
         "BOM_DELETE" => {
             let p = event.payload.clone();
             let bom_id = p["bom_id"].as_str().unwrap_or("");
+            let _ = tx.execute("DELETE FROM bom_items WHERE bom_id = ?", [bom_id]);
             tx.execute("DELETE FROM boms WHERE id = ?", [bom_id]).map_err(|e| e.to_string())?;
         }
         _ => {}

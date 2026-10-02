@@ -69,7 +69,23 @@ if (Test-Path $MsiFolder) {
     Write-Warning "Dossier MSI introuvable."
 }
 
+# Source - Version Web Autonome (Single HTML)
+Write-Host "`nCompilation du package Web autonome (StockFlow.html)..." -ForegroundColor Yellow
+npm run build:web
+$SourceWeb = Join-Path $PSScriptRoot "dist-web\StockFlow.html"
+$TargetWeb = Join-Path $ReleaseDir "StockFlow.html"
+if (Test-Path $SourceWeb) {
+    Copy-Item -Path $SourceWeb -Destination $TargetWeb -Force
+    Write-Host "Copie réussie : Version Web -> release_bin/StockFlow.html" -ForegroundColor Green
+} else {
+    Write-Warning "Fichier Web introuvable dans : $SourceWeb"
+}
+
 Write-Host "`n=============================================" -ForegroundColor Cyan
 Write-Host " Build terminé avec succès ! " -ForegroundColor Green
-Write-Host " Les binaires sont à jour dans release_bin/ " -ForegroundColor Gray
+Write-Host " Tous les livrables sont à jour dans release_bin/ : " -ForegroundColor Gray
+Write-Host "  - StockFlow.exe (Portable)" -ForegroundColor Gray
+Write-Host "  - StockFlow.html (Pure Web autonome)" -ForegroundColor Gray
+Write-Host "  - StockFlow_Setup_x64.exe (Installateur)" -ForegroundColor Gray
+Write-Host "  - StockFlow_x64.msi (Package MSI)" -ForegroundColor Gray
 Write-Host "=============================================" -ForegroundColor Cyan

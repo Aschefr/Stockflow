@@ -1,12 +1,15 @@
 import BomTab from "./BomTab";
-import { useState, useEffect, useRef } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { listen } from "@tauri-apps/api/event";
+import { useState, useEffect, useRef, useMemo } from "react";
+import { invoke, convertFileSrc, openPath, listen, isTauri } from "./services/api";
 import logoImg from "./assets/logo.png";
 import { AutoFillModal, type AutoFillSelections } from "./ScrapeComponents";
 import { ProductForm } from "./ProductForm";
 import { ProductDetailPanel } from "./ProductDetailPanel";
+import { getBookmarkletHref, listenForSupplierHandoff } from "./services/webScraperAssistant";
+import { getCachedMediaUrl } from "./services/webFileSystem";
+import { APP_VERSION } from "./version";
+import { stripTrailingPunctuation } from "./services/webScraperService";
+import { createProductSearchMatcher } from "./utils/searchUtils";
 import "./App.css";
 interface AppConfig {
   trigramme: string;
@@ -21,6 +24,7 @@ interface AppConfig {
   price_tax_type?: string;
   vpc_api_keys?: Record<string, string>;
   vpc_urls?: Record<string, string>;
+  enable_scrape_fallback?: boolean;
 }
 
 interface Product {
@@ -96,7 +100,140 @@ function getAttribute(prod: Product, key: string): string {
   return "";
 }
 
+function getProductSortValue(prod: Product, colId: string): string | number {
+  switch (colId) {
+    case "sku":
+      return prod.sku || "";
+    case "mpn":
+      return prod.mpn || "";
+    case "vpc_code":
+      return getVpcCode(prod);
+    case "brand":
+      return prod.brand || "";
+    case "category":
+      return prod.category || "";
+    case "sub_category":
+      return prod.sub_category || "";
+    case "label":
+      return prod.label || "";
+    case "location":
+      return prod.location || "";
+    case "current_stock":
+      return typeof prod.current_stock === "number" ? prod.current_stock : (Number(prod.current_stock) || 0);
+    case "min_stock":
+      return typeof prod.min_stock === "number" ? prod.min_stock : (Number(prod.min_stock) || 0);
+    case "price":
+      return typeof prod.price === "number" ? prod.price : (Number(prod.price) || 0);
+    case "pack_size":
+      return typeof prod.pack_size === "number" ? prod.pack_size : (Number(prod.pack_size) || 1);
+    case "total_value":
+      return (Number(prod.price) || 0) * (Number(prod.current_stock) || 0);
+    case "largeur":
+    case "hauteur":
+    case "profondeur":
+    case "poids": {
+      const v = getAttribute(prod, colId);
+      if (!v || v.trim() === "") return -Infinity;
+      const num = parseFloat(v.replace(",", "."));
+      return isNaN(num) ? -Infinity : num;
+    }
+    case "notes":
+      return getAttribute(prod, colId) || "";
+    default:
+      return (prod as any)[colId] || "";
+  }
+}
 
+function compareProducts(a: Product, b: Product, colId: string, direction: "asc" | "desc"): number {
+  const valA = getProductSortValue(a, colId);
+  const valB = getProductSortValue(b, colId);
+
+  // Numeric comparisons
+  if (typeof valA === "number" && typeof valB === "number") {
+    if (valA === -Infinity && valB === -Infinity) return 0;
+    if (valA === -Infinity) return 1;
+    if (valB === -Infinity) return -1;
+    return direction === "asc" ? valA - valB : valB - valA;
+  }
+
+  // String comparisons
+  const strA = String(valA || "").trim();
+  const strB = String(valB || "").trim();
+
+  if (!strA && !strB) return 0;
+  if (!strA) return 1;
+  if (!strB) return -1;
+
+  const cmp = strA.localeCompare(strB, "fr", { numeric: true, sensitivity: "base" });
+  return direction === "asc" ? cmp : -cmp;
+}
+
+
+
+function BookmarkletButton() {
+  const linkRef = useRef<HTMLAnchorElement>(null);
+  const [copied, setCopied] = useState(false);
+  const href = getBookmarkletHref();
+
+  useEffect(() => {
+    if (linkRef.current) {
+      linkRef.current.setAttribute("href", href);
+    }
+  }, [href]);
+
+  const handleCopy = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+      alert("✅ URL du favori copiée !\n\nPour l'installer dans Edge ou Chrome :\n1. Faites clic-droit dans votre barre de favoris -> 'Ajouter une page' (ou modifier un favori existant).\n2. Nom : '📦 Capturer vers StockFlow'\n3. URL : Collez le code copié (Ctrl+V) puis enregistrez.");
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+      <a
+        ref={linkRef}
+        href={href}
+        className="btn btn-primary"
+        draggable
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "8px",
+          padding: "0.6rem 1.2rem",
+          backgroundColor: "var(--accent)",
+          color: "#ffffff",
+          borderRadius: "6px",
+          textDecoration: "none",
+          fontWeight: "600",
+          fontSize: "13px",
+          cursor: "grab",
+          boxShadow: "0 2px 4px rgba(0,0,0,0.2)",
+        }}
+        onClick={(e) => {
+          e.preventDefault();
+          alert("👉 Glissez ce bouton vers votre barre de favoris Edge/Chrome pour l'installer, ou cliquez sur '📋 Copier l\\'URL du favori'.");
+        }}
+        title="Glissez ce bouton vers votre barre de favoris"
+      >
+        📦 Capturer vers StockFlow
+      </a>
+      <button
+        type="button"
+        className="btn btn-secondary"
+        onClick={handleCopy}
+        style={{ fontSize: "12px", padding: "0.5rem 0.8rem" }}
+      >
+        {copied ? "✅ Code copié !" : "📋 Copier l'URL du favori"}
+      </button>
+      <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+        👈 <strong>Glissez ce bouton</strong> vers votre barre de favoris Edge / Chrome.
+      </span>
+    </div>
+  );
+}
 
 interface ProductHistoryItem {
   timestamp: string;
@@ -134,18 +271,7 @@ interface DashboardStats {
   recent_audits: AuditLogItem[];
 }
 
-function sendNativeNotification(title: string, body: string) {
-  if (!("Notification" in window)) return;
-  if (Notification.permission === "granted") {
-    new Notification(title, { body });
-  } else if (Notification.permission !== "denied") {
-    Notification.requestPermission().then(permission => {
-      if (permission === "granted") {
-        new Notification(title, { body });
-      }
-    });
-  }
-}
+
 
 function App() {
   // Theme & Configuration States
@@ -174,7 +300,61 @@ function App() {
     return DEFAULT_COLUMNS;
   });
 
-  const [appVersion, setAppVersion] = useState("1.4.0");
+  // Sorting state for product tables
+  const [sortColumn, setSortColumn] = useState<string | null>(null);
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+
+  const handleSortColumn = (colId: string) => {
+    if (sortColumn !== colId) {
+      setSortColumn(colId);
+      setSortDirection("asc");
+    } else if (sortDirection === "asc") {
+      setSortDirection("desc");
+    } else {
+      // 3rd click: Reset to default
+      setSortColumn(null);
+      setSortDirection("asc");
+    }
+  };
+
+  const handleResetSort = () => {
+    setSortColumn(null);
+    setSortDirection("asc");
+  };
+
+  // Row highlight & scroll-to-row states
+  const [highlightedSku, setHighlightedSku] = useState<string | null>(null);
+  const highlightTimerRef = useRef<any>(null);
+
+  const highlightAndScrollToSku = (sku: string) => {
+    const clean = (sku || "").trim().toUpperCase();
+    if (!clean) return;
+    if (highlightTimerRef.current) {
+      clearTimeout(highlightTimerRef.current);
+    }
+    setHighlightedSku(clean);
+
+    let attempts = 0;
+    const maxAttempts = 15;
+    const tryScroll = () => {
+      attempts++;
+      const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(clean) : clean;
+      const rowEl = document.querySelector(`tr[data-sku="${escaped}"]`) as HTMLElement | null;
+      if (rowEl) {
+        rowEl.scrollIntoView({ behavior: "smooth", block: "center" });
+      } else if (attempts < maxAttempts) {
+        setTimeout(tryScroll, 100);
+      }
+    };
+    setTimeout(tryScroll, 60);
+
+    highlightTimerRef.current = setTimeout(() => {
+      setHighlightedSku(null);
+      highlightTimerRef.current = null;
+    }, 4000);
+  };
+
+  const [appVersion, setAppVersion] = useState<string>(APP_VERSION);
 
 
 
@@ -189,7 +369,9 @@ function App() {
 
   useEffect(() => {
     invoke<string>("get_app_version")
-      .then((ver) => setAppVersion(ver))
+      .then((ver) => {
+        if (ver) setAppVersion(ver);
+      })
       .catch(() => {});
   }, []);
 
@@ -202,9 +384,26 @@ function App() {
   }, [theme]);
 
   const [showColumnSettings, setShowColumnSettings] = useState(false);
+  const [hoverColumnSetting, setHoverColumnSetting] = useState<string>(() => {
+    return localStorage.getItem("sf_hover_preview_column") || "all";
+  });
+
+  function shouldTriggerHoverPreview(setting: string, colId?: string): boolean {
+    if (setting === "none") return false;
+    if (setting === "all") return true;
+    if (!colId) return false;
+    if (setting === "sku_label") {
+      return colId === "sku" || colId === "label";
+    }
+    if (setting === "vpc_code") {
+      return colId === "vpc_code" || colId === "vpcCode";
+    }
+    return colId === setting;
+  }
 
   const handleMouseDown = (e: React.MouseEvent, colId: string) => {
     e.preventDefault();
+    e.stopPropagation();
     const startX = e.clientX;
     const startWidth = columns.find(c => c.id === colId)?.width || 100;
 
@@ -227,7 +426,7 @@ function App() {
   const [configLoaded, setConfigLoaded] = useState(false);
   const [trigrammeInput, setTrigrammeInput] = useState("");
   const [networkPathInput, setNetworkPathInput] = useState("");
-  const [searxngUrlInput, setSearxngUrlInput] = useState("");
+  const [searxngUrlInput, setSearxngUrlInput] = useState("https://search.amify-studio.fr");
   const [vpcSitesInput, setVpcSitesInput] = useState<string[]>([]);
   const [vpcKeysInput, setVpcKeysInput] = useState<Record<string, string>>({});
   const [vpcUrlsInput, setVpcUrlsInput] = useState<Record<string, string>>({});
@@ -238,6 +437,7 @@ function App() {
   const [priceTaxTypeInput, setPriceTaxTypeInput] = useState<string>("HT");
   const [searxngUrlsInput, setSearxngUrlsInput] = useState<string>("");
   const [maxImageCandidatesInput, setMaxImageCandidatesInput] = useState<number>(15);
+  const [enableScrapeFallbackInput, setEnableScrapeFallbackInput] = useState<boolean>(true);
 
   // Backup configuration states
   const [backupEnabled, setBackupEnabled] = useState<boolean>(false);
@@ -260,6 +460,9 @@ function App() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const selectedProductRef = useRef<Product | null>(null);
   selectedProductRef.current = selectedProduct;
+  const productsCountRef = useRef<number>(0);
+  productsCountRef.current = products.length;
+  const isSyncingRef = useRef<boolean>(false);
   const [productHistory, setProductHistory] = useState<ProductHistoryItem[]>([]);
   const [productAuditLog, setProductAuditLog] = useState<AuditLogItem[]>([]);
 
@@ -283,6 +486,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [subCategoryFilter, setSubCategoryFilter] = useState("all");
+  const [stockFilter, setStockFilter] = useState<"all" | "low_stock" | "out_of_stock">("all");
 
   // Creation & Editing Forms
   const [newProduct, setNewProduct] = useState({
@@ -302,7 +506,9 @@ function App() {
     profondeur: "",
     poids: "",
     notes: "",
-    initial_stock: "0"
+    initial_stock: "0",
+    image_path: "" as string,
+    pdf_path: "" as string
   });
   const [duplicateWarning, setDuplicateWarning] = useState("");
   const [createSuccess, setCreateSuccess] = useState("");
@@ -310,6 +516,7 @@ function App() {
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [editInitialTab, setEditInitialTab] = useState<"general" | "images" | "documents">("general");
   const [editProduct, setEditProduct] = useState({
     sku: "",
     mpn: "",
@@ -346,12 +553,32 @@ function App() {
     status: string;
   } | null>(null);
 
+  // Completed scrapes ready for user review/import (persisted until clicked or dismissed)
+  const [completedScrapes, setCompletedScrapes] = useState<{
+    sku: string;
+    candidatesCount: number;
+    timestamp: number;
+  }[]>([]);
+  const [showCompletedScrapesMenu, setShowCompletedScrapesMenu] = useState(false);
+
   // Queue info state — refreshed when scraping is active
   const [scrapeQueueInfo, setScrapeQueueInfo] = useState<{
     pending_count: number;
     pending_skus: string[];
     active_sku: string | null;
   } | null>(null);
+
+  const showAddModalRef = useRef(showAddModal);
+  showAddModalRef.current = showAddModal;
+  const showEditModalRef = useRef(showEditModal);
+  showEditModalRef.current = showEditModal;
+  const newProductRef = useRef(newProduct);
+  newProductRef.current = newProduct;
+  const editProductRef = useRef(editProduct);
+  editProductRef.current = editProduct;
+  const autofillCodeInputRef = useRef(autofillCodeInput);
+  autofillCodeInputRef.current = autofillCodeInput;
+  const openAutoFillModalRef = useRef<(sku: string, isEdit?: boolean) => void>(() => {});
 
   useEffect(() => {
     const unlistenProgress = listen<any>("scrape-task-progress", (event) => {
@@ -367,36 +594,51 @@ function App() {
     });
 
     const unlistenComplete = listen<any>("scrape-task-complete", (event) => {
-      sendNativeNotification(
-        "Scraping terminé !",
-        `Le produit ${event.payload.sku} a été scrapé avec succès (${event.payload.candidates_count} candidats trouvés).`
-      );
+      const completedSku = (event.payload.sku || "").toUpperCase().trim();
+      const count = event.payload.candidates_count || 0;
 
-      setGlobalScrape(prev => {
-        if (prev && prev.sku === event.payload.sku) {
-          return {
-            sku: event.payload.sku,
-            progress: 1.0,
-            message: "Terminé",
-            status: "Complete"
-          };
-        }
-        return prev;
+
+
+      // Notification globale d'état
+      setGlobalScrape({
+        sku: completedSku,
+        progress: 1.0,
+        message: `${count} candidat(s) trouvé(s)`,
+        status: "Complete"
       });
-      setTimeout(() => {
-        setGlobalScrape(prev => {
-          if (prev && prev.sku === event.payload.sku && prev.status === "Complete") {
-            return null;
-          }
-          return prev;
-        });
-      }, 4000);
 
-      if (batchSkusRef.current.has(event.payload.sku)) {
+      // Ajout à la liste persistante des recherches terminées prêtes à l'import
+      setCompletedScrapes(prev => {
+        const withoutThis = prev.filter(item => item.sku !== completedSku);
+        return [...withoutThis, { sku: completedSku, candidatesCount: count, timestamp: Date.now() }];
+      });
+
+      // Si le modal d'ajout ou de modification est actuellement ouvert pour ce SKU, ouvrir automatiquement les candidats
+      const isCreateOpen = showAddModalRef.current;
+      const isEditOpen = showEditModalRef.current;
+      const currentActiveSku = (
+        (isEditOpen ? editProductRef.current.sku : newProductRef.current.sku) ||
+        autofillCodeInputRef.current ||
+        ""
+      ).trim().toUpperCase();
+
+      const normCompletedSku = completedSku.replace(/[^A-Z0-9]/g, "");
+      const normCurrentActiveSku = currentActiveSku.replace(/[^A-Z0-9]/g, "");
+      const isSkuMatch = currentActiveSku === completedSku || (normCompletedSku && normCompletedSku === normCurrentActiveSku);
+
+      if ((isCreateOpen || isEditOpen) && isSkuMatch) {
+        if (openAutoFillModalRef.current) {
+          openAutoFillModalRef.current(completedSku, isEditOpen);
+        }
+      }
+
+      // REMARQUE : Plus de setTimeout ! Le bouton vert reste affiché dans le header tant que l'utilisateur n'a pas cliqué dessus.
+
+      if (batchSkusRef.current.has(completedSku)) {
         setBatchSuccessCount(prev => prev + 1);
         setBatchProgress(prev => {
           const next = prev + 1;
-          batchSkusRef.current.delete(event.payload.sku);
+          batchSkusRef.current.delete(completedSku);
           if (batchSkusRef.current.size === 0) {
             setIsBatchRunning(false);
             showToast("Scraping par lot terminé !", "success");
@@ -404,15 +646,12 @@ function App() {
           }
           return next;
         });
-        setBatchStatus(`Scraping de ${event.payload.sku} terminé avec succès.`);
+        setBatchStatus(`Scraping de ${completedSku} terminé avec succès.`);
       }
     });
 
     const unlistenError = listen<any>("scrape-task-error", (event) => {
-      sendNativeNotification(
-        "Erreur de scraping",
-        `Le scraping du produit ${event.payload.sku} a échoué : ${event.payload.error}`
-      );
+
 
       setGlobalScrape({
         sku: event.payload.sku,
@@ -427,7 +666,7 @@ function App() {
           }
           return prev;
         });
-      }, 4000);
+      }, 6000);
 
       if (batchSkusRef.current.has(event.payload.sku)) {
         setBatchErrorCount(prev => prev + 1);
@@ -445,10 +684,7 @@ function App() {
       }
     });
 
-    // Request notification permission if not yet decided
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
+
   
     return () => {
       unlistenProgress.then(f => f());
@@ -497,10 +733,41 @@ function App() {
   // Lance le scraping asynchrone via le TaskManager avec contexte optionnel,
   // puis ouvre l'AutoFillModal pour la sélection des candidats.
 
-  async function handleLaunchUnifiedScrape(isEdit: boolean) {
-    const sku = isEdit ? editProduct.sku : newProduct.sku;
+  async function handleLaunchUnifiedScrape(
+    isEdit: boolean,
+    options?: { includeImages?: boolean; includeDocs?: boolean; allowFallback?: boolean }
+  ) {
+    let sku = isEdit ? editProduct.sku : newProduct.sku;
+    const queryCode = (autofillCodeInput || "").trim();
+
+    // Si le SKU n'est pas encore renseigné :
     if (!sku || !sku.trim()) {
-      const msg = "Veuillez saisir un SKU avant de lancer le scraping.";
+      if (queryCode) {
+        if (!isEdit) {
+          // Si le type d'auto-remplissage est MPN, on peut suggérer le code comme MPN
+          if (autofillType === "mpn") {
+            sku = queryCode.toUpperCase();
+            setNewProduct(prev => ({ ...prev, sku, mpn: prev.mpn || sku }));
+          } else {
+            // Si c'est un code fournisseur (ex: RS), NE PAS écraser le SKU !
+            // On pré-renseigne le code VPC à la place
+            setNewVpcSite(autofillType);
+            setNewVpcCode(queryCode);
+            try {
+              const curAttrs = typeof newProduct.attributes === "string" ? JSON.parse(newProduct.attributes || "{}") : (newProduct.attributes || {});
+              if (!curAttrs.vpc) curAttrs.vpc = {};
+              curAttrs.vpc[autofillType] = queryCode;
+              setNewProduct(prev => ({ ...prev, attributes: JSON.stringify(curAttrs) }));
+            } catch {}
+          }
+        }
+      }
+    }
+
+    const scrapeTargetSku = (sku || queryCode).trim().toUpperCase();
+
+    if (!scrapeTargetSku) {
+      const msg = "Veuillez saisir une référence dans le champ de recherche ou un SKU avant de lancer le scraping.";
       if (isEdit) setEditError(msg); else setCreateError(msg);
       return;
     }
@@ -513,17 +780,21 @@ function App() {
     // Déterminer les paramètres de contexte (VPC ou MPN saisis par l'utilisateur)
     const autofillIsVpc = autofillType !== "mpn";
     const vpcSite = autofillIsVpc ? autofillType : undefined;
-    const vpcCode = autofillIsVpc && autofillCodeInput.trim() ? autofillCodeInput.trim() : undefined;
-    const mpn = !autofillIsVpc && autofillCodeInput.trim() ? autofillCodeInput.trim() : undefined;
+    const vpcCode = autofillIsVpc && queryCode ? queryCode : undefined;
+    const mpn = !autofillIsVpc && queryCode ? queryCode : undefined;
     const brand = isEdit ? editProduct.brand : newProduct.brand;
+    const allowFallback = options?.allowFallback !== undefined ? options.allowFallback : enableScrapeFallbackInput;
 
     try {
       await invoke("start_background_scrape", {
-        sku,
+        sku: scrapeTargetSku,
         vpcSite: vpcSite || null,
         vpcCode: vpcCode || null,
         mpn: mpn || null,
         brand: brand || null,
+        includeImages: options?.includeImages ?? false,
+        includeDocs: options?.includeDocs ?? false,
+        allowFallback,
       });
     } finally {
       setScrapeZoneLoading(false);
@@ -560,6 +831,68 @@ function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showAddModal, showEditModal, editingCell]);
 
+  // Écoute de la capture de données fournisseur (Favori Bookmarklet Edge/Chrome via localStorage)
+  useEffect(() => {
+    const unsubscribe = listenForSupplierHandoff((scraped) => {
+      showToast(`📦 Fiche reçue de ${scraped.vpcSite || "Fournisseur"} : ${scraped.label || scraped.mpn}`, "info");
+
+      if (showAddModal) {
+        setNewProduct((prev: any) => ({
+          ...prev,
+          label: scraped.label || prev.label,
+          brand: scraped.brand || prev.brand,
+          mpn: scraped.mpn || prev.mpn,
+          price: scraped.price > 0 ? String(scraped.price).replace(".", ",") : prev.price,
+          category: scraped.category || prev.category,
+          sub_category: scraped.subCategory || prev.sub_category,
+          largeur: scraped.largeur || prev.largeur,
+          hauteur: scraped.hauteur || prev.hauteur,
+          profondeur: scraped.profondeur || prev.profondeur,
+          poids: scraped.poids || prev.poids,
+        }));
+        if (scraped.vpcSite) setNewVpcSite(scraped.vpcSite);
+        if (scraped.vpcCode) setNewVpcCode(scraped.vpcCode);
+      } else if (showEditModal) {
+        setEditProduct((prev: any) => ({
+          ...prev,
+          label: scraped.label || prev.label,
+          brand: scraped.brand || prev.brand,
+          mpn: scraped.mpn || prev.mpn,
+          price: scraped.price > 0 ? String(scraped.price).replace(".", ",") : prev.price,
+        }));
+        if (scraped.vpcSite) setEditVpcSite(scraped.vpcSite);
+        if (scraped.vpcCode) setEditVpcCode(scraped.vpcCode);
+      } else {
+        setNewProduct({
+          sku: (scraped.mpn || scraped.vpcCode || "").toUpperCase(),
+          mpn: scraped.mpn || "",
+          label: scraped.label || "",
+          brand: scraped.brand || "",
+          category: scraped.category || "",
+          sub_category: scraped.subCategory || "",
+          location: "",
+          min_stock: "0",
+          price: scraped.price > 0 ? String(scraped.price).replace(".", ",") : "0",
+          pack_size: "1",
+          attributes: "",
+          largeur: scraped.largeur || "",
+          hauteur: scraped.hauteur || "",
+          profondeur: scraped.profondeur || "",
+          poids: scraped.poids || "",
+          notes: scraped.notes || "",
+          initial_stock: "0",
+          image_path: "",
+          pdf_path: ""
+        });
+        if (scraped.vpcSite) setNewVpcSite(scraped.vpcSite);
+        if (scraped.vpcCode) setNewVpcCode(scraped.vpcCode);
+        setShowAddModal(true);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [showAddModal, showEditModal]);
+
   const [selectedSkus, setSelectedSkus] = useState<string[]>([]);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const batchSkusRef = useRef<Set<string>>(new Set());
@@ -589,10 +922,16 @@ function App() {
 
   // Network sync status
   const [isOnline, setIsOnline] = useState(true);
+  // Sync indicator for web mode: "idle" = local data shown, "syncing" = reading remote folder, "synced" = up to date, "disconnected" = needs re-authorization
+  const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "synced" | "disconnected">("idle");
+  const [syncCounter, setSyncCounter] = useState(0);
 
   // Hover image preview state
   const [hoveredImage, setHoveredImage] = useState<string | null>(null);
   const [hoverPosition, setHoverPosition] = useState({ x: 0, y: 0 });
+  const hoverSeqRef = useRef(0);
+
+
 
 
   // Price confirmation states
@@ -783,14 +1122,48 @@ function App() {
   const [autoFillModalIsEdit, setAutoFillModalIsEdit] = useState(false);
   const [autoFillChanges, setAutoFillChanges] = useState<AutoFillSelections | null>(null);
 
-  function openAutoFillModal(sku: string, isEdit: boolean) {
-    if (!sku || !sku.trim()) {
-      alert("Veuillez saisir un SKU avant de charger les candidats.");
+  function openAutoFillModal(sku: string, isEdit: boolean = false) {
+    let finalSku = (sku || autofillCodeInput || "").trim().toUpperCase();
+    if (!finalSku) {
+      alert("Veuillez saisir une référence ou un SKU avant de charger les candidats.");
       return;
     }
-    setAutoFillModalSku(sku);
+    if (!isEdit && !newProduct.sku && autofillType === "mpn") {
+      setNewProduct(prev => ({ ...prev, sku: finalSku }));
+    }
+    setAutoFillModalSku(finalSku);
     setAutoFillModalIsEdit(isEdit);
     setAutoFillModalOpen(true);
+  }
+  openAutoFillModalRef.current = openAutoFillModal;
+
+  function handleOpenScrapeItem(sku: string) {
+    const skuUpper = sku.trim().toUpperCase();
+    const existing = products.find(p => p.sku.toUpperCase() === skuUpper);
+    const isEdit = !!existing;
+
+    if (existing) {
+      setSelectedProduct(existing);
+      setActiveTab("inventory");
+      setShowEditModal(true);
+    } else {
+      setShowAddModal(true);
+      setNewProduct(prev => ({ ...prev, sku: skuUpper }));
+    }
+
+    openAutoFillModal(skuUpper, isEdit);
+
+    // Retirer de la liste persistante et fermer le menu si ouvert
+    setCompletedScrapes(prev => prev.filter(item => item.sku !== skuUpper));
+    setGlobalScrape(prev => (prev && prev.sku.toUpperCase() === skuUpper ? null : prev));
+    setShowCompletedScrapesMenu(false);
+  }
+
+  function handleDismissScrapeItem(sku: string, e?: React.MouseEvent) {
+    if (e) e.stopPropagation();
+    const skuUpper = sku.trim().toUpperCase();
+    setCompletedScrapes(prev => prev.filter(item => item.sku !== skuUpper));
+    setGlobalScrape(prev => (prev && prev.sku.toUpperCase() === skuUpper ? null : prev));
   }
 
   function handleAutoFillApply(selections: AutoFillSelections) {
@@ -799,6 +1172,9 @@ function App() {
       return v.toString().replace(/\./g, ",");
     };
     setAutoFillChanges(selections);
+    const appliedSku = autoFillModalSku.trim().toUpperCase();
+    setCompletedScrapes(prev => prev.filter(item => item.sku !== appliedSku));
+    setGlobalScrape(prev => (prev && prev.sku.toUpperCase() === appliedSku ? null : prev));
 
     if (autoFillModalIsEdit) {
       let baseProduct = { ...editProduct };
@@ -855,15 +1231,38 @@ function App() {
 
       // Appliquer les sélections par-dessus les valeurs de base
       const nextProduct = { ...baseProduct };
-      if (selections.label) nextProduct.label = selections.label;
-      if (selections.brand) nextProduct.brand = selections.brand;
-      if (selections.mpn) nextProduct.mpn = selections.mpn;
+      if (selections.label) nextProduct.label = stripTrailingPunctuation(selections.label);
+      if (selections.brand) nextProduct.brand = stripTrailingPunctuation(selections.brand);
+      if (selections.mpn) nextProduct.mpn = stripTrailingPunctuation(selections.mpn);
       if (selections.price !== undefined && selections.price > 0) nextProduct.price = formatNum(selections.price);
       if (selections.pack_size !== undefined && selections.pack_size > 0) nextProduct.pack_size = formatNum(selections.pack_size);
       if (selections.largeur) nextProduct.largeur = formatNum(selections.largeur);
       if (selections.hauteur) nextProduct.hauteur = formatNum(selections.hauteur);
       if (selections.profondeur) nextProduct.profondeur = formatNum(selections.profondeur);
       if (selections.poids) nextProduct.poids = formatNum(selections.poids);
+      if (selections.image_urls && selections.image_urls.length > 0) {
+        nextProduct.image_path = selections.image_urls[0];
+      }
+      if (selections.pdf_urls && selections.pdf_urls.length > 0) {
+        if (!nextProduct.pdf_path) {
+          nextProduct.pdf_path = selections.pdf_urls[0];
+        }
+      }
+      try {
+        const curAttrs = typeof nextProduct.attributes === "string" ? JSON.parse(nextProduct.attributes || "{}") : (nextProduct.attributes || {});
+        if (selections.pdf_urls && selections.pdf_urls.length > 0) {
+          curAttrs.scrape_doc_url = selections.pdf_urls[0];
+          curAttrs.scrape_pdf_urls = selections.pdf_urls;
+          if (selections.pdf_meta) curAttrs.scrape_pdf_meta = selections.pdf_meta;
+        }
+        if (selections.image_urls && selections.image_urls.length > 0) {
+          curAttrs.scrape_image_urls = selections.image_urls;
+        }
+        if (selections.source_url) {
+          curAttrs.scrape_price_url = selections.source_url;
+        }
+        nextProduct.attributes = JSON.stringify(curAttrs);
+      } catch (e) {}
 
       setEditProduct(nextProduct);
       if (selections.source_url) setAutoFillSource(selections.source_url);
@@ -871,29 +1270,81 @@ function App() {
     } else {
       setNewProduct(prev => {
         const next = { ...prev };
-        if (selections.label) next.label = selections.label;
-        if (selections.brand) next.brand = selections.brand;
-        if (selections.mpn) next.mpn = selections.mpn;
+        if (selections.label) next.label = stripTrailingPunctuation(selections.label);
+        if (selections.brand) next.brand = stripTrailingPunctuation(selections.brand);
+        if (selections.mpn) next.mpn = stripTrailingPunctuation(selections.mpn);
+
+        // Détermination intelligente du SKU pour la création d'un article :
+        // Le SKU devient la référence fabricant officielle (MPN) trouvée si le SKU était vide ou correspondait au code de recherche fournisseur
+        if (selections.mpn && selections.mpn.trim()) {
+          const mpnClean = selections.mpn.trim().toUpperCase();
+          if (!prev.sku || prev.sku.trim() === autofillCodeInput.trim() || autofillType !== "mpn") {
+            next.sku = mpnClean;
+          }
+        } else if (!prev.sku && autofillCodeInput.trim() && autofillType === "mpn") {
+          next.sku = autofillCodeInput.trim().toUpperCase();
+        }
+
+        // Si un fournisseur VPC a été utilisé dans l'auto-remplissage rapide (ex: RS), enregistrer le code dans les attributs VPC
+        if (autofillType && autofillType !== "mpn" && autofillCodeInput.trim()) {
+          setNewVpcSite(autofillType);
+          setNewVpcCode(autofillCodeInput.trim());
+        }
+
         if (selections.price !== undefined && selections.price > 0) next.price = formatNum(selections.price);
         if (selections.pack_size !== undefined && selections.pack_size > 0) next.pack_size = formatNum(selections.pack_size);
         if (selections.largeur) next.largeur = formatNum(selections.largeur);
         if (selections.hauteur) next.hauteur = formatNum(selections.hauteur);
         if (selections.profondeur) next.profondeur = formatNum(selections.profondeur);
         if (selections.poids) next.poids = formatNum(selections.poids);
+        if (selections.image_urls && selections.image_urls.length > 0) {
+          next.image_path = selections.image_urls[0];
+        }
+        if (selections.pdf_urls && selections.pdf_urls.length > 0) {
+          if (!next.pdf_path) {
+            next.pdf_path = selections.pdf_urls[0];
+          }
+        }
+        try {
+          const curAttrs = typeof next.attributes === "string" ? JSON.parse(next.attributes || "{}") : (next.attributes || {});
+          if (autofillType && autofillType !== "mpn" && autofillCodeInput.trim()) {
+            if (!curAttrs.vpc) curAttrs.vpc = {};
+            curAttrs.vpc[autofillType] = autofillCodeInput.trim();
+          }
+          if (selections.pdf_urls && selections.pdf_urls.length > 0) {
+            curAttrs.scrape_doc_url = selections.pdf_urls[0];
+            curAttrs.scrape_pdf_urls = selections.pdf_urls;
+            if (selections.pdf_meta) curAttrs.scrape_pdf_meta = selections.pdf_meta;
+          }
+          if (selections.image_urls && selections.image_urls.length > 0) {
+            curAttrs.scrape_image_urls = selections.image_urls;
+          }
+          if (selections.source_url) {
+            curAttrs.scrape_price_url = selections.source_url;
+          }
+          next.attributes = JSON.stringify(curAttrs);
+        } catch (e) {}
         return next;
       });
       if (selections.source_url) setAutoFillSource(selections.source_url);
       setCreateSuccess("Champs pré-remplis via auto-remplissage !");
     }
 
-    if (config) {
+    if (config && autoFillModalIsEdit) {
       const skuUpper = autoFillModalSku.toUpperCase();
       if (selections.image_urls && selections.image_urls.length > 0) {
         invoke<string[]>("save_selected_images", {
           sku: skuUpper,
           urls: selections.image_urls,
           networkPath: config.network_path
-        }).then(() => {
+        }).then((savedPaths) => {
+          if (savedPaths && savedPaths.length > 0) {
+            if (autoFillModalIsEdit) {
+              setEditProduct(prev => ({ ...prev, image_path: savedPaths[0] }));
+            } else {
+              setNewProduct(prev => ({ ...prev, image_path: savedPaths[0] }));
+            }
+          }
           if (selectedProduct && selectedProduct.sku === skuUpper) {
             refreshSelectedProduct(skuUpper);
           }
@@ -903,22 +1354,41 @@ function App() {
         });
       }
       if (selections.pdf_urls && selections.pdf_urls.length > 0) {
-        Promise.all(selections.pdf_urls.map((url: string) =>
-          invoke("save_selected_pdf", {
+        Promise.all(selections.pdf_urls.map((url: string) => {
+          const meta = selections.pdf_meta?.find(m => m.url === url);
+          const chosenDocType = meta?.docType || "fiche_technique";
+          return invoke<string>("save_selected_pdf", {
             sku: skuUpper,
             url: url,
             networkPath: config.network_path,
             trigramme: config.trigramme,
-            docType: "datasheet"
-          })
-        )).then(() => {
+            docType: chosenDocType
+          });
+        })).then((saved) => {
+          if (saved && saved.length > 0 && saved[0]) {
+            if (autoFillModalIsEdit) {
+              setEditProduct(prev => ({ ...prev, pdf_path: saved[0] }));
+            } else {
+              setNewProduct(prev => ({ ...prev, pdf_path: saved[0] }));
+            }
+          }
           if (selectedProduct && selectedProduct.sku === skuUpper) {
             refreshSelectedProduct(skuUpper);
           }
         }).catch(err => {
-          console.error("Error saving selected PDFs:", err);
-          showToast("Erreur import notice : " + err.toString(), "error");
+          console.warn("Notice technique non téléchargeable localement :", err);
+          // Le lien web distant est déjà sauvegardé et fonctionnel dans la fiche
         });
+      }
+
+      // Synchroniser les candidats du cache vers le nouveau MPN/SKU s'il a changé
+      const targetSku = (selections.mpn || (autoFillModalIsEdit ? editProduct.sku : newProduct.sku) || "").toUpperCase().trim();
+      if (targetSku && targetSku !== skuUpper) {
+        invoke("get_scrape_candidates", { sku: skuUpper }).then((candidates: any) => {
+          if (candidates) {
+            invoke("save_scrape_candidates", { sku: targetSku, candidates });
+          }
+        }).catch(() => {});
       }
     }
   }
@@ -938,16 +1408,50 @@ function App() {
   const [confirmModal, setConfirmModal] = useState<ConfirmModalConfig | null>(null);
   const [alertModal, setAlertModal] = useState<AlertModalConfig | null>(null);
 
+  // Fermer immédiatement l'aperçu d'image au survol lors d'un changement d'onglet ou de l'ouverture d'un modale
+  useEffect(() => {
+    setHoveredImage(null);
+  }, [
+    activeTab,
+    showAddModal,
+    showEditModal,
+    autoFillModalOpen,
+    showPriceConfirmModal,
+    showDimensionConfirmModal,
+    alertModal,
+    confirmModal
+  ]);
+
+  // Fermer le preview lors de tout clic, appui touche ou scroll de la page
+  useEffect(() => {
+    const handleDismissHover = () => {
+      setHoveredImage(null);
+    };
+    window.addEventListener("scroll", handleDismissHover, true);
+    window.addEventListener("wheel", handleDismissHover, { passive: true });
+    window.addEventListener("pointerdown", handleDismissHover);
+    window.addEventListener("keydown", handleDismissHover);
+    return () => {
+      window.removeEventListener("scroll", handleDismissHover, true);
+      window.removeEventListener("wheel", handleDismissHover);
+      window.removeEventListener("pointerdown", handleDismissHover);
+      window.removeEventListener("keydown", handleDismissHover);
+    };
+  }, []);
+
   function getRenamePreview(convention: string, isPdf: boolean): string {
     if (!convention) return "";
     let name = convention
-      .replace(/{SKU}/g, "SKU12345")
-      .replace(/{Brand}/g, "SIEMENS")
-      .replace(/{MPN}/g, "5SY4110-7")
-      .replace(/{Type}/g, isPdf ? "datasheet" : "")
-      .replace(/{Index}/g, !isPdf ? "1" : "")
-      .replace(/{Source}/g, !isPdf ? "searxng" : "")
-      .replace(/{Date}/g, !isPdf ? "20260526" : "");
+      .replace(/{SKU}/gi, "SKU12345")
+      .replace(/{Brand}/gi, "SIEMENS")
+      .replace(/{MPN}/gi, "5SY4110-7")
+      .replace(/{Description}/gi, "Disjoncteur 10A")
+      .replace(/{Designation}/gi, "Disjoncteur 10A")
+      .replace(/{Label}/gi, "Disjoncteur 10A")
+      .replace(/{Type}/gi, isPdf ? "datasheet" : "")
+      .replace(/{Index}/gi, !isPdf ? "1" : "")
+      .replace(/{Source}/gi, !isPdf ? "searxng" : "")
+      .replace(/{Date}/gi, !isPdf ? "20260526" : "");
     
     if (isPdf) {
       if (!name.toLowerCase().endsWith(".pdf")) {
@@ -1019,13 +1523,37 @@ function App() {
   // 1. Initial configuration load
   useEffect(() => {
     async function loadConfig() {
+      // Préchargement synchrone immédiat depuis localStorage si disponible
+      const localCfg = localStorage.getItem("stockflow_config");
+      if (localCfg) {
+        try {
+          const parsed = JSON.parse(localCfg);
+          if (parsed && parsed.trigramme) {
+            setConfig(parsed);
+            setTrigrammeInput(parsed.trigramme);
+            if (parsed.network_path) setNetworkPathInput(parsed.network_path);
+            setSearxngUrlInput(parsed.searxng_url || "https://search.amify-studio.fr");
+            if (parsed.vpc_sites) setVpcSitesInput(parsed.vpc_sites);
+            if (parsed.vpc_api_keys) setVpcKeysInput(parsed.vpc_api_keys);
+            if (parsed.vpc_urls) setVpcUrlsInput(parsed.vpc_urls);
+            if (parsed.pdf_rename_convention) setPdfRenameInput(parsed.pdf_rename_convention);
+            if (parsed.image_rename_convention) setImageRenameInput(parsed.image_rename_convention);
+            if (parsed.pdf_size_threshold !== undefined) setPdfSizeThresholdInput(parsed.pdf_size_threshold);
+            if (parsed.searxng_urls) setSearxngUrlsInput(parsed.searxng_urls.join("\n"));
+            if (parsed.max_image_candidates !== undefined) setMaxImageCandidatesInput(parsed.max_image_candidates);
+            if (parsed.price_tax_type) setPriceTaxTypeInput(parsed.price_tax_type);
+            if (parsed.enable_scrape_fallback !== undefined) setEnableScrapeFallbackInput(parsed.enable_scrape_fallback);
+          }
+        } catch {}
+      }
+
       try {
         const loaded: any = await invoke("get_config");
         if (loaded) {
           setConfig(loaded);
           setTrigrammeInput(loaded.trigramme);
           setNetworkPathInput(loaded.network_path);
-          setSearxngUrlInput(loaded.searxng_url || "");
+          setSearxngUrlInput(loaded.searxng_url || "https://search.amify-studio.fr");
           setVpcSitesInput(loaded.vpc_sites || []);
           setVpcKeysInput(loaded.vpc_api_keys || {});
           setVpcUrlsInput(loaded.vpc_urls || {});
@@ -1036,6 +1564,9 @@ function App() {
           setMaxImageCandidatesInput(loaded.max_image_candidates ?? 15);
           if (loaded.price_tax_type) {
             setPriceTaxTypeInput(loaded.price_tax_type);
+          }
+          if (loaded.enable_scrape_fallback !== undefined) {
+            setEnableScrapeFallbackInput(loaded.enable_scrape_fallback);
           }
           
           if (loaded.network_path) {
@@ -1052,7 +1583,22 @@ function App() {
             }
           }
           
-          // Initial sync and load
+          // En mode Web : charger immédiatement les produits depuis IndexedDB (cache local)
+          // pour un affichage instantané, AVANT la synchronisation réseau
+          if (!isTauri()) {
+            try {
+              const cachedProducts: Product[] = await invoke("get_products");
+              if (cachedProducts && cachedProducts.length > 0) {
+                setProducts(cachedProducts);
+                const cachedStats: DashboardStats = await invoke("get_dashboard_stats");
+                setStats(cachedStats);
+              }
+            } catch (e) {
+              console.warn("[WebMode] Pas de cache local disponible", e);
+            }
+          }
+
+          // Initial sync and load (en arrière-plan en mode Web)
           syncAndFetch(loaded);
         }
       } catch (err) {
@@ -1064,27 +1610,56 @@ function App() {
     loadConfig();
   }, []);
 
-  // 2. Background Polling for Event Sourcing Updates (every 4 seconds)
+  // 2. Background Polling for Event Sourcing Updates (every 15 seconds, paused when hidden)
   useEffect(() => {
     if (!config) return;
-    const interval = setInterval(() => {
-      syncAndFetch(config);
-    }, 4000);
-  
-  // Avoid unused variable compiler errors
 
-  return () => clearInterval(interval);
+    // Polling passif toutes les 15 secondes
+    const interval = setInterval(() => {
+      // Si la fenêtre ou l'onglet est masqué, aucun besoin de sonder le réseau
+      if (typeof document !== "undefined" && document.hidden) return;
+      syncAndFetch(config, false);
+    }, 15000);
+
+    // Synchronisation instantanée dès que l'utilisateur revient sur l'application
+    const handleFocusOrVisible = () => {
+      if (typeof document !== "undefined" && !document.hidden && config) {
+        syncAndFetch(config, false);
+      }
+    };
+
+    window.addEventListener("focus", handleFocusOrVisible);
+    document.addEventListener("visibilitychange", handleFocusOrVisible);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", handleFocusOrVisible);
+      document.removeEventListener("visibilitychange", handleFocusOrVisible);
+    };
   }, [config]);
 
-  // Sync and fetch data helper
-  async function syncAndFetch(appConfig: AppConfig) {
+  // Sync and fetch data helper (intelligent et économe en ressources réseau et CPU)
+  async function syncAndFetch(appConfig: AppConfig, forceReload: boolean = true) {
+    // Éviter les appels concurrents qui se chevauchent
+    if (isSyncingRef.current) return;
+    isSyncingRef.current = true;
+
+    // Signaler le début de la synchronisation (badge en mode Web)
+    if (!isTauri()) setSyncStatus("syncing");
+
+    let isDossierUnauthorized = false;
+    let newEventsCount = 0;
     try {
-      // Sync events from network folder to local SQLite cache
-      await invoke("sync_events", { networkPath: appConfig.network_path });
+      // Sync events from network folder to local cache (SQLite ou IndexedDB)
+      const res: any = await invoke("sync_events", { networkPath: appConfig.network_path });
+      newEventsCount = typeof res === "number" ? res : Number(res || 0);
       setIsOnline(true);
     } catch (err: any) {
       console.warn("Réseau inaccessible", err);
-      if (err.toString().includes("RÉSEAU_HORS_LIGNE")) {
+      if (err.toString().includes("DOSSIER_NON_AUTORISE")) {
+        isDossierUnauthorized = true;
+        if (!isTauri()) setSyncStatus("disconnected");
+      } else if (err.toString().includes("RÉSEAU_HORS_LIGNE")) {
         // Enregistrements locaux poussés, mais réseau coupé pour le reste
       } else {
         setIsOnline(false);
@@ -1092,42 +1667,74 @@ function App() {
     }
 
     try {
-      // Reload products cache
-      const loadedProducts: Product[] = await invoke("get_products");
-      setProducts(loadedProducts);
-      
-      // Update stats
-      const loadedStats: DashboardStats = await invoke("get_dashboard_stats");
-      setStats(loadedStats);
+      // Optimisation majeure : on ne recharge depuis la base locale et ne recalcule les stats que si :
+      // 1. Un rechargement forcé a été demandé (ex: action locale : création, mouvement, suppression, reconnexion...)
+      // 2. De nouveaux événements sont arrivés depuis le réseau (newEventsCount > 0)
+      // 3. Le catalogue en mémoire est encore vide (démarrage initial)
+      const shouldReload = forceReload || newEventsCount > 0 || productsCountRef.current === 0;
 
-      // Refresh currently selected product details
-      const currentSelected = selectedProductRef.current;
-      if (currentSelected) {
-        const updated = loadedProducts.find(p => p.sku === currentSelected.sku);
-        if (updated) {
-          setSelectedProduct(updated);
-          // Mettre à jour les médias
-          const imgs: string[] = await invoke("list_sku_images", { networkPath: appConfig.network_path, sku: updated.sku });
-          setProductImages(imgs);
-          const pdfs: string[] = await invoke("list_sku_pdfs", { networkPath: appConfig.network_path, sku: updated.sku });
-          setProductPdfs(pdfs);
-          const screenshot: string | null = await invoke("get_sku_screenshot_path", { networkPath: appConfig.network_path, sku: updated.sku });
-          setProductScreenshotPath(screenshot);
-          // Rafraîchir historique et audit log en temps réel
-          try {
-            const history: ProductHistoryItem[] = await invoke("get_product_history", { sku: updated.sku });
-            setProductHistory(history);
-            const audit: AuditLogItem[] = await invoke("get_product_audit_log", { sku: updated.sku });
-            setProductAuditLog(audit);
-          } catch (e) {
-            console.error("Failed to refresh history/audit", e);
+      if (shouldReload) {
+        // Reload products cache
+        const loadedProducts: Product[] = await invoke("get_products");
+        setProducts(loadedProducts);
+        
+        // Update stats
+        const loadedStats: DashboardStats = await invoke("get_dashboard_stats");
+        setStats(loadedStats);
+
+        // Refresh currently selected product details
+        const currentSelected = selectedProductRef.current;
+        if (currentSelected) {
+          const updated = loadedProducts.find(p => p.sku === currentSelected.sku);
+          if (updated) {
+            setSelectedProduct(updated);
+            // Mettre à jour les médias
+            const imgs: string[] = await invoke("list_sku_images", { networkPath: appConfig.network_path, sku: updated.sku });
+            setProductImages(imgs);
+            const pdfs: string[] = await invoke("list_sku_pdfs", { networkPath: appConfig.network_path, sku: updated.sku });
+            setProductPdfs(pdfs);
+            const screenshot: string | null = await invoke("get_sku_screenshot_path", { networkPath: appConfig.network_path, sku: updated.sku });
+            setProductScreenshotPath(screenshot);
+            // Rafraîchir historique et audit log en temps réel
+            try {
+              const history: ProductHistoryItem[] = await invoke("get_product_history", { sku: updated.sku });
+              setProductHistory(history);
+              const audit: AuditLogItem[] = await invoke("get_product_audit_log", { sku: updated.sku });
+              setProductAuditLog(audit);
+            } catch (e) {
+              console.error("Failed to refresh history/audit", e);
+            }
           }
         }
+
+        // Notifier les composants dépendants (ex: BomTab) uniquement si de nouvelles données existent
+        setSyncCounter(prev => prev + 1);
       }
+
+      // Synchronisation terminée avec succès si pas d'erreur d'autorisation
+      if (!isTauri() && !isDossierUnauthorized) setSyncStatus("synced");
     } catch (err) {
       console.error("Failed to fetch products/stats", err);
+      if (!isTauri()) setSyncStatus("idle");
+    } finally {
+      isSyncingRef.current = false;
     }
   }
+
+  const handleReconnectDirectory = async () => {
+    try {
+      const ok = await invoke("reconnect_network_directory");
+      if (ok) {
+        showToast("Dossier réseau reconnecté avec succès", "success");
+        if (config) syncAndFetch(config);
+      } else {
+        pickNetworkDir();
+      }
+    } catch (e) {
+      console.error("Erreur reconnexion dossier", e);
+      pickNetworkDir();
+    }
+  };
 
   async function handleSaveSettings(
     tri: string,
@@ -1170,6 +1777,7 @@ function App() {
       vpc_api_keys: vpcKeysInput,
       vpc_urls: vpcUrlsInput,
     };
+    localStorage.setItem("stockflow_config", JSON.stringify(newConfig));
     setConfig(newConfig);
     syncAndFetch(newConfig);
   }
@@ -1186,6 +1794,7 @@ function App() {
       const taxType = updatedFields?.hasOwnProperty("price_tax_type") ? updatedFields.price_tax_type! : priceTaxTypeInput;
       const apiKeys = updatedFields?.hasOwnProperty("vpc_api_keys") ? updatedFields.vpc_api_keys! : vpcKeysInput;
       const urls = updatedFields?.hasOwnProperty("vpc_urls") ? updatedFields.vpc_urls! : vpcUrlsInput;
+      const fallback = updatedFields?.hasOwnProperty("enable_scrape_fallback") ? updatedFields.enable_scrape_fallback! : enableScrapeFallbackInput;
       
       const sxUrls = updatedFields?.hasOwnProperty("searxng_urls") 
         ? updatedFields.searxng_urls! 
@@ -1211,6 +1820,7 @@ function App() {
         priceTaxType: taxType || "HT",
         vpcApiKeys: apiKeys,
         vpcUrls: urls,
+        enableScrapeFallback: fallback,
       });
 
       const newConfig: AppConfig = {
@@ -1226,7 +1836,9 @@ function App() {
         price_tax_type: taxType || "HT",
         vpc_api_keys: apiKeys,
         vpc_urls: urls,
+        enable_scrape_fallback: fallback,
       };
+      localStorage.setItem("stockflow_config", JSON.stringify(newConfig));
       setConfig(newConfig);
       syncAndFetch(newConfig);
       showToast("Paramètres auto-enregistrés", "success");
@@ -1366,6 +1978,44 @@ function App() {
     }
   }
 
+  function handleNavigateToProduct(sku: string) {
+    if (!sku) return;
+    const cleanSku = sku.trim().toUpperCase();
+    const targetProduct = products.find(p => p.sku.trim().toUpperCase() === cleanSku);
+
+    // 1. Réinitialiser les filtres si nécessaire pour que la référence soit visible dans la table
+    if (stockFilter !== "all" && targetProduct) {
+      const isLow = targetProduct.min_stock > 0 && targetProduct.current_stock > 0 && targetProduct.current_stock <= targetProduct.min_stock;
+      const isOut = targetProduct.current_stock <= 0;
+      if ((stockFilter === "low_stock" && !isLow) || (stockFilter === "out_of_stock" && !isOut)) {
+        setStockFilter("all");
+      }
+    }
+    if (categoryFilter !== "all" && targetProduct && categoryFilter !== targetProduct.category) {
+      setCategoryFilter("all");
+    }
+    if (subCategoryFilter !== "all" && targetProduct && subCategoryFilter !== targetProduct.sub_category) {
+      setSubCategoryFilter("all");
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      if (!cleanSku.toLowerCase().includes(q) && !(targetProduct?.label || "").toLowerCase().includes(q)) {
+        setSearchQuery("");
+      }
+    }
+
+    // 2. Basculer vers l'onglet inventaire
+    setActiveTab("inventory");
+
+    // 3. Sélectionner le produit et charger sa fiche de détails
+    if (targetProduct) {
+      handleSelectProduct(targetProduct);
+    }
+
+    // 4. Déclencher le défilement fluide et la surbrillance pulsée
+    highlightAndScrollToSku(cleanSku);
+  }
+
   async function handleRevertAudit(item: AuditLogItem) {
     if (!config || !selectedProduct) return;
     
@@ -1385,9 +2035,12 @@ function App() {
       let category = selectedProduct.category || "";
       let sub_category = selectedProduct.sub_category || "";
       let location = selectedProduct.location || "";
+      let item_type = selectedProduct.item_type || "QUANTITATIVE";
       let min_stock = selectedProduct.min_stock || 0;
       let price = selectedProduct.price || 0;
       let pack_size = selectedProduct.pack_size || 1;
+      let image_path = selectedProduct.image_path || null;
+      let pdf_path = selectedProduct.pdf_path || null;
       
       switch (fieldName) {
         case "Désignation":
@@ -1407,6 +2060,15 @@ function App() {
           break;
         case "Emplacement":
           location = oldValue || "";
+          break;
+        case "Type d'article":
+          item_type = oldValue || "QUANTITATIVE";
+          break;
+        case "Image principale":
+          image_path = oldValue || null;
+          break;
+        case "Notice principale":
+          pdf_path = oldValue || null;
           break;
         case "Seuil d'alerte":
           min_stock = Number(oldValue?.replace(",", ".")) || 0;
@@ -1446,6 +2108,25 @@ function App() {
             delete attributesObj.scrape_image_urls;
           }
           break;
+        case "URL image":
+          if (oldValue) attributesObj.scrape_image_url = oldValue;
+          else delete attributesObj.scrape_image_url;
+          break;
+        case "URL document":
+          if (oldValue) attributesObj.scrape_doc_url = oldValue;
+          else delete attributesObj.scrape_doc_url;
+          break;
+        case "URL source prix":
+          if (oldValue) attributesObj.scrape_price_url = oldValue;
+          else delete attributesObj.scrape_price_url;
+          break;
+        case "Documents":
+          if (oldValue && oldValue.trim()) {
+            try { attributesObj.scrape_pdf_urls = JSON.parse(oldValue); } catch (e) { attributesObj.scrape_pdf_urls = []; }
+          } else {
+            delete attributesObj.scrape_pdf_urls;
+          }
+          break;
         default:
           alert(`Restauration non supportée pour le champ : ${fieldName}`);
           return;
@@ -1461,11 +2142,11 @@ function App() {
         category: category,
         subCategory: sub_category,
         location: location,
-        itemType: selectedProduct.item_type || "QUANTITATIVE",
+        itemType: item_type,
         minStock: min_stock,
         price: price,
-        imagePath: selectedProduct.image_path || null,
-        pdfPath: selectedProduct.pdf_path || null,
+        imagePath: image_path,
+        pdfPath: pdf_path,
         attributes: attributesObj,
         packSize: pack_size
       });
@@ -1519,7 +2200,18 @@ function App() {
     if (newProduct.poids) attributesObj.poids = newProduct.poids;
     if (newProduct.notes) attributesObj.notes = newProduct.notes;
     if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
-    if (autoFillChanges?.image_urls?.length) attributesObj.scrape_image_urls = autoFillChanges.image_urls;
+    const finalImageUrls: string[] = (attributesObj.scrape_image_urls && attributesObj.scrape_image_urls.length > 0)
+      ? attributesObj.scrape_image_urls
+      : (autoFillChanges?.image_urls || []);
+    const finalPdfUrls: string[] = (attributesObj.scrape_pdf_urls && attributesObj.scrape_pdf_urls.length > 0)
+      ? attributesObj.scrape_pdf_urls
+      : (autoFillChanges?.pdf_urls || []);
+
+    if (finalImageUrls.length) attributesObj.scrape_image_urls = finalImageUrls;
+    if (finalPdfUrls.length) {
+      attributesObj.scrape_pdf_urls = finalPdfUrls;
+      attributesObj.scrape_doc_url = finalPdfUrls[0];
+    }
 
     try {
       await invoke("create_product", {
@@ -1535,11 +2227,18 @@ function App() {
         itemType: "QUANTITATIVE",
         minStock: Number(newProduct.min_stock.toString().replace(",", ".")) || 0,
         price: Number(newProduct.price.toString().replace(",", ".")) || 0,
-        imagePath: null,
-        pdfPath: null,
+        imagePath: newProduct.image_path || (finalImageUrls.length > 0 ? finalImageUrls[0] : null),
+        pdfPath: newProduct.pdf_path || (finalPdfUrls.length > 0 ? finalPdfUrls[0] : null),
         attributes: attributesObj,
         packSize: Number(newProduct.pack_size.toString().replace(",", ".")) || 1
       });
+
+      const targetSku = (newProduct.sku || newProduct.mpn).trim().toUpperCase();
+      const savedCategory = newProduct.category;
+      const savedSubCategory = newProduct.sub_category;
+      const savedLabel = newProduct.label;
+      const pendingPdfs = (newProduct as any).pending_pdf_files || [];
+      const pdfMetaList: Array<{ url: string; title?: string; docType?: string }> = attributesObj.scrape_pdf_meta || [];
 
       // Si un stock initial est renseigné, créer un mouvement STOCK_IN
       const initialQty = Number(newProduct.initial_stock?.toString().replace(",", ".")) || 0;
@@ -1557,15 +2256,14 @@ function App() {
           console.warn("Stock initial non enregistré :", e);
         }
       }
-      showToast("Produit créé ! Scraping en arrière-plan...", "success");
-      // Trigger background scrape for the new product
-      invoke("start_background_scrape", { sku: newProduct.sku }).catch(e => {
-        console.warn("Background scrape trigger failed:", e);
-      });
+
+      // Fermeture IMMÉDIATE du modale pour une UX instantanée
+      setShowAddModal(false);
       setNewVpcSite("");
       setNewVpcCode("");
       setAutoFillSource(null);
       setAutoFillFallbackInfo(null);
+      setAutoFillChanges(null);
       setNewProduct({
         sku: "",
         mpn: "",
@@ -1583,11 +2281,100 @@ function App() {
         profondeur: "",
         poids: "",
         notes: "",
-        initial_stock: "0"
+        initial_stock: "0",
+        image_path: "",
+        pdf_path: ""
       });
-      setShowAddModal(false);
-      setAutoFillChanges(null);
-      syncAndFetch(config);
+
+      // Assurer que l'onglet inventaire est actif et que les filtres ne masquent pas le nouvel élément
+      setActiveTab("inventory");
+      if (categoryFilter !== "all" && categoryFilter !== savedCategory) {
+        setCategoryFilter("all");
+      }
+      if (subCategoryFilter !== "all" && subCategoryFilter !== savedSubCategory) {
+        setSubCategoryFilter("all");
+      }
+      if (searchQuery.trim()) {
+        const q = searchQuery.trim().toLowerCase();
+        if (!targetSku.toLowerCase().includes(q) && !(savedLabel || "").toLowerCase().includes(q)) {
+          setSearchQuery("");
+        }
+      }
+
+      showToast("Produit créé avec succès !", "success");
+
+      // Synchronisation et rafraîchissement immédiat de la table avec scroll & surbrillance
+      await syncAndFetch(config, true);
+      highlightAndScrollToSku(targetSku);
+
+      // Traitement des médias lourds et scraping en arrière-plan sans bloquer l'interface
+      (async () => {
+        try {
+          if (config && targetSku) {
+            if (pendingPdfs.length > 0) {
+              for (const f of pendingPdfs) {
+                try {
+                  await invoke("upload_media", {
+                    networkPath: config.network_path,
+                    sku: targetSku,
+                    mediaType: "pdf",
+                    fileName: f.fileName,
+                    fileData: f.fileData,
+                    trigramme: config.trigramme
+                  });
+                } catch (err) {
+                  console.warn("Erreur upload_media document local création :", err);
+                }
+              }
+            }
+            if (finalImageUrls.length > 0) {
+              try {
+                await invoke<string[]>("save_selected_images", {
+                  sku: targetSku,
+                  urls: finalImageUrls,
+                  networkPath: config.network_path
+                });
+              } catch (e) {
+                console.warn("Erreur téléchargement images à la création :", e);
+              }
+            }
+            if (finalPdfUrls.length > 0) {
+              for (const url of finalPdfUrls) {
+                if (!url.startsWith("blob:") && !url.startsWith("data:")) {
+                  try {
+                    const meta = pdfMetaList.find(m => m.url === url);
+                    const chosenDocType = meta?.docType || "fiche_technique";
+                    await invoke<string>("save_selected_pdf", {
+                      sku: targetSku,
+                      url,
+                      networkPath: config.network_path,
+                      trigramme: config.trigramme,
+                      docType: chosenDocType
+                    });
+                  } catch (e) {
+                    console.warn("Erreur téléchargement PDF à la création :", e);
+                  }
+                }
+              }
+            }
+            if (selectedProductRef.current?.sku?.trim().toUpperCase() === targetSku) {
+              try {
+                const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: targetSku });
+                setProductPdfs(updatedPdfs);
+                const updatedImgs: string[] = await invoke("list_sku_images", { networkPath: config.network_path, sku: targetSku });
+                setProductImages(updatedImgs);
+              } catch {}
+            }
+          }
+        } catch (mediaErr) {
+          console.warn("Background media save warning:", mediaErr);
+        }
+
+        // Trigger background scrape for the new product
+        invoke("start_background_scrape", { sku: targetSku }).catch(e => {
+          console.warn("Background scrape trigger failed:", e);
+        });
+      })();
     } catch (err: any) {
       setCreateError(err.toString());
     }
@@ -1618,7 +2405,18 @@ function App() {
     if (editProduct.poids) attributesObj.poids = editProduct.poids; else delete attributesObj.poids;
     if (editProduct.notes) attributesObj.notes = editProduct.notes; else delete attributesObj.notes;
     if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
-    if (autoFillChanges?.image_urls?.length) attributesObj.scrape_image_urls = autoFillChanges.image_urls;
+    const finalImageUrls: string[] = (attributesObj.scrape_image_urls && attributesObj.scrape_image_urls.length > 0)
+      ? attributesObj.scrape_image_urls
+      : (autoFillChanges?.image_urls || []);
+    const finalPdfUrls: string[] = (attributesObj.scrape_pdf_urls && attributesObj.scrape_pdf_urls.length > 0)
+      ? attributesObj.scrape_pdf_urls
+      : (autoFillChanges?.pdf_urls || []);
+
+    if (finalImageUrls.length) attributesObj.scrape_image_urls = finalImageUrls;
+    if (finalPdfUrls.length) {
+      attributesObj.scrape_pdf_urls = finalPdfUrls;
+      attributesObj.scrape_doc_url = finalPdfUrls[0];
+    }
 
     try {
       await invoke("create_product", {
@@ -1634,17 +2432,18 @@ function App() {
         itemType: editProduct.item_type,
         minStock: Number(editProduct.min_stock.toString().replace(",", ".")) || 0,
         price: Number(editProduct.price.toString().replace(",", ".")) || 0,
-        imagePath: editProduct.image_path,
-        pdfPath: editProduct.pdf_path,
+        imagePath: editProduct.image_path || (finalImageUrls.length > 0 ? finalImageUrls[0] : null),
+        pdfPath: editProduct.pdf_path || (finalPdfUrls.length > 0 ? finalPdfUrls[0] : null),
         attributes: attributesObj,
         packSize: Number(editProduct.pack_size.toString().replace(",", ".")) || 1
       });
 
-      setEditSuccess("Produit mis à jour avec succès !");
-      setAutoFillSource(null);
-      setAutoFillFallbackInfo(null);
-      setShowEditModal(false);
-      setAutoFillChanges(null);
+      const editedSku = editProduct.sku.trim().toUpperCase();
+      const savedCategory = editProduct.category;
+      const savedSubCategory = editProduct.sub_category;
+      const savedLabel = editProduct.label;
+      const pendingPdfs = (editProduct as any).pending_pdf_files || [];
+      const pdfMetaList: Array<{ url: string; title?: string; docType?: string }> = attributesObj.scrape_pdf_meta || [];
 
       // Update selected product view in real time
       const updated = {
@@ -1655,20 +2454,114 @@ function App() {
         category: editProduct.category,
         sub_category: editProduct.sub_category,
         location: editProduct.location,
+        item_type: editProduct.item_type,
         min_stock: Number(editProduct.min_stock.toString().replace(",", ".")) || 0,
         price: Number(editProduct.price.toString().replace(",", ".")) || 0,
         pack_size: Number(editProduct.pack_size.toString().replace(",", ".")) || 1,
+        image_path: editProduct.image_path || (finalImageUrls.length > 0 ? finalImageUrls[0] : null),
+        pdf_path: editProduct.pdf_path || (finalPdfUrls.length > 0 ? finalPdfUrls[0] : null),
         attributes: JSON.stringify(attributesObj)
       };
       setSelectedProduct(updated);
 
-      syncAndFetch(config);
+      // Fermeture IMMÉDIATE du modale d'édition
+      setShowEditModal(false);
+      setEditSuccess("Produit mis à jour avec succès !");
+      setAutoFillSource(null);
+      setAutoFillFallbackInfo(null);
+      setAutoFillChanges(null);
+
+      // Assurer la visibilité dans la table d'inventaire
+      setActiveTab("inventory");
+      if (categoryFilter !== "all" && categoryFilter !== savedCategory) {
+        setCategoryFilter("all");
+      }
+      if (subCategoryFilter !== "all" && subCategoryFilter !== savedSubCategory) {
+        setSubCategoryFilter("all");
+      }
+      if (searchQuery.trim()) {
+        const q = searchQuery.trim().toLowerCase();
+        if (!editedSku.toLowerCase().includes(q) && !(savedLabel || "").toLowerCase().includes(q)) {
+          setSearchQuery("");
+        }
+      }
+
+      showToast("Produit mis à jour avec succès !", "success");
+
+      // Synchronisation immédiate et déclenchement de la surbrillance + scroll
+      await syncAndFetch(config, true);
+      highlightAndScrollToSku(editedSku);
+
+      // Téléchargement / sauvegarde physique sur disque en arrière-plan sans bloquer l'UI
+      (async () => {
+        try {
+          if (config && editedSku) {
+            if (pendingPdfs.length > 0) {
+              for (const f of pendingPdfs) {
+                try {
+                  await invoke("upload_media", {
+                    networkPath: config.network_path,
+                    sku: editedSku,
+                    mediaType: "pdf",
+                    fileName: f.fileName,
+                    fileData: f.fileData,
+                    trigramme: config.trigramme
+                  });
+                } catch (err) {
+                  console.warn("Erreur upload_media document local edit :", err);
+                }
+              }
+            }
+            if (finalImageUrls.length > 0) {
+              try {
+                await invoke<string[]>("save_selected_images", {
+                  sku: editedSku,
+                  urls: finalImageUrls,
+                  networkPath: config.network_path
+                });
+              } catch (e) {
+                console.warn("Erreur téléchargement images edit :", e);
+              }
+            }
+            if (finalPdfUrls.length > 0) {
+              for (const url of finalPdfUrls) {
+                if (!url.startsWith("blob:") && !url.startsWith("data:")) {
+                  try {
+                    const meta = pdfMetaList.find(m => m.url === url);
+                    const chosenDocType = meta?.docType || "fiche_technique";
+                    await invoke<string>("save_selected_pdf", {
+                      sku: editedSku,
+                      url,
+                      networkPath: config.network_path,
+                      trigramme: config.trigramme,
+                      docType: chosenDocType
+                    });
+                  } catch (e) {
+                    console.warn("Erreur téléchargement PDF edit :", e);
+                  }
+                }
+              }
+            }
+            if (selectedProductRef.current?.sku?.trim().toUpperCase() === editedSku) {
+              try {
+                const updatedPdfs: string[] = await invoke("list_sku_pdfs", { networkPath: config.network_path, sku: editedSku });
+                setProductPdfs(updatedPdfs);
+                const updatedImgs: string[] = await invoke("list_sku_images", { networkPath: config.network_path, sku: editedSku });
+                setProductImages(updatedImgs);
+              } catch {}
+            }
+          }
+        } catch (e) {
+          console.warn("Background media save edit error:", e);
+        }
+      })();
     } catch (err: any) {
       setEditError(err.toString());
     }
   }
 
-  function prepareEditForm(prod: Product) {
+  function prepareEditForm(prod: Product, initialTab: "general" | "images" | "documents" = "general") {
+    setEditInitialTab(initialTab);
     setEditSuccess("");
     setEditError("");
     setAutoFillSource(null);
@@ -2059,13 +2952,115 @@ function App() {
   };
 
   // Hover Thumbnail handler
-  function handleImageHover(e: React.MouseEvent, imageRelativePath: string | null | undefined) {
-    if (!imageRelativePath || !config) return;
-    
-    // Resolve absolute path through standard Windows file path format on network share
-    const absolutePath = convertFileSrc(`${config.network_path}/${imageRelativePath}`);
-    setHoveredImage(absolutePath);
-    setHoverPosition({ x: e.clientX + 15, y: e.clientY + 15 });
+  async function handleImageHover(
+    e: React.MouseEvent,
+    target: string | Product | null | undefined,
+    fallbackProd?: Product,
+    colId?: string
+  ) {
+    if (showAddModal || showEditModal || autoFillModalOpen || !!alertModal || !!confirmModal || showPriceConfirmModal || showDimensionConfirmModal || showColumnSettings) {
+      setHoveredImage(null);
+      return;
+    }
+
+    if (!shouldTriggerHoverPreview(hoverColumnSetting, colId)) {
+      setHoveredImage(null);
+      return;
+    }
+
+    if (!target && !fallbackProd) return;
+
+    let x = e.clientX + 15;
+    let y = e.clientY + 15;
+    if (x + 210 > window.innerWidth) x = Math.max(10, e.clientX - 215);
+    if (y + 210 > window.innerHeight) y = Math.max(10, e.clientY - 215);
+    setHoverPosition({ x, y });
+
+    // Trouver le chemin ou URL d'image
+    let imgPath: string | null = null;
+    let prodObj: Product | undefined = fallbackProd;
+
+    if (typeof target === "string") {
+      imgPath = target;
+    } else if (target && typeof target === "object") {
+      prodObj = target as Product;
+      imgPath = (target as Product).image_path || null;
+    }
+
+    // Si pas de image_path défini sur le produit, vérifier dans attributes (scraping récent)
+    if (!imgPath && prodObj?.attributes) {
+      try {
+        const attrs = typeof prodObj.attributes === "string" ? JSON.parse(prodObj.attributes) : prodObj.attributes;
+        if (attrs?.scrape_image_urls && Array.isArray(attrs.scrape_image_urls) && attrs.scrape_image_urls.length > 0) {
+          imgPath = attrs.scrape_image_urls[0];
+        } else if (attrs?.scrape_image_url) {
+          imgPath = attrs.scrape_image_url;
+        }
+      } catch {}
+    }
+
+    // Si toujours rien et qu'on a le SKU, vérifier dans le cache IndexedDB des candidats de scraping
+    if (!imgPath && prodObj?.sku) {
+      try {
+        const cachedCandidates: any = await invoke("get_scrape_candidates", { sku: prodObj.sku });
+        if (cachedCandidates?.image_candidates && cachedCandidates.image_candidates.length > 0) {
+          const firstImg = cachedCandidates.image_candidates[0];
+          imgPath = firstImg.thumbnail_url || firstImg.url || null;
+        }
+      } catch {}
+    }
+
+    // Si toujours rien et qu'on a le SKU, vérifier dans les images associées au SKU (images/{sku}_1.jpg)
+    if (!imgPath && prodObj?.sku) {
+      try {
+        const skuImgs: string[] = await invoke("list_sku_images", { networkPath: config?.network_path, sku: prodObj.sku });
+        if (skuImgs && skuImgs.length > 0) {
+          imgPath = skuImgs[0];
+        }
+      } catch {}
+    }
+
+    if (!imgPath || !imgPath.trim()) {
+      setHoveredImage(null);
+      return;
+    }
+
+    // 1. Si c'est déjà une URL web / blob / data directe
+    if (imgPath.startsWith("http://") || imgPath.startsWith("https://") || imgPath.startsWith("blob:") || imgPath.startsWith("data:")) {
+      setHoveredImage(imgPath);
+      return;
+    }
+
+    // 2. En mode Desktop (Tauri)
+    if (isTauri()) {
+      const fullPath = config?.network_path ? `${config.network_path}/${imgPath}` : imgPath;
+      setHoveredImage(convertFileSrc(fullPath));
+      return;
+    }
+
+    // 3. En mode Web pur : vérifier le cache ObjectURL
+    const cached = getCachedMediaUrl(imgPath);
+    if (cached) {
+      setHoveredImage(cached);
+      return;
+    }
+
+    // 4. En mode Web pur non mis en cache : résoudre via le dossier réseau (FileSystemDirectoryHandle)
+    const seq = ++hoverSeqRef.current;
+    try {
+      const resolved = await invoke<string>("resolve_media", { path: imgPath });
+      if (seq === hoverSeqRef.current) {
+        if (resolved && (resolved.startsWith("blob:") || resolved.startsWith("http"))) {
+          setHoveredImage(resolved);
+        } else {
+          setHoveredImage(null);
+        }
+      }
+    } catch {
+      if (seq === hoverSeqRef.current) {
+        setHoveredImage(null);
+      }
+    }
   }
 
   // Render Theme Class
@@ -2078,17 +3073,28 @@ function App() {
     }
   }, [theme]);
 
-  // Filtered Products List
-  const filteredProducts = products.filter(p => {
-    const matchQuery = 
-      p.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.label.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (p.brand && p.brand.toLowerCase().includes(searchQuery.toLowerCase()));
-    
-    const matchCategory = categoryFilter === "all" || p.category === categoryFilter;
-    const matchSubCategory = subCategoryFilter === "all" || p.sub_category === subCategoryFilter;
-    return matchQuery && matchCategory && matchSubCategory;
-  });
+  // Recherche intelligente et tolérante (multi-mots, sans accent, espaces unités, tolérance fautes de frappe)
+  const productSearchMatcher = useMemo(
+    () => createProductSearchMatcher<Product>(searchQuery),
+    [searchQuery]
+  );
+
+  // Filtered & Ranked Products List
+  const filteredProducts = useMemo(() => {
+    // 1. Filtrage rapide par famille, sous-famille et statut de stock
+    const categoryFiltered = products.filter(p => {
+      const matchCategory = categoryFilter === "all" || p.category === categoryFilter;
+      const matchSubCategory = subCategoryFilter === "all" || p.sub_category === subCategoryFilter;
+      const matchStock = 
+        stockFilter === "all" ? true :
+        stockFilter === "low_stock" ? (p.min_stock > 0 && p.current_stock > 0 && p.current_stock <= p.min_stock) :
+        stockFilter === "out_of_stock" ? (p.current_stock <= 0) : true;
+      return matchCategory && matchSubCategory && matchStock;
+    });
+
+    // 2. Recherche tolérante multi-champs avec classement par pertinence
+    return productSearchMatcher.filterAndSort(categoryFiltered);
+  }, [products, categoryFilter, subCategoryFilter, stockFilter, productSearchMatcher]);
 
   // Unique Categories for filters
   const categories = ["all", ...Array.from(new Set(products.map(p => p.category).filter(Boolean)))];
@@ -2156,12 +3162,20 @@ function App() {
                 required
                 value={networkPathInput}
                 onChange={(e) => setNetworkPathInput(e.target.value)}
-                placeholder="Entrez ou sélectionnez le chemin"
+                placeholder={!isTauri() ? "Cliquez sur Parcourir pour sélectionner le dossier" : "Entrez ou sélectionnez le chemin"}
+                readOnly={!isTauri()}
+                style={!isTauri() ? { cursor: "pointer", opacity: 0.85 } : undefined}
+                onClick={!isTauri() ? pickNetworkDir : undefined}
               />
               <button type="button" className="btn btn-secondary" onClick={pickNetworkDir}>
                 Parcourir
               </button>
             </div>
+            {!isTauri() && networkPathInput && (
+              <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem", display: "block" }}>
+                ℹ️ En mode navigateur, seul le nom du dossier est affiché (restriction de sécurité). Le dossier est bien connecté et fonctionnel.
+              </span>
+            )}
           </div>
 
           <button type="submit" className="btn" style={{ width: "100%", marginTop: "1rem" }}>
@@ -2215,70 +3229,119 @@ function App() {
   const uniqueMinStocks = Array.from(new Set(products.map(p => p.min_stock.toString()).filter(Boolean))).sort();
 
 
-  const renderProductTable = (productsToRender: Product[], isPickerMode: boolean = false) => (
-              <div className="table-container">
-                <table 
-                  className="spreadsheet"
-                  style={{ 
-                    tableLayout: "fixed", 
-                    width: columns.filter(c => c.visible).reduce((sum, c) => sum + c.width, 0) + 40
-                  }}
-                >
-                  <thead>
-                    <tr>
-                      <th style={{ width: isPickerMode ? "55px" : "40px", minWidth: isPickerMode ? "55px" : "40px", maxWidth: isPickerMode ? "55px" : "40px", textAlign: "center", position: "sticky", top: 0, zIndex: 11 }}>
-                        <input
-                          type="checkbox"
-                          checked={productsToRender.length > 0 && selectedSkus.length === productsToRender.length}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedSkus(productsToRender.map(p => p.sku));
-                            } else {
-                              setSelectedSkus([]);
-                            }
-                          }}
-                        />
-                      </th>
-                      {columns.map(col => {
-                        if (!col.visible) return null;
-                      
-  // Avoid unused variable compiler errors
+  const renderProductTable = (productsToRender: Product[], isPickerMode: boolean = false) => {
+    const finalProducts = sortColumn
+      ? [...productsToRender].sort((a, b) => compareProducts(a, b, sortColumn, sortDirection))
+      : productsToRender;
 
-  return (
-                          <th
-                            key={col.id}
-                            style={{
-                              width: col.width,
-                              minWidth: col.width,
-                              maxWidth: col.width,
-                              position: "relative",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap"
-                            }}
-                          >
-                            {col.label}
-                            <div
-                              className="column-resize-handle"
-                              onMouseDown={(e) => handleMouseDown(e, col.id)}
-                            />
-                          </th>
-                        );
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {productsToRender.length === 0 ? (
-                       <tr>
-                         <td 
-                          colSpan={columns.filter(c => c.visible).length + 1} 
-                          style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)" }}
-                        >
-                          Aucun produit correspondant.
-                        </td>
-                      </tr>
-                    ) : (
-                      productsToRender.map((prod) => {
+    return (
+      <div className="table-container">
+        <table 
+          className="spreadsheet"
+          style={{ 
+            tableLayout: "fixed", 
+            width: columns.filter(c => c.visible).reduce((sum, c) => sum + c.width, 0) + 40
+          }}
+        >
+          <thead>
+            <tr>
+              <th style={{ width: isPickerMode ? "55px" : "40px", minWidth: isPickerMode ? "55px" : "40px", maxWidth: isPickerMode ? "55px" : "40px", textAlign: "center", position: "sticky", top: 0, zIndex: 11 }}>
+                <input
+                  type="checkbox"
+                  checked={finalProducts.length > 0 && selectedSkus.length === finalProducts.length}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedSkus(finalProducts.map(p => p.sku));
+                    } else {
+                      setSelectedSkus([]);
+                    }
+                  }}
+                />
+              </th>
+              {columns.map(col => {
+                if (!col.visible) return null;
+                const isSorted = sortColumn === col.id;
+                return (
+                  <th
+                    key={col.id}
+                    className={`sortable-th ${isSorted ? "is-sorted" : ""}`}
+                    onClick={() => handleSortColumn(col.id)}
+                    style={{
+                      width: col.width,
+                      minWidth: col.width,
+                      maxWidth: col.width,
+                      position: "relative",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap"
+                    }}
+                    title={
+                      isSorted
+                        ? sortDirection === "asc"
+                          ? "Tri croissant actif (Cliquer pour tri décroissant)"
+                          : "Tri décroissant actif (Cliquer pour annuler le tri)"
+                        : `Cliquer pour trier par ${col.label}`
+                    }
+                  >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", paddingRight: "6px" }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {col.label}
+                      </span>
+                      <div style={{ display: "inline-flex", alignItems: "center", gap: "2px", flexShrink: 0, marginLeft: "4px" }}>
+                        {isSorted ? (
+                          <>
+                            <span style={{ fontSize: "11px", fontWeight: "bold" }}>
+                              {sortDirection === "asc" ? "▲" : "▼"}
+                            </span>
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleResetSort();
+                              }}
+                              style={{
+                                fontSize: "10px",
+                                padding: "1px 3px",
+                                lineHeight: 1,
+                                borderRadius: "3px",
+                                color: "var(--danger, #ef4444)",
+                                backgroundColor: "rgba(239, 68, 68, 0.15)",
+                                cursor: "pointer",
+                                marginLeft: "2px",
+                              }}
+                              title="Annuler le tri sur cette colonne"
+                            >
+                              ✕
+                            </span>
+                          </>
+                        ) : (
+                          <span style={{ fontSize: "10px", opacity: 0.25 }}>
+                            ↕
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div
+                      className="column-resize-handle"
+                      onMouseDown={(e) => handleMouseDown(e, col.id)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {finalProducts.length === 0 ? (
+               <tr>
+                 <td 
+                  colSpan={columns.filter(c => c.visible).length + 1} 
+                  style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)" }}
+                >
+                  Aucun produit correspondant.
+                </td>
+              </tr>
+            ) : (
+              finalProducts.map((prod) => {
                         let stockClass = "stock-ok";
                         if (prod.current_stock === 0) stockClass = "stock-empty";
                         else if (prod.min_stock > 0 && prod.current_stock <= prod.min_stock) stockClass = "stock-low";
@@ -2289,7 +3352,8 @@ function App() {
   return (
                           <tr 
                             key={prod.sku}
-                            className={`${selectedProduct?.sku === prod.sku ? "selected" : ""} ${selectedSkus.includes(prod.sku) ? "batch-selected" : ""}`}
+                            data-sku={prod.sku.toUpperCase()}
+                            className={`${selectedProduct?.sku === prod.sku ? "selected" : ""} ${selectedSkus.includes(prod.sku) ? "batch-selected" : ""} ${highlightedSku === prod.sku.toUpperCase() ? "row-highlight-pulse" : ""}`}
                             onClick={() => handleSelectProduct(prod)}
                             onDoubleClick={isPickerMode ? () => {
                               if (selectedSkus.includes(prod.sku)) {
@@ -2298,12 +3362,12 @@ function App() {
                                 setSelectedSkus([...selectedSkus, prod.sku]);
                               }
                             } : undefined}
-                            onMouseMove={(e) => handleImageHover(e, prod.image_path)}
                             onMouseLeave={() => setHoveredImage(null)}
                           >
                             <td 
                               style={{ width: isPickerMode ? "55px" : "40px", minWidth: isPickerMode ? "55px" : "40px", maxWidth: isPickerMode ? "55px" : "40px", textAlign: "center" }}
                               onClick={(e) => e.stopPropagation()}
+                              onMouseMove={(e) => handleImageHover(e, prod.image_path, prod, "checkbox")}
                             >
                               <div style={{ display: "flex", gap: "0.25rem", alignItems: "center", justifyContent: "center" }}>
                                 <input
@@ -2414,6 +3478,7 @@ function App() {
   return (
                                 <td
                                   key={col.id}
+                                  onMouseMove={(e) => handleImageHover(e, prod.image_path, prod, col.id)}
                                   onDoubleClick={(!isPickerMode && isEditable) ? () => handleCellDoubleClick(prod.sku, col.id, rawValue) : undefined}
                                   style={{
                                     cursor: (!isPickerMode && isEditable) ? "edit" : "default",
@@ -2453,7 +3518,8 @@ function App() {
                   </tbody>
                 </table>
               </div>
-  );
+    );
+  };
 
 
   // Avoid unused variable compiler errors
@@ -2469,36 +3535,210 @@ function App() {
             <span className="version-badge" style={{ fontSize: "9px", alignSelf: "flex-start", backgroundColor: "var(--bg-tertiary)", color: "var(--text-secondary)", padding: "1px 5px", borderRadius: "4px", fontWeight: "bold", border: "1px solid var(--border-color)", marginTop: "2px", lineHeight: 1 }}>v{appVersion}</span>
           </div>
           <span className="text-muted">|</span>
-          <span className={`status-badge ${isOnline ? "status-online" : "status-offline"}`}>
-            ● {isOnline ? "Connecté au réseau" : "Hors-ligne"}
-          </span>
+          {!isTauri() ? (
+            /* Mode Web : indicateur de synchronisation en 4 états */
+            <span 
+              className={`status-badge ${
+                syncStatus === "synced" ? "status-online" : 
+                syncStatus === "syncing" ? "status-syncing" : 
+                syncStatus === "disconnected" ? "status-offline" :
+                isOnline ? "status-online" : "status-offline"
+              }`}
+              style={syncStatus === "disconnected" ? { cursor: "pointer" } : undefined}
+              onClick={syncStatus === "disconnected" ? handleReconnectDirectory : undefined}
+              title={
+                syncStatus === "synced" ? "Les données locales sont à jour avec le dossier partagé" :
+                syncStatus === "syncing" ? "Lecture des événements depuis le dossier partagé en cours..." :
+                syncStatus === "disconnected" ? "L'accès au dossier réseau doit être réactivé suite au chargement. Cliquez ici pour réactiver." :
+                "Les données affichées proviennent du cache local"
+              }
+            >
+              {syncStatus === "syncing" ? (
+                <><span className="sync-spinner" /> Synchronisation…</>
+              ) : syncStatus === "synced" ? (
+                <>✅ Synchronisé</>
+              ) : syncStatus === "disconnected" ? (
+                <>⚠️ Dossier non connecté (Cliquer pour réactiver)</>
+              ) : (
+                <>● {isOnline ? "Cache local" : "Hors-ligne"}</>
+              )}
+            </span>
+          ) : (
+            <span className={`status-badge ${isOnline ? "status-online" : "status-offline"}`}>
+              ● {isOnline ? "Connecté au réseau" : "Hors-ligne"}
+            </span>
+          )}
         </div>
 
-        {globalScrape && (
+        {/* Indicateur de recherche en cours */}
+        {globalScrape && globalScrape.status === "InProgress" && (
           <div 
-            className={`global-scrape-banner global-scrape-banner--${globalScrape.status.toLowerCase()} ${globalScrapeHighlighted ? "scrape-highlight-flash" : ""}`}
-            onClick={() => {
-              const found = products.find(p => p.sku === globalScrape.sku);
-              if (found) {
-                setSelectedProduct(found);
-                setActiveTab("inventory");
-              }
-              if (globalScrape.status === "Complete") {
-                openAutoFillModal(globalScrape.sku, true);
-              }
-            }}
-            title={globalScrape.status === "Complete" ? "Cliquez pour ouvrir la modale d'auto-remplissage et importer les données" : "Cliquez pour afficher les détails du produit"}
+            className="global-scrape-banner global-scrape-banner--inprogress"
+            title={`Scraping de ${globalScrape.sku} en cours : ${globalScrape.message}`}
           >
             <span className="scrape-spin-micro" />
             <span className="global-scrape-banner__text">
-              {globalScrape.status === "Complete" ? (
-                <span>🎉 Scraping terminé pour <strong>{globalScrape.sku}</strong> ! Cliquez pour importer ✨</span>
-              ) : globalScrape.status === "Failed" ? (
-                <span>⚠️ Échec pour <strong>{globalScrape.sku}</strong> ({globalScrape.message})</span>
-              ) : (
-                <span>⚡ Scraping : <strong>{globalScrape.sku}</strong> ({Math.round(globalScrape.progress * 100)}%) <span className="msg" style={{ opacity: 0.8, marginLeft: "4px" }}>- {globalScrape.message}</span></span>
-              )}
+              ⚡ Scraping : <strong>{globalScrape.sku}</strong> ({Math.round(globalScrape.progress * 100)}%) <span className="msg" style={{ opacity: 0.8, marginLeft: "4px" }}>- {globalScrape.message}</span>
             </span>
+          </div>
+        )}
+
+        {/* Bouton persistant : 1 résultat terminé en attente d'import */}
+        {completedScrapes.length === 1 && (
+          <div 
+            className={`global-scrape-banner global-scrape-banner--complete ${globalScrapeHighlighted ? "scrape-highlight-flash" : ""}`}
+            onClick={() => handleOpenScrapeItem(completedScrapes[0].sku)}
+            title="Cliquez pour ouvrir et importer les données scrapées"
+            style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: "8px", cursor: "pointer" }}
+          >
+            <span className="global-scrape-banner__text">
+              🎉 Scraping terminé pour <strong>{completedScrapes[0].sku}</strong> ! Cliquez pour importer ✨
+            </span>
+            <button
+              type="button"
+              onClick={(e) => handleDismissScrapeItem(completedScrapes[0].sku, e)}
+              title="Fermer cette notification"
+              style={{
+                background: "none",
+                border: "none",
+                color: "inherit",
+                cursor: "pointer",
+                padding: "0 4px",
+                fontSize: "14px",
+                lineHeight: 1,
+                opacity: 0.7,
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.7")}
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        {/* Bouton déroulant persistant : Plusieurs résultats terminés en attente d'import */}
+        {completedScrapes.length > 1 && (
+          <div style={{ position: "relative", display: "inline-block" }}>
+            <div 
+              className={`global-scrape-banner global-scrape-banner--complete ${globalScrapeHighlighted ? "scrape-highlight-flash" : ""}`}
+              onClick={() => setShowCompletedScrapesMenu(prev => !prev)}
+              title="Cliquez pour afficher les produits scrapés prêts à importer"
+              style={{ display: "inline-flex", alignItems: "center", gap: "8px", cursor: "pointer" }}
+            >
+              <span className="global-scrape-banner__text">
+                🎉 <strong>{completedScrapes.length} scrapings terminés</strong> prêts à importer ! ▾
+              </span>
+            </div>
+
+            {showCompletedScrapesMenu && (
+              <div 
+                className="global-scrape-dropdown"
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 6px)",
+                  left: "15px",
+                  zIndex: 9999,
+                  background: "var(--bg-secondary, #1e1e2d)",
+                  border: "1px solid rgba(255, 255, 255, 0.15)",
+                  borderRadius: "8px",
+                  boxShadow: "0 10px 30px rgba(0, 0, 0, 0.5)",
+                  minWidth: "300px",
+                  maxWidth: "380px",
+                  padding: "8px",
+                  backdropFilter: "blur(12px)",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 8px 8px", borderBottom: "1px solid rgba(255, 255, 255, 0.08)", fontSize: "12px", fontWeight: 600 }}>
+                  <span>Résultats prêts à importer ({completedScrapes.length})</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCompletedScrapes([]);
+                      setGlobalScrape(null);
+                      setShowCompletedScrapesMenu(false);
+                    }}
+                    style={{ background: "none", border: "none", color: "var(--text-muted, #888)", fontSize: "11px", cursor: "pointer" }}
+                  >
+                    Tout effacer
+                  </button>
+                </div>
+                <div style={{ maxHeight: "240px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "4px", marginTop: "6px" }}>
+                  {completedScrapes.map(item => (
+                    <div
+                      key={item.sku}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        padding: "6px 8px",
+                        borderRadius: "6px",
+                        background: "rgba(255, 255, 255, 0.03)",
+                        border: "1px solid rgba(255, 255, 255, 0.05)",
+                        fontSize: "12px",
+                      }}
+                    >
+                      <div>
+                        <strong style={{ color: "var(--text-primary, #fff)" }}>{item.sku}</strong>
+                        <span style={{ fontSize: "11px", opacity: 0.7, marginLeft: "6px" }}>({item.candidatesCount} candidats)</span>
+                      </div>
+                      <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{
+                            fontSize: "11px",
+                            padding: "2px 8px",
+                            height: "24px",
+                            backgroundColor: "rgba(16, 185, 129, 0.2)",
+                            borderColor: "rgba(16, 185, 129, 0.4)",
+                            color: "var(--success, #10b981)",
+                            fontWeight: 600,
+                          }}
+                          onClick={() => handleOpenScrapeItem(item.sku)}
+                        >
+                          ✨ Importer
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => handleDismissScrapeItem(item.sku, e)}
+                          title="Supprimer"
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "var(--text-muted, #888)",
+                            cursor: "pointer",
+                            fontSize: "14px",
+                            padding: "0 4px",
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Bannière en cas d'erreur de scraping */}
+        {globalScrape && globalScrape.status === "Failed" && completedScrapes.length === 0 && (
+          <div 
+            className="global-scrape-banner global-scrape-banner--failed"
+            title={globalScrape.message}
+            style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}
+          >
+            <span className="global-scrape-banner__text">
+              ⚠️ Échec pour <strong>{globalScrape.sku}</strong> ({globalScrape.message})
+            </span>
+            <button
+              type="button"
+              onClick={() => setGlobalScrape(null)}
+              style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: "14px" }}
+            >
+              ×
+            </button>
           </div>
         )}
 
@@ -2596,8 +3836,21 @@ function App() {
           {activeTab === "dashboard" && (
             <div style={{ flex: 1, overflowY: "auto" }}>
               <div className="dashboard-grid">
-                <div className="stat-card">
-                  <span className="label">Total Références</span>
+                <div 
+                  className="stat-card clickable-stat-card"
+                  onClick={() => {
+                    setCategoryFilter("all");
+                    setSubCategoryFilter("all");
+                    setSearchQuery("");
+                    setStockFilter("all");
+                    setActiveTab("inventory");
+                  }}
+                  title="Voir toutes les références dans l'inventaire"
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <span className="label">Total Références</span>
+                    <span style={{ fontSize: "12px", opacity: 0.5 }}>↗</span>
+                  </div>
                   <span className="value">{stats.total_references}</span>
                 </div>
                 <div className="stat-card">
@@ -2606,12 +3859,44 @@ function App() {
                     {stats.total_value.toLocaleString("fr-FR", { style: "currency", currency: "EUR" })}
                   </span>
                 </div>
-                <div className="stat-card" style={{ borderLeft: "4px solid var(--warning)" }}>
-                  <span className="label" style={{ color: "var(--warning)" }}>Stock Bas Alertes</span>
+                <div 
+                  className="stat-card clickable-stat-card stat-card-warning" 
+                  onClick={() => {
+                    setCategoryFilter("all");
+                    setSubCategoryFilter("all");
+                    setSearchQuery("");
+                    setStockFilter("low_stock");
+                    setActiveTab("inventory");
+                  }}
+                  title="Cliquer pour afficher les références en alerte de stock bas dans l'inventaire"
+                  style={{ borderLeft: "4px solid var(--warning)" }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <span className="label" style={{ color: "var(--warning)" }}>Stock Bas Alertes</span>
+                    <span style={{ fontSize: "11px", fontWeight: "600", color: "var(--warning)", backgroundColor: "rgba(245, 158, 11, 0.15)", padding: "2px 6px", borderRadius: "4px" }}>
+                      ↗ Voir
+                    </span>
+                  </div>
                   <span className="value" style={{ color: "var(--warning)" }}>{stats.low_stock_count}</span>
                 </div>
-                <div className="stat-card" style={{ borderLeft: "4px solid var(--danger)" }}>
-                  <span className="label" style={{ color: "var(--danger)" }}>Ruptures Totales</span>
+                <div 
+                  className="stat-card clickable-stat-card stat-card-danger" 
+                  onClick={() => {
+                    setCategoryFilter("all");
+                    setSubCategoryFilter("all");
+                    setSearchQuery("");
+                    setStockFilter("out_of_stock");
+                    setActiveTab("inventory");
+                  }}
+                  title="Cliquer pour afficher les références en rupture totale dans l'inventaire"
+                  style={{ borderLeft: "4px solid var(--danger)" }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <span className="label" style={{ color: "var(--danger)" }}>Ruptures Totales</span>
+                    <span style={{ fontSize: "11px", fontWeight: "600", color: "var(--danger)", backgroundColor: "rgba(239, 68, 68, 0.15)", padding: "2px 6px", borderRadius: "4px" }}>
+                      ↗ Voir
+                    </span>
+                  </div>
                   <span className="value" style={{ color: "var(--danger)" }}>{stats.out_of_stock_count}</span>
                 </div>
               </div>
@@ -2625,17 +3910,25 @@ function App() {
                       <div style={{ padding: "1.5rem", color: "var(--text-muted)" }}>Aucun mouvement enregistré.</div>
                     ) : (
                       stats.recent_movements.map((move, i) => (
-                        <div key={i} className="history-item">
+                        <div 
+                          key={i} 
+                          className="history-item clickable-history-item"
+                          onClick={() => handleNavigateToProduct(move.sku)}
+                          title={`Cliquer pour voir la référence ${move.sku} dans l'inventaire`}
+                        >
                           <div className="history-meta">
                             <span>{new Date(move.timestamp).toLocaleString("fr-FR")}</span>
                             <span>Par : <strong>{move.trigramme}</strong></span>
                           </div>
-                          <div>
-                            <strong>{move.sku}</strong> — {move.event_type === "STOCK_IN" ? "📥 Entrée" : "📤 Sortie"} de{" "}
-                            <strong style={{ color: move.event_type === "STOCK_IN" ? "var(--success)" : "var(--danger)" }}>
-                              {move.qty}
-                            </strong>{" "}
-                            unités ({move.note})
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <div>
+                              <strong>{move.sku}</strong> — {move.event_type === "STOCK_IN" ? "📥 Entrée" : "📤 Sortie"} de{" "}
+                              <strong style={{ color: move.event_type === "STOCK_IN" ? "var(--success)" : "var(--danger)" }}>
+                                {move.qty}
+                              </strong>{" "}
+                              unités ({move.note})
+                            </div>
+                            <span style={{ fontSize: "11px", color: "var(--text-muted)", marginLeft: "0.5rem" }}>↗</span>
                           </div>
                         </div>
                       ))
@@ -2751,7 +4044,13 @@ function App() {
   // Avoid unused variable compiler errors
 
   return (
-                          <div key={item.audit_id || i} className={`audit-item ${badgeClass}`} style={{ borderBottom: "1px solid var(--border-color)", padding: "0.5rem" }}>
+                          <div 
+                            key={item.audit_id || i} 
+                            className={`audit-item ${badgeClass} clickable-audit-item`} 
+                            onClick={() => handleNavigateToProduct(item.sku)}
+                            title={`Cliquer pour voir la référence ${item.sku} dans l'inventaire`}
+                            style={{ borderBottom: "1px solid var(--border-color)", padding: "0.5rem" }}
+                          >
                             <div className="audit-meta" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                               <div>
                                 <span className="audit-badge" style={{ marginRight: "0.4rem" }}>{badge}</span>
@@ -2759,8 +4058,11 @@ function App() {
                               </div>
                               <span className="audit-trigramme">Par : <strong>{item.trigramme}</strong></span>
                             </div>
-                            <div className="audit-content" style={{ marginTop: "0.2rem" }}>
-                              <strong>{item.sku}</strong> — {content}
+                            <div className="audit-content" style={{ marginTop: "0.2rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <div>
+                                <strong>{item.sku}</strong> — {content}
+                              </div>
+                              <span style={{ fontSize: "11px", color: "var(--text-muted)", marginLeft: "0.5rem" }}>↗</span>
                             </div>
                           </div>
                         );
@@ -2781,6 +4083,9 @@ function App() {
               renderProductTable={renderProductTable}
               selectedSkus={selectedSkus}
               setSelectedSkus={setSelectedSkus}
+              onImageHover={handleImageHover}
+              onImageLeave={() => setHoveredImage(null)}
+              syncCounter={syncCounter}
             />
           )}
 
@@ -2853,6 +4158,33 @@ function App() {
                   </select>
                 </div>
 
+                <div className="stock-filter-pills">
+                  <button
+                    type="button"
+                    className={`filter-pill ${stockFilter === "all" ? "active" : ""}`}
+                    onClick={() => setStockFilter("all")}
+                    title="Afficher toutes les références sans filtre de stock"
+                  >
+                    Tous ({products.length})
+                  </button>
+                  <button
+                    type="button"
+                    className={`filter-pill filter-pill-warning ${stockFilter === "low_stock" ? "active" : ""}`}
+                    onClick={() => setStockFilter(stockFilter === "low_stock" ? "all" : "low_stock")}
+                    title={stockFilter === "low_stock" ? "Cliquer pour réinitialiser le filtre" : "Filtrer uniquement les références en alerte de stock bas"}
+                  >
+                    ⚠️ Stock bas ({stats.low_stock_count})
+                  </button>
+                  <button
+                    type="button"
+                    className={`filter-pill filter-pill-danger ${stockFilter === "out_of_stock" ? "active" : ""}`}
+                    onClick={() => setStockFilter(stockFilter === "out_of_stock" ? "all" : "out_of_stock")}
+                    title={stockFilter === "out_of_stock" ? "Cliquer pour réinitialiser le filtre" : "Filtrer uniquement les références en rupture totale"}
+                  >
+                    🛑 Rupture ({stats.out_of_stock_count})
+                  </button>
+                </div>
+
                 <button 
                   type="button" 
                   className="btn" 
@@ -2880,7 +4212,9 @@ function App() {
                       profondeur: "",
                       poids: "",
                       notes: "",
-                      initial_stock: "0"
+                      initial_stock: "0",
+                      image_path: "",
+                      pdf_path: ""
                     });
                     setAutofillCodeInput("");
                     setAutofillType("mpn");
@@ -2890,36 +4224,57 @@ function App() {
                   ➕ Ajouter un SKU
                 </button>
 
-                <div style={{ position: "relative" }}>
+                <button 
+                  type="button" 
+                  className="btn btn-secondary" 
+                  style={{ padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", gap: "0.3rem" }}
+                  onClick={() => setShowColumnSettings(true)}
+                  title="Personnaliser les colonnes visibles et l'affichage"
+                >
+                  ⚙️ Colonnes
+                </button>
+
+                {sortColumn && (
                   <button 
                     type="button" 
                     className="btn btn-secondary" 
-                    style={{ padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", gap: "0.3rem" }}
-                    onClick={() => setShowColumnSettings(prev => !prev)}
+                    style={{
+                      padding: "0.4rem 0.8rem",
+                      fontSize: "12px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.4rem",
+                      borderColor: "var(--accent)",
+                      color: "var(--accent)",
+                      backgroundColor: "rgba(99, 102, 241, 0.1)",
+                    }}
+                    onClick={handleResetSort}
+                    title="Réinitialiser le tri et revenir à l'ordre par défaut"
                   >
-                    ⚙️ Colonnes
+                    <span>✕ Tri : <strong>{columns.find(c => c.id === sortColumn)?.label || sortColumn}</strong> ({sortDirection === "asc" ? "▲ croissant" : "▼ décroissant"})</span>
                   </button>
-                  {showColumnSettings && (
-                    <div className="column-settings-popover">
-                      <div style={{ fontWeight: 600, marginBottom: "0.5rem", borderBottom: "1px solid var(--border-color)", paddingBottom: "0.3rem" }}>
-                        Afficher les colonnes
-                      </div>
-                      {columns.map(col => (
-                        <label key={col.id} className="column-setting-item">
-                          <input
-                            type="checkbox"
-                            checked={col.visible}
-                            onChange={(e) => {
-                              const checked = e.target.checked;
-                              setColumns(prev => prev.map(c => c.id === col.id ? { ...c, visible: checked } : c));
-                            }}
-                          />
-                          {col.label}
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                )}
+
+                {stockFilter !== "all" && (
+                  <button 
+                    type="button" 
+                    className="btn btn-secondary" 
+                    style={{
+                      padding: "0.4rem 0.8rem",
+                      fontSize: "12px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.4rem",
+                      borderColor: stockFilter === "low_stock" ? "var(--warning)" : "var(--danger)",
+                      color: stockFilter === "low_stock" ? "var(--warning)" : "var(--danger)",
+                      backgroundColor: stockFilter === "low_stock" ? "rgba(245, 158, 11, 0.12)" : "rgba(239, 68, 68, 0.12)",
+                    }}
+                    onClick={() => setStockFilter("all")}
+                    title="Annuler le filtre de stock et réafficher toutes les références"
+                  >
+                    <span>✕ Filtre stock : <strong>{stockFilter === "low_stock" ? "Stock bas" : "Rupture"}</strong></span>
+                  </button>
+                )}
               </div>
               
               {isBatchRunning && (
@@ -3134,9 +4489,18 @@ function App() {
                       value={networkPathInput}
                       onChange={(e) => setNetworkPathInput(e.target.value)}
                       onBlur={() => triggerAutoSave()}
+                      placeholder={!isTauri() ? "Cliquez sur Parcourir pour sélectionner le dossier" : undefined}
+                      readOnly={!isTauri()}
+                      style={!isTauri() ? { cursor: "pointer", opacity: 0.85 } : undefined}
+                      onClick={!isTauri() ? pickNetworkDir : undefined}
                     />
                     <button type="button" className="btn btn-secondary" onClick={pickNetworkDir}>Parcourir</button>
                   </div>
+                  {!isTauri() && networkPathInput && (
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem", display: "block" }}>
+                      ℹ️ En mode navigateur, seul le nom du dossier est affiché (restriction de sécurité). Le dossier est bien connecté et fonctionnel.
+                    </span>
+                  )}
                 </div>
 
                 <div className="form-group">
@@ -3144,7 +4508,7 @@ function App() {
                   <input
                     id="settings-searx"
                     type="text"
-                    placeholder="ex: http://localhost:8080"
+                    placeholder="https://search.amify-studio.fr"
                     value={searxngUrlInput}
                     onChange={(e) => setSearxngUrlInput(e.target.value)}
                     onBlur={() => triggerAutoSave()}
@@ -3503,12 +4867,59 @@ function App() {
                   <div style={{ fontSize: "10px", color: "var(--text-muted)", marginTop: "0.5rem", fontStyle: "italic" }}>
                     ℹ️ Sans clé API, la récupération directe du site VPC est limitée ou simulée, avec fallback automatique sur SearxNG.
                   </div>
+
+                  {/* Option : Activer / Désactiver le mécanisme de fallback global */}
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--bg-tertiary)", padding: "0.75rem 1rem", borderRadius: "6px", border: "1px solid var(--border-color)", marginTop: "0.75rem" }}>
+                    <div>
+                      <div style={{ fontWeight: "600", fontSize: "12px", color: "var(--text-primary)" }}>
+                        Autoriser la recherche élargie (Fallback Web)
+                      </div>
+                      <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "2px" }}>
+                        Si activé, le scraping recherche sur tout le Web si le domaine configuré (ex: {vpcUrlsInput["RS"] || "fr.rs-online.com"}) ne renvoie pas de résultat. Si désactivé, seules les données du domaine strict sont retenues.
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      id="settings-enable-scrape-fallback"
+                      checked={enableScrapeFallbackInput}
+                      onChange={(e) => {
+                        const val = e.target.checked;
+                        setEnableScrapeFallbackInput(val);
+                        triggerAutoSave({ enable_scrape_fallback: val });
+                      }}
+                      style={{ width: "18px", height: "18px", cursor: "pointer", accentColor: "var(--accent)" }}
+                    />
+                  </div>
+                </div>
+
+                {/* Assistant Bookmarklet Navigateur */}
+                <div className="form-group" style={{ backgroundColor: "var(--bg-secondary)", padding: "1.2rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                    <span style={{ fontSize: "18px" }}>🌐</span>
+                    <label style={{ margin: 0, fontSize: "14px", fontWeight: "600", color: "var(--text-primary)" }}>
+                      Assistant de Scraping & Fournisseurs (Edge / Chrome)
+                    </label>
+                  </div>
+                  <p style={{ fontSize: "12px", color: "var(--text-secondary)", marginBottom: "1rem", lineHeight: "1.5" }}>
+                    En mode Web (session restreinte), ce favori 1-Clic extrait automatiquement les informations produit (titre, référence, prix, images, fiche technique) depuis le site de votre fournisseur sans nécessiter de droits administrateur.
+                  </p>
+
+                  <BookmarkletButton />
+
+                  <div style={{ fontSize: "11px", color: "var(--text-secondary)", backgroundColor: "var(--bg-tertiary)", padding: "0.75rem", borderRadius: "6px" }}>
+                    <div style={{ fontWeight: "600", marginBottom: "0.3rem", color: "var(--text-primary)" }}>💡 Comment l'utiliser :</div>
+                    <ol style={{ margin: 0, paddingLeft: "1.2rem", display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+                      <li>Sur la page de l'article chez votre fournisseur (RS, Farnell, Mouser...), cliquez sur votre favori <strong>« 📦 Capturer vers StockFlow »</strong> (un message de confirmation apparaît).</li>
+                      <li>Revenez dans StockFlow et ouvrez le formulaire d'article : cliquez sur <strong>« 📋 Coller fiche fournisseur »</strong> pour remplir instantanément la fiche !</li>
+                      <li style={{ color: "var(--accent)", fontWeight: "500" }}>👉 Astuce sans favori : sur la page fournisseur, faites simplement <strong>Ctrl+A puis Ctrl+C</strong>, puis cliquez directement sur <strong>« 📋 Coller fiche fournisseur »</strong> dans StockFlow (le texte brut est automatiquement reconnu et analysé).</li>
+                    </ol>
+                  </div>
                 </div>
 
                 <div className="form-group">
                   <label htmlFor="settings-pdf-rename">Convention de renommage PDF</label>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.5rem" }}>
-                    {["{SKU}", "{Brand}", "{MPN}", "{Type}"].map((badge) => (
+                    {["{SKU}", "{Brand}", "{MPN}", "{Description}", "{Type}"].map((badge) => (
                       <button
                         key={badge}
                         type="button"
@@ -3556,7 +4967,7 @@ function App() {
                 <div className="form-group">
                   <label htmlFor="settings-img-rename">Convention de renommage Images</label>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.5rem" }}>
-                    {["{SKU}", "{Index}", "{Brand}", "{MPN}", "{Source}", "{Date}"].map((badge) => (
+                    {["{SKU}", "{Index}", "{Brand}", "{MPN}", "{Description}", "{Source}", "{Date}"].map((badge) => (
                       <button
                         key={badge}
                         type="button"
@@ -3631,6 +5042,32 @@ function App() {
                     <option value="TTC">Toutes Taxes Comprises (TTC - 1.20 TVA)</option>
                   </select>
                   <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>Détermine si le prix récupéré sur internet doit être enregistré directement (HT) ou multiplié par 1.20 (TTC).</span>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="settings-hover-col">🖼️ Colonne d'affichage de l'image d'illustration au survol (Site-wide)</label>
+                  <select
+                    id="settings-hover-col"
+                    value={hoverColumnSetting}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setHoverColumnSetting(val);
+                      localStorage.setItem("sf_hover_preview_column", val);
+                    }}
+                  >
+                    <option value="all">🌐 Toutes les colonnes (Par défaut — survol de toute la ligne)</option>
+                    <option value="sku_label">🔗 Colonnes SKU et Désignation</option>
+                    <option value="sku">🏷️ Colonne SKU uniquement</option>
+                    <option value="label">📝 Colonne Désignation uniquement</option>
+                    <option value="mpn">🏭 Colonne Ref Fabricant (MPN) uniquement</option>
+                    <option value="vpc_code">🛒 Colonne Code VPC uniquement</option>
+                    <option value="brand">🏢 Colonne Marque uniquement</option>
+                    <option value="category">📁 Colonne Famille uniquement</option>
+                    <option value="none">🚫 Désactivé (Aucune image au survol)</option>
+                  </select>
+                  <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>
+                    Détermine sur quelle(s) colonne(s) le survol affiche l'image flottante. S'applique à tous les tableaux (inventaire, sélecteur et nomenclatures).
+                  </span>
                 </div>
 
                 <div style={{ fontSize: "12px", color: "var(--success)", display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "1rem", fontWeight: 500 }}>
@@ -3821,7 +5258,7 @@ function App() {
             onRevertAudit={handleRevertAudit}
             onClose={() => setSelectedProduct(null)}
             openAutoFillModal={openAutoFillModal}
-            onOpenEdit={() => prepareEditForm(selectedProduct)}
+            onOpenEdit={(tab) => prepareEditForm(selectedProduct, tab || "general")}
             onDeleteProduct={handleDeleteProduct}
             onDeleteMedia={handleDeleteMedia}
             onRenameMedia={handleRenameMedia}
@@ -3868,6 +5305,7 @@ function App() {
           successMessage={createSuccess}
           errorMessage={createError}
           duplicateWarning={duplicateWarning}
+          globalScrape={globalScrape}
         />
       )}
 
@@ -3875,6 +5313,7 @@ function App() {
       {showEditModal && (
         <ProductForm
           mode="edit"
+          initialTab={editInitialTab}
           productData={editProduct}
           setProductData={setEditProduct}
           vpcSite={editVpcSite}
@@ -3900,6 +5339,7 @@ function App() {
           autoFillChanges={autoFillChanges}
           successMessage={editSuccess}
           errorMessage={editError}
+          globalScrape={globalScrape}
         />
       )}
 
@@ -4240,13 +5680,201 @@ function App() {
         </div>
       )}
 
+      {/* Column & Display Settings Modal */}
+      {showColumnSettings && (
+        <div className="modal-overlay" style={{ zIndex: 1850 }} onClick={() => setShowColumnSettings(false)}>
+          <div 
+            className="modal-container" 
+            style={{ maxWidth: "680px", maxHeight: "90vh", display: "flex", flexDirection: "column" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3 style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: 0, fontSize: "16px" }}>
+                <span>⚙️</span>
+                <span>Affichage & Colonnes</span>
+              </h3>
+              <button 
+                type="button" 
+                className="modal-close" 
+                onClick={() => setShowColumnSettings(false)}
+                title="Fermer"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="modal-body" style={{ padding: "1.25rem 1.5rem", overflowY: "auto", display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+              
+              {/* SECTION: Image d'illustration au survol */}
+              <div style={{ backgroundColor: "var(--bg-primary)", padding: "1.1rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.4rem" }}>
+                  <span style={{ fontSize: "1.2rem" }}>🖼️</span>
+                  <label htmlFor="modal-hover-col-select" style={{ fontWeight: 600, fontSize: "14px", margin: 0, color: "var(--text-primary)" }}>
+                    Image d'illustration au survol (Site-wide)
+                  </label>
+                </div>
+                <p style={{ fontSize: "12px", color: "var(--text-secondary)", margin: "0 0 0.8rem 0", lineHeight: "1.4" }}>
+                  Choisissez au-dessus de quelle(s) colonne(s) afficher l'image flottante lorsque vous survolez un article. Cette règle s'applique à tous les tableaux du logiciel (inventaire, sélecteur et nomenclatures).
+                </p>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                  <select
+                    id="modal-hover-col-select"
+                    value={hoverColumnSetting}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setHoverColumnSetting(val);
+                      localStorage.setItem("sf_hover_preview_column", val);
+                    }}
+                    style={{
+                      padding: "0.5rem 0.8rem",
+                      borderRadius: "6px",
+                      border: "1px solid var(--border-color)",
+                      backgroundColor: "var(--bg-secondary)",
+                      color: "var(--text-primary)",
+                      fontSize: "13px",
+                      fontWeight: 500,
+                      cursor: "pointer"
+                    }}
+                  >
+                    <option value="all">🌐 Toutes les colonnes (Par défaut — survol libre de toute la ligne)</option>
+                    <option value="sku_label">🔗 Colonnes SKU et Désignation</option>
+                    <option value="sku">🏷️ Colonne SKU uniquement</option>
+                    <option value="label">📝 Colonne Désignation uniquement</option>
+                    <option value="mpn">🏭 Colonne Ref Fabricant (MPN) uniquement</option>
+                    <option value="vpc_code">🛒 Colonne Code VPC uniquement</option>
+                    <option value="brand">🏢 Colonne Marque uniquement</option>
+                    <option value="category">📁 Colonne Famille uniquement</option>
+                    <option value="none">🚫 Désactivé (Aucune image au survol)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* SECTION: Colonnes visibles inventaire */}
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
+                  <div>
+                    <h4 style={{ margin: 0, fontSize: "14px", fontWeight: 600, color: "var(--text-primary)" }}>
+                      Colonnes du tableau d'inventaire
+                    </h4>
+                    <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                      Cochez les colonnes que vous souhaitez afficher dans la vue tableau.
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: "0.4rem" }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ padding: "0.25rem 0.6rem", fontSize: "11px" }}
+                      onClick={() => {
+                        setColumns(prev => prev.map(c => ({ ...c, visible: true })));
+                      }}
+                    >
+                      Tout cocher
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ padding: "0.25rem 0.6rem", fontSize: "11px" }}
+                      onClick={() => {
+                        setColumns(prev => prev.map(c => c.id === "sku" ? c : { ...c, visible: false }));
+                      }}
+                    >
+                      Tout décocher
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ padding: "0.25rem 0.6rem", fontSize: "11px" }}
+                      onClick={() => {
+                        setColumns(DEFAULT_COLUMNS);
+                      }}
+                    >
+                      Réinitialiser
+                    </button>
+                    {sortColumn && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ padding: "0.25rem 0.6rem", fontSize: "11px", color: "var(--accent)", borderColor: "var(--accent)" }}
+                        onClick={handleResetSort}
+                        title="Réinitialiser le tri des colonnes"
+                      >
+                        Réinitialiser le tri
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div 
+                  style={{ 
+                    display: "grid", 
+                    gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", 
+                    gap: "0.6rem",
+                    backgroundColor: "var(--bg-primary)",
+                    padding: "1rem",
+                    borderRadius: "8px",
+                    border: "1px solid var(--border-color)",
+                    maxHeight: "320px",
+                    overflowY: "auto"
+                  }}
+                >
+                  {columns.map(col => (
+                    <label 
+                      key={col.id} 
+                      style={{ 
+                        display: "flex", 
+                        alignItems: "center", 
+                        gap: "0.5rem", 
+                        fontSize: "12.5px", 
+                        cursor: col.id === "sku" ? "default" : "pointer",
+                        padding: "0.35rem 0.5rem",
+                        borderRadius: "4px",
+                        backgroundColor: col.visible ? "rgba(var(--accent-rgb, 79, 70, 229), 0.08)" : "transparent",
+                        border: col.visible ? "1px solid rgba(var(--accent-rgb, 79, 70, 229), 0.25)" : "1px solid transparent",
+                        userSelect: "none"
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={col.visible}
+                        disabled={col.id === "sku"}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setColumns(prev => prev.map(c => c.id === col.id ? { ...c, visible: checked } : c));
+                        }}
+                        style={{ cursor: "pointer" }}
+                      />
+                      <span style={{ fontWeight: col.visible ? 500 : 400, color: col.visible ? "var(--text-primary)" : "var(--text-muted)" }}>
+                        {col.label}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+
+            <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button 
+                type="button" 
+                className="btn" 
+                onClick={() => setShowColumnSettings(false)}
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Hover Image Preview Overlay */}
-      {hoveredImage && (
+      {hoveredImage && !showAddModal && !showEditModal && !autoFillModalOpen && !alertModal && !confirmModal && !showPriceConfirmModal && !showDimensionConfirmModal && !showColumnSettings && (
         <div 
           className="hover-thumb-card" 
           style={{ top: hoverPosition.y, left: hoverPosition.x }}
         >
-          <img src={hoveredImage} alt="Preview" />
+          <img src={hoveredImage} alt="Preview" onError={() => setHoveredImage(null)} />
         </div>
       )}
 

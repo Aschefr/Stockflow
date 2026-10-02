@@ -143,6 +143,7 @@ fn update_product_attribute(sku: &str, key: &str, value: &str) {
 struct ProductDetails {
     sku: String,
     mpn: String,
+    label: String,
     brand: String,
     category: String,
     sub_category: String,
@@ -155,16 +156,17 @@ fn get_product_details(sku: &str) -> Result<ProductDetails, String> {
     
     let sku_upper = sku.to_uppercase();
     conn.query_row(
-        "SELECT sku, mpn, brand, category, sub_category, attributes FROM products WHERE sku = ?",
+        "SELECT sku, mpn, label, brand, category, sub_category, attributes FROM products WHERE sku = ?",
         [&sku_upper],
         |row| {
             Ok(ProductDetails {
                 sku: row.get(0)?,
                 mpn: row.get(1)?,
-                brand: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                category: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                sub_category: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                attributes: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                label: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                brand: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                category: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                sub_category: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                attributes: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
             })
         }
     ).map_err(|e| format!("Produit {} non trouvé : {}", sku, e))
@@ -172,6 +174,10 @@ fn get_product_details(sku: &str) -> Result<ProductDetails, String> {
 
 fn sanitize_folder_name(name: &str) -> String {
     crate::csv_importer::sanitize_folder_name(name, "INCONNU")
+}
+
+fn sanitize_folder_name_with_fallback(name: &str, fallback: &str) -> String {
+    crate::csv_importer::sanitize_folder_name(name, fallback)
 }
 
 // 1. Scraping des Prix
@@ -896,39 +902,72 @@ fn sanitize_link_text_for_filename(text: &str) -> String {
 fn detect_doc_type(url: &str, link_text: &str) -> String {
     let text_lower = link_text.to_lowercase();
     let url_lower = url.to_lowercase();
+    let combined = format!("{} {}", text_lower, url_lower);
 
-    // 1. Priority: check keywords in link_text or URL and map to standard french/english filenames
-    if text_lower.contains("fiche technique") || url_lower.contains("fiche-technique") || url_lower.contains("fiche_technique") || url_lower.contains("ft_") {
-        return "fiche_technique".to_string();
+    // 1. Guide rapide / Mise en service
+    if combined.contains("guide rapide") || combined.contains("quick start") || combined.contains("quickstart")
+        || combined.contains("quick guide") || combined.contains("guide_rapide") || combined.contains("mise en service rapide")
+        || combined.contains("qsg") || combined.contains("demarrage rapide") || combined.contains("démarrage rapide") {
+        return "guide_rapide".to_string();
     }
-    if text_lower.contains("datasheet") || text_lower.contains("data sheet") || url_lower.contains("datasheet") || url_lower.contains("data-sheet") {
-        return "datasheet".to_string();
+
+    // 2. Installation / Montage / Câblage
+    if combined.contains("installation") || combined.contains("montage") || combined.contains("assembly")
+        || combined.contains("mounting") || combined.contains("câblage") || combined.contains("cablage")
+        || combined.contains("wiring") || combined.contains("raccordement") || combined.contains("notice d'installation") {
+        return "installation".to_string();
     }
-    if text_lower.contains("manuel") || text_lower.contains("manual") || text_lower.contains("guide") || text_lower.contains("notice") || text_lower.contains("instructions") ||
-       url_lower.contains("manual") || url_lower.contains("notice") || url_lower.contains("guide") || url_lower.contains("user-") || url_lower.contains("user_") {
-        return "manuel".to_string();
+
+    // 3. Information Produit / Présentation / Flyer
+    if combined.contains("information produit") || combined.contains("informations produit")
+        || combined.contains("product information") || combined.contains("product_info")
+        || combined.contains("flyer") || combined.contains("plaquette") || combined.contains("aperçu")
+        || combined.contains("apercu") || combined.contains("overview") {
+        return "information_produit".to_string();
     }
-    if text_lower.contains("schéma") || text_lower.contains("schema") || text_lower.contains("wiring") || text_lower.contains("plan") ||
-       url_lower.contains("schema") || url_lower.contains("wiring") || url_lower.contains("plan") {
+
+    // 4. Schéma / Plan
+    if combined.contains("schéma") || combined.contains("schema") || combined.contains("wiring diagram")
+        || combined.contains("circuit diagram") || combined.contains("diagram") || combined.contains("plan")
+        || combined.contains("encombrement") || combined.contains("cad") || combined.contains("dimension") {
         return "schema".to_string();
     }
-    if text_lower.contains("certificat") || text_lower.contains("certificate") || text_lower.contains("declaration") || text_lower.contains("conform") || text_lower.contains("rohs") ||
-       url_lower.contains("certificate") || url_lower.contains("certif") || url_lower.contains("conform") || url_lower.contains("declaration") {
+
+    // 5. Certificat / Conformité
+    if combined.contains("certificat") || combined.contains("certificate") || combined.contains("declaration")
+        || combined.contains("déclaration") || combined.contains("conform") || combined.contains("rohs")
+        || combined.contains("reach") || combined.contains("atex") {
         return "certificat".to_string();
     }
-    if text_lower.contains("brochure") || text_lower.contains("catalogue") || text_lower.contains("catalog") || text_lower.contains("pub") ||
-       url_lower.contains("catalog") || url_lower.contains("brochure") || url_lower.contains("pub") {
+
+    // 6. Catalogue / Brochure
+    if combined.contains("catalogue") || combined.contains("catalog") || combined.contains("brochure")
+        || combined.contains("guide de choix") || combined.contains("selection guide") {
         return "catalogue".to_string();
     }
 
-    // 2. If no keywords found, try to use a sanitized version of the link text if reasonable
+    // 7. Manuel / Notice
+    if combined.contains("manuel") || combined.contains("manual") || combined.contains("user guide")
+        || combined.contains("guide utilisateur") || combined.contains("mode d'emploi")
+        || combined.contains("notice d'utilisation") || combined.contains("operating instructions")
+        || combined.contains("instruction manual") || combined.contains("handbook") || combined.contains("instructions") {
+        return "manuel".to_string();
+    }
+
+    // 8. Fiche technique / Datasheet
+    if combined.contains("fiche technique") || combined.contains("fiche-technique") || combined.contains("fiche_technique")
+        || combined.contains("ft_") || combined.contains("datasheet") || combined.contains("data sheet")
+        || combined.contains("caractéristique") || combined.contains("spec sheet") || combined.contains("specification") {
+        return "fiche_technique".to_string();
+    }
+
+    // 9. If no keywords found, try to use sanitized link text
     let clean_text = sanitize_link_text_for_filename(link_text);
     if clean_text != "document" && clean_text.len() >= 3 && clean_text.len() < 30 {
         return clean_text;
     }
 
-    // 3. Final default fallback
-    "document".to_string()
+    "datasheet".to_string()
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -950,6 +989,10 @@ pub struct ScrapedPdfCandidate {
     pub url: String,
     pub title: String,
     pub domain: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_type_label: Option<String>,
 }
 
 fn parse_last_modified_or_url_year(headers: &reqwest::header::HeaderMap, url: &str) -> DateTime<Utc> {
@@ -1569,13 +1612,15 @@ pub fn scrape_pdf_internal(
     let clean_category = sanitize_folder_name(&p.category);
     let clean_subcategory = sanitize_folder_name(&p.sub_category);
     let clean_sku = crate::db::sanitize_sku(&p.sku);
+    let clean_desc = sanitize_folder_name_with_fallback(&p.label, "");
+    let sku_folder = if clean_desc.is_empty() { clean_sku.clone() } else { format!("{} - {}", clean_sku, clean_desc) };
 
     let dest_dir = Path::new(network_path)
         .join("documents")
         .join(&clean_brand)
         .join(&clean_category)
         .join(&clean_subcategory)
-        .join(&clean_sku);
+        .join(&sku_folder);
 
     let mut unique_pdfs: Vec<DownloadedPdf> = Vec::new();
     // Ne PAS charger les PDFs locaux dans unique_pdfs pour suppression â€” on les conserve sauf remplacement explicite
@@ -1655,6 +1700,10 @@ pub fn scrape_pdf_internal(
             .replace("{SKU}", &clean_sku)
             .replace("{Brand}", &clean_brand)
             .replace("{MPN}", &crate::db::sanitize_sku(&p.mpn))
+            .replace("{Description}", &clean_desc)
+            .replace("{description}", &clean_desc)
+            .replace("{Designation}", &clean_desc)
+            .replace("{Label}", &clean_desc)
             .replace("{Type}", &unique_pdf.doc_type);
 
         let mut name = if !base_file_name.to_lowercase().ends_with(".pdf") {
@@ -1677,7 +1726,7 @@ pub fn scrape_pdf_internal(
 
         let relative_path = format!(
             "documents/{}/{}/{}/{}/{}",
-            clean_brand, clean_category, clean_subcategory, clean_sku, name
+            clean_brand, clean_category, clean_subcategory, sku_folder, name
         );
 
         if idx == 0 {
@@ -1989,10 +2038,24 @@ pub async fn search_pdf_candidates_internal(
     let candidates: Vec<ScrapedPdfCandidate> = candidate_links.into_iter().map(|(url, title)| {
         let domain = url.replace("https://", "").replace("http://", "")
             .split('/').next().unwrap_or("").to_string();
+        let dtype = detect_doc_type(&url, &title);
+        let label = match dtype.as_str() {
+            "guide_rapide" => "Guide rapide",
+            "installation" => "Installation",
+            "information_produit" => "Information Produit",
+            "schema" => "Schéma / Plan",
+            "certificat" => "Certificat",
+            "catalogue" => "Catalogue",
+            "manuel" => "Manuel",
+            "autre" => "Autre",
+            _ => "Fiche technique",
+        }.to_string();
         ScrapedPdfCandidate {
             url,
             title,
             domain,
+            doc_type: Some(dtype),
+            doc_type_label: Some(label),
         }
     }).collect();
 
@@ -2010,6 +2073,7 @@ pub fn save_selected_pdf_internal(
     let p = get_product_details(sku).unwrap_or_else(|_| ProductDetails {
         sku: sku.to_string(),
         mpn: String::new(),
+        label: String::new(),
         brand: String::new(),
         category: String::new(),
         sub_category: String::new(),
@@ -2059,34 +2123,33 @@ pub fn save_selected_pdf_internal(
     }
 
     let doc_type = if let Some(over) = doc_type_override {
-        if over == "datasheet" {
-            // Tenter d'extraire un nom plus descriptif du nom de fichier de l'URL si possible
-            let url_filename = Path::new(url)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|s| s.split('?').next()) // retirer les query params
-                .map(|s| s.trim_end_matches(".pdf").trim_end_matches(".PDF"))
-                .unwrap_or("datasheet");
-            
-            let clean_url_name = url_filename.replace(" ", "_").replace("/", "_").replace("\\", "_");
-            if clean_url_name.is_empty() || clean_url_name.to_lowercase() == "datasheet" || clean_url_name.len() < 3 {
-                "datasheet".to_string()
-            } else {
-                clean_url_name
-            }
+        let clean = over.trim().replace(" ", "_").replace("/", "_").replace("\\", "_");
+        if clean.is_empty() || clean.to_lowercase() == "datasheet" || clean.to_lowercase() == "document" {
+            detect_doc_type(url, "")
         } else {
-            let clean = over.trim().replace(" ", "_").replace("/", "_").replace("\\", "_");
-            if clean.is_empty() { "document".to_string() } else { clean }
+            clean
         }
     } else {
-        detect_doc_type(url, "Fiche Technique")
+        detect_doc_type(url, "")
     };
+
+    let clean_brand = sanitize_folder_name(&p.brand);
+    let clean_cat = sanitize_folder_name(&p.category);
+    let clean_subcat = sanitize_folder_name(&p.sub_category);
+    let clean_desc = sanitize_folder_name_with_fallback(&p.label, "");
+    let sku_folder = if clean_desc.is_empty() { clean_sku.clone() } else { format!("{} - {}", clean_sku, clean_desc) };
 
     let ext = "pdf";
     let formatted_name = rename_convention
         .replace("{SKU}", &clean_sku)
-        .replace("{Brand}", &sanitize_folder_name(&p.brand))
+        .replace("{Brand}", &clean_brand)
         .replace("{MPN}", &sanitize_folder_name(&p.mpn))
+        .replace("{Description}", &clean_desc)
+        .replace("{description}", &clean_desc)
+        .replace("{Designation}", &clean_desc)
+        .replace("{designation}", &clean_desc)
+        .replace("{Label}", &clean_desc)
+        .replace("{label}", &clean_desc)
         .replace("{Type}", &doc_type);
 
     let mut final_name = if formatted_name.to_lowercase().ends_with(".pdf") {
@@ -2095,16 +2158,12 @@ pub fn save_selected_pdf_internal(
         format!("{}.{}", formatted_name, ext)
     };
 
-    let clean_brand = sanitize_folder_name(&p.brand);
-    let clean_cat = sanitize_folder_name(&p.category);
-    let clean_subcat = sanitize_folder_name(&p.sub_category);
-
     let dest_dir = Path::new(network_path)
         .join("documents")
         .join(&clean_brand)
         .join(&clean_cat)
         .join(&clean_subcat)
-        .join(&clean_sku);
+        .join(&sku_folder);
 
     if let Err(e) = fs::create_dir_all(&dest_dir) {
         release_scrape_lock(network_path);
@@ -2128,7 +2187,7 @@ pub fn save_selected_pdf_internal(
 
     let relative_path = format!(
         "documents/{}/{}/{}/{}/{}",
-        clean_brand, clean_cat, clean_subcat, clean_sku, final_name
+        clean_brand, clean_cat, clean_subcat, sku_folder, final_name
     );
 
     if let Some(db_path) = crate::events::get_db_path() {
@@ -2424,6 +2483,7 @@ pub fn save_selected_images_internal(
     let p = get_product_details(sku).unwrap_or_else(|_| ProductDetails {
         sku: sku.to_string(),
         mpn: String::new(),
+        label: String::new(),
         brand: String::new(),
         category: String::new(),
         sub_category: String::new(),
@@ -2437,6 +2497,7 @@ pub fn save_selected_images_internal(
 
     let clean_sku = crate::db::sanitize_sku(&p.sku);
     let clean_brand = sanitize_folder_name(&p.brand);
+    let clean_desc = sanitize_folder_name_with_fallback(&p.label, "");
     let images_dir = Path::new(network_path).join("images");
     fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
 
@@ -2527,20 +2588,18 @@ pub fn save_selected_images_internal(
 
         if count == 1 {
             update_product_attribute(&clean_sku, "scrape_image_url", img_url);
-            let trigramme = crate::config::load_config_internal()
-                .map(|c| c.trigramme)
-                .unwrap_or_else(|| "SYS".to_string());
-            let _ = crate::events::write_audit_file(
-                network_path, &clean_sku, &trigramme, "SCRAPE_IMAGE",
-                None, None, Some(img_url),
-                Some(img_url),
-            );
         }
 
         let mut file_name = rename_convention
             .replace("{SKU}", &clean_sku)
             .replace("{Brand}", &clean_brand)
             .replace("{MPN}", &crate::db::sanitize_sku(&p.mpn))
+            .replace("{Description}", &clean_desc)
+            .replace("{description}", &clean_desc)
+            .replace("{Designation}", &clean_desc)
+            .replace("{designation}", &clean_desc)
+            .replace("{Label}", &clean_desc)
+            .replace("{label}", &clean_desc)
             .replace("{Index}", &count.to_string())
             .replace("{Source}", if vpc_site.is_empty() { "searxng" } else { &vpc_site })
             .replace("{Date}", &Utc::now().format("%Y%m%d").to_string());
@@ -2556,7 +2615,17 @@ pub fn save_selected_images_internal(
         let thumb_file = images_dir.join(format!("thumb_{}", file_name));
         let _ = thumb.save_with_format(&thumb_file, image::ImageFormat::Jpeg);
 
-        downloaded.push(format!("images/{}", file_name));
+        let rel_path = format!("images/{}", file_name);
+        downloaded.push(rel_path.clone());
+
+        let trigramme = crate::config::load_config_internal()
+            .map(|c| c.trigramme)
+            .unwrap_or_else(|| "SYS".to_string());
+        let _ = crate::events::write_audit_file(
+            network_path, &clean_sku, &trigramme, "SCRAPE_IMAGE",
+            Some("Image"), None, Some(&rel_path),
+            Some(img_url),
+        );
     }
 
     if downloaded.is_empty() {

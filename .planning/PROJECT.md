@@ -25,6 +25,9 @@ Les utilisateurs doivent pouvoir gérer leur inventaire industriel (références
 
 ### Active
 
+- [x] **WEB-01**: Architecture Dual-Target (Codebase unifiée pour Tauri .exe et distribution Standalone Web .html)
+- [x] **WEB-02**: Moteur Web d'événements JSON & projection IndexedDB avec File System Access API
+- [x] **WEB-03**: Packaging single-file `Stockflow.html` exécutable directement dans Microsoft Edge sans droits admin
 - [ ] **E2E-01**: Suite de tests E2E structurée avec fixtures réutilisables et helpers
 - [ ] **E2E-02**: Tests de cohérence données — chaque action utilisateur (création, modification, scraping) est vérifiée en lecture UI et en base
 - [ ] **E2E-03**: Tests d'états visuels — vérification que les éléments UI s'affichent correctement (modales, loading states, boutons désactivés, badges, colonnes)
