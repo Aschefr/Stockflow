@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { ScrapeProgressBadge } from "./ScrapeComponents";
 import { invoke, isTauri, resolveMediaSrc, preloadImage } from "./services/api";
+import { getProductVpcUrl } from "./utils/vpcUtils";
 
 interface Product {
   sku: string;
@@ -282,7 +283,7 @@ export function ProductDetailPanel({
   }
 
   const vpcCodeFull = getVpcCode(selectedProduct);
-  let vpcUrl = "";
+  let vpcUrl = getProductVpcUrl(selectedProduct);
   let vpcSiteName = "VPC";
   let vpcCodeVal = "";
 
@@ -291,13 +292,15 @@ export function ProductDetailPanel({
     vpcSiteName = idx !== -1 ? vpcCodeFull.substring(0, idx).trim() : "VPC";
     vpcCodeVal = idx !== -1 ? vpcCodeFull.substring(idx + 1).trim() : vpcCodeFull;
 
-    vpcUrl = `https://www.google.com/search?q=${encodeURIComponent(vpcCodeFull)}`;
-    if (vpcSiteName.toLowerCase() === "rs" || vpcSiteName.toLowerCase().includes("rs component") || vpcSiteName.toLowerCase().includes("rs online")) {
-      vpcUrl = `https://fr.rs-online.com/web/c/?searchTerm=${encodeURIComponent(vpcCodeVal)}`;
-    } else if (vpcSiteName.toLowerCase().includes("farnell")) {
-      vpcUrl = `https://fr.farnell.com/w/c/?st=${encodeURIComponent(vpcCodeVal)}`;
-    } else if (vpcSiteName.toLowerCase().includes("mouser")) {
-      vpcUrl = `https://www.mouser.fr/Search/Refine?Keyword=${encodeURIComponent(vpcCodeVal)}`;
+    if (!vpcUrl) {
+      vpcUrl = `https://www.google.com/search?q=${encodeURIComponent(vpcCodeFull)}`;
+      if (vpcSiteName.toLowerCase() === "rs" || vpcSiteName.toLowerCase().includes("rs component") || vpcSiteName.toLowerCase().includes("rs online")) {
+        vpcUrl = `https://fr.rs-online.com/web/c/?searchTerm=${encodeURIComponent(vpcCodeVal)}`;
+      } else if (vpcSiteName.toLowerCase().includes("farnell")) {
+        vpcUrl = `https://fr.farnell.com/w/c/?st=${encodeURIComponent(vpcCodeVal)}`;
+      } else if (vpcSiteName.toLowerCase().includes("mouser")) {
+        vpcUrl = `https://www.mouser.fr/Search/Refine?Keyword=${encodeURIComponent(vpcCodeVal)}`;
+      }
     }
   }
 

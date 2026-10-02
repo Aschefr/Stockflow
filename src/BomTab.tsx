@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { invoke, convertFileSrc, resolveMediaSrc, preloadImage, preloadMediaBatch, isTauri, openPath } from "./services/api";
 import { getCachedMediaUrl } from "./services/webFileSystem";
 import { createProductSearchMatcher } from "./utils/searchUtils";
+import { getProductVpcUrl } from "./utils/vpcUtils";
 import type { Product } from "./types";
 import * as XLSX from "xlsx-js-style";
 import jsPDF from "jspdf";
@@ -596,15 +597,14 @@ export default function BomTab({
   const getColumnValue = (item: BomItem, p: any, colId: string): any => {
     let vpcCode = "";
     let vpcName = "";
-    let vpcUrl = "";
     try {
       const attrs = typeof p?.attributes === "string" ? JSON.parse(p.attributes) : p?.attributes;
       if (attrs?.vpc) {
         vpcCode = Object.values(attrs.vpc)[0] as string;
         vpcName = Object.keys(attrs.vpc)[0] as string;
       }
-      vpcUrl = attrs?.scrape_price_url || attrs?.source_url || "";
     } catch (e) {}
+    const vpcUrl = getProductVpcUrl(p);
     const packSize = p?.pack_size || 1;
     const qteArrondie = Math.ceil(item.qty / packSize) * packSize;
 

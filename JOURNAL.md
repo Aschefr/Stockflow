@@ -5,6 +5,20 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.5.6] - 2026-10-02
+
+### Résolution Universelle des Liens d'Articles VPC & Tri
+- **Résolution Universelle du Lien Article VPC (`vpcUtils.ts`, `App.tsx`, `BomTab.tsx`, `ProductDetailPanel.tsx`) :**
+  - Création du module utilitaire centralisé `getProductVpcUrl(product)`.
+  - Résolution complète et priorisée :
+    1. Utilisation de l'URL directe si déjà présente (`scrape_price_url`, `source_url`, `vpc_url`).
+    2. En l'absence d'URL brute, génération automatique du lien direct vers l'article sur le catalogue du fournisseur à partir des informations de catalogue (`attrs.vpc`, ex: `RS: 519-724` ou `codeRS`). Prise en charge ciblée de RS Components / RS France (`fr.rs-online.com/web/c/?searchTerm=...`), Farnell, Mouser et Conrad selon les domaines configurés.
+  - La colonne « Lien VPC » du tableau d'inventaire principal et la colonne « Lien article VPC » de la Nomenclature affichent désormais fidèlement le lien cliquable pour tous les articles disposant d'une référence VPC.
+  - Prise en charge du tri de la colonne `vpc_url` dans `getProductSortValue`.
+  - Harmonisation complète avec le panneau de détails du produit (`ProductDetailPanel.tsx`).
+
+---
+
 ## [1.5.5] - 2026-10-02
 
 ### Renommage en Lot, Déblocage BOM, Opacité En-têtes, Auto-Resize & Persistance des Notes

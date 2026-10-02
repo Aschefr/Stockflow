@@ -11,6 +11,7 @@ import { APP_VERSION } from "./version";
 import { stripTrailingPunctuation } from "./services/webScraperService";
 import { createProductSearchMatcher } from "./utils/searchUtils";
 import { BatchEditModal } from "./BatchEditModal";
+import { getProductVpcUrl } from "./utils/vpcUtils";
 import "./App.css";
 interface AppConfig {
   trigramme: string;
@@ -142,6 +143,8 @@ function getProductSortValue(prod: Product, colId: string): string | number {
     }
     case "notes":
       return getAttribute(prod, colId) || "";
+    case "vpc_url":
+      return getProductVpcUrl(prod);
     default:
       return (prod as any)[colId] || "";
   }
@@ -3587,7 +3590,7 @@ function App() {
                                 displayValue = `${(prod.price * prod.current_stock).toFixed(2).replace(".", ",")} €`;
                                 rawValue = prod.price * prod.current_stock;
                               } else if (col.id === "vpc_url") {
-                                const vpcUrl = getAttribute(prod, "scrape_price_url") || getAttribute(prod, "source_url");
+                                const vpcUrl = getProductVpcUrl(prod);
                                 displayValue = vpcUrl ? (
                                   <a
                                     href={vpcUrl}
