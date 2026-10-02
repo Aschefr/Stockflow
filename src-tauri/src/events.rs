@@ -488,10 +488,11 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
             let status = p["status"].as_str().unwrap_or("DRAFT");
             let created_at = p["created_at"].as_str().unwrap_or("");
             let updated_at = p["updated_at"].as_str().unwrap_or("");
+            let equipment_note = p["equipment_note"].as_str().unwrap_or("");
 
             tx.execute(
-                "INSERT OR REPLACE INTO boms (id, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (bom_id, name, status, created_at, updated_at),
+                "INSERT OR REPLACE INTO boms (id, name, status, created_at, updated_at, equipment_note) VALUES (?, ?, ?, ?, ?, ?)",
+                (bom_id, name, status, created_at, updated_at, equipment_note),
             ).map_err(|e| e.to_string())?;
 
             tx.execute("DELETE FROM bom_items WHERE bom_id = ?", [bom_id]).map_err(|e| e.to_string())?;
@@ -500,9 +501,10 @@ fn apply_single_event_in_tx(tx: &Transaction, event: &Event) -> Result<(), Strin
                 for item in items {
                     let sku = item["sku"].as_str().unwrap_or("");
                     let qty = item["qty"].as_f64().unwrap_or(0.0);
+                    let note = item["note"].as_str().unwrap_or("");
                     tx.execute(
-                        "INSERT INTO bom_items (bom_id, sku, qty) VALUES (?, ?, ?)",
-                        (bom_id, sku, qty),
+                        "INSERT INTO bom_items (bom_id, sku, qty, note) VALUES (?, ?, ?, ?)",
+                        (bom_id, sku, qty, note),
                     ).map_err(|e| e.to_string())?;
                 }
             }

@@ -5,6 +5,31 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.5.5] - 2026-10-02
+
+### Renommage en Lot, Déblocage BOM, Opacité En-têtes, Auto-Resize & Persistance des Notes
+- **Outil de Modification et Renommage en Lot (`BatchEditModal.tsx`, `App.tsx`) :**
+  - Nouveau composant dédié permettant de renommer ou modifier en masse les données d'inventaire.
+  - Périmètres ajustables : Articles sélectionnés/cochés, Articles filtrés actuellement, ou Tout l'inventaire.
+  - Champs cibles : Famille, Sous-famille, Marque, Emplacement, Désignation (recherche de termes), Fournisseur VPC (renommage de distributeur), Notes / Remarques.
+  - Deux modes opératoires : Définition d'une valeur fixe (avec listes déroulantes pré-remplies des valeurs existantes) ou Recherche et Remplacement textuel (avec options de casse et de correspondance complète).
+  - Prévisualisation interactive en direct avec mise en évidence des changements (`oldValue ➔ newValue`) et barre de progression dynamique lors de l'application.
+- **Nomenclature : Retour d'état « Réservé » vers « Brouillon » (`BomTab.tsx`) :**
+  - Ajout du bouton d'action `🔓 Débloquer / Brouillon` sur les nomenclatures à l'état `RESERVED`.
+  - Émission ordonnée d'événements `STOCK_UNRESERVE` pour restituer immédiatement l'ensemble des composants réservés dans le stock disponible et repasser la nomenclature en `DRAFT`.
+- **Correction Critique de Persistance des Notes de Nomenclature (`src-tauri/src/events.rs`) :**
+  - Correction de l'insertion SQL dans `apply_single_event_in_tx` pour `BOM_SAVE` : prise en compte effective du champ `equipment_note` (Note / Équipement machine) et des notes d'articles (`note`), empêchant leur écrasement ou perte lors de la synchronisation d'événements.
+- **Opacité Totale de l'En-tête de Colonne Triée (`App.css`) :**
+  - Élimination de la transparence sur `th.sortable-th.is-sorted` : combinaison d'un fond solide `var(--bg-secondary)`, d'un léger dégradé d'accentuation et d'un `z-index: 12`, empêchant toute superposition gênante avec le tableau défilant.
+- **Dossier Partagé Réseau par Défaut en Mode Web / HTML (`webBackend.ts`, `App.tsx`) :**
+  - Le dossier partagé réseau est désormais nommé par défaut `"Stockflow"` et prévu à la racine, aux côtés de `StockFlow.html`. Textes explicatifs, placeholders et fallback initial alignés.
+- **Auto-redimensionnement de Colonne sur Double-Clic (`App.tsx`) :**
+  - Double-cliquer sur la poignée de redimensionnement (`.column-resize-handle`) d'une colonne de l'inventaire calcule et applique instantanément la largeur optimale selon la longueur maximale du texte de la colonne.
+- **Sélection de Texte Autorisée et Ergonomique (`App.css`) :**
+  - Activation ciblée de la sélection de texte (`user-select: text`) sur le volet de détail (fiche technique, historique), le tableau des nomenclatures, les cellules du tableau d'inventaire, les modales et journaux d'audit pour un copier-coller fluide, tout en préservant le verrouillage sur les boutons, en-têtes et poignées interactives.
+
+---
+
 ## [1.5.4] - 2026-10-02
 
 ### Cache Persistant des Médias, Survol 0 ms, Vignettes BOM & Ergonomie

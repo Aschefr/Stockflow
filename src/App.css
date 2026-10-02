@@ -526,13 +526,23 @@ table.spreadsheet th.sortable-th {
 }
 
 table.spreadsheet th.sortable-th:hover {
-  background-color: rgba(99, 102, 241, 0.06);
+  background: linear-gradient(rgba(99, 102, 241, 0.08), rgba(99, 102, 241, 0.08)), var(--bg-secondary);
   color: var(--text-primary);
 }
 
 table.spreadsheet th.sortable-th.is-sorted {
   color: var(--accent, #6366f1);
-  background-color: rgba(99, 102, 241, 0.1);
+  background-color: var(--bg-secondary);
+  background: linear-gradient(rgba(99, 102, 241, 0.16), rgba(99, 102, 241, 0.16)), var(--bg-secondary);
+  box-shadow: inset 0 -2px 0 var(--accent, #6366f1);
+  z-index: 12;
+  opacity: 1;
+}
+
+table.spreadsheet th.sortable-th.is-sorted:hover {
+  background-color: var(--bg-secondary);
+  background: linear-gradient(rgba(99, 102, 241, 0.22), rgba(99, 102, 241, 0.22)), var(--bg-secondary);
+  opacity: 1;
 }
 
 /* Custom column resizer handle */
@@ -2120,6 +2130,41 @@ table.spreadsheet tr.row-highlight-pulse > td {
   font-style: italic;
   user-select: none;
 }
+
+/* ==========================================================================
+   Text Selection Policies
+   ========================================================================== */
+.details-panel,
+.bom-container,
+.bom-table td,
+.bom-detail,
+.spreadsheet td:not(.selection-col),
+.modal-container,
+.audit-table,
+.product-info-grid,
+.selectable-text {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Interactive elements stay non-selectable to preserve UI feel */
+button,
+.btn,
+.tab-btn,
+.column-resize-handle,
+.card-drag-handle,
+.resizer,
+.selection-col,
+input[type="checkbox"],
+input[type="radio"],
+.badge,
+.panel-close,
+.modal-close,
+.sortable-th {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 
 
 

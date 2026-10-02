@@ -10,6 +10,7 @@ import { getCachedMediaUrl, initMediaCacheFromIndexedDb } from "./services/webFi
 import { APP_VERSION } from "./version";
 import { stripTrailingPunctuation } from "./services/webScraperService";
 import { createProductSearchMatcher } from "./utils/searchUtils";
+import { BatchEditModal } from "./BatchEditModal";
 import "./App.css";
 interface AppConfig {
   trigramme: string;
@@ -422,10 +423,55 @@ function App() {
     document.addEventListener("mouseup", handleMouseUp);
   };
 
+  const handleDoubleClickResize = (e: React.MouseEvent, colId: string, currentProducts?: Product[]) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const col = columns.find(c => c.id === colId);
+    if (!col) return;
+
+    let maxCharLen = col.label ? col.label.length : 5;
+    const itemsToCheck = currentProducts && currentProducts.length > 0 ? currentProducts : products;
+
+    for (const prod of itemsToCheck) {
+      let valStr = "";
+      if (colId === "sku") valStr = prod.sku || "";
+      else if (colId === "mpn") valStr = prod.mpn || "";
+      else if (colId === "vpc_code") valStr = getVpcCode(prod) || "";
+      else if (colId === "brand") valStr = prod.brand || "";
+      else if (colId === "category") valStr = prod.category || "";
+      else if (colId === "sub_category") valStr = prod.sub_category || "";
+      else if (colId === "label") valStr = prod.label || "";
+      else if (colId === "location") valStr = prod.location || "";
+      else if (["largeur", "hauteur", "profondeur", "poids", "notes"].includes(colId)) valStr = getAttribute(prod, colId) || "";
+      else if (colId === "current_stock") valStr = String(prod.current_stock ?? "");
+      else if (colId === "min_stock") valStr = String(prod.min_stock ?? "");
+      else if (colId === "price") {
+        valStr = prod.pack_size > 1 
+          ? `${prod.price.toFixed(2).replace(".", ",")} € (Lot ${prod.pack_size})` 
+          : `${prod.price.toFixed(2).replace(".", ",")} €`;
+      } else if (colId === "pack_size") valStr = String(prod.pack_size ?? "");
+      else if (colId === "total_value") valStr = `${((prod.price || 0) * (prod.current_stock || 0)).toFixed(2).replace(".", ",")} €`;
+
+      if (valStr.length > maxCharLen) {
+        maxCharLen = valStr.length;
+      }
+    }
+
+    const autoWidth = Math.min(650, Math.max(70, Math.round(maxCharLen * 8.5 + 32)));
+    setColumns(prev => prev.map(c => c.id === colId ? { ...c, width: autoWidth } : c));
+  };
+
+  const [showBatchEditModal, setShowBatchEditModal] = useState(false);
+  const [batchEditInitialScope, setBatchEditInitialScope] = useState<"selected" | "filtered" | "all">("selected");
+  const openBatchEditModal = (targetScope?: "selected" | "filtered" | "all") => {
+    setBatchEditInitialScope(targetScope || (selectedSkus.length > 0 ? "selected" : "filtered"));
+    setShowBatchEditModal(true);
+  };
+
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [trigrammeInput, setTrigrammeInput] = useState("");
-  const [networkPathInput, setNetworkPathInput] = useState("");
+  const [networkPathInput, setNetworkPathInput] = useState(() => isTauri() ? "" : "Stockflow");
   const [searxngUrlInput, setSearxngUrlInput] = useState("https://search.amify-studio.fr");
   const [vpcSitesInput, setVpcSitesInput] = useState<string[]>([]);
   const [vpcKeysInput, setVpcKeysInput] = useState<Record<string, string>>({});
@@ -3190,7 +3236,9 @@ function App() {
           </div>
 
           <div className="form-group">
-            <label htmlFor="network-path">Chemin du dossier réseau partagé (ex: Z:\Stockflow)</label>
+            <label htmlFor="network-path">
+              {!isTauri() ? "Dossier réseau partagé (dossier 'Stockflow' à la racine)" : "Chemin du dossier réseau partagé (ex: Z:\\Stockflow)"}
+            </label>
             <div className="input-with-button">
               <input
                 id="network-path"
@@ -3198,18 +3246,18 @@ function App() {
                 required
                 value={networkPathInput}
                 onChange={(e) => setNetworkPathInput(e.target.value)}
-                placeholder={!isTauri() ? "Cliquez sur Parcourir pour sélectionner le dossier" : "Entrez ou sélectionnez le chemin"}
+                placeholder={!isTauri() ? "Stockflow (dossier à la racine de StockFlow.html)" : "Entrez ou sélectionnez le chemin"}
                 readOnly={!isTauri()}
-                style={!isTauri() ? { cursor: "pointer", opacity: 0.85 } : undefined}
+                style={!isTauri() ? { cursor: "pointer", opacity: 0.9 } : undefined}
                 onClick={!isTauri() ? pickNetworkDir : undefined}
               />
               <button type="button" className="btn btn-secondary" onClick={pickNetworkDir}>
                 Parcourir
               </button>
             </div>
-            {!isTauri() && networkPathInput && (
+            {!isTauri() && (
               <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem", display: "block" }}>
-                ℹ️ En mode navigateur, seul le nom du dossier est affiché (restriction de sécurité). Le dossier est bien connecté et fonctionnel.
+                ℹ️ Par défaut, le dossier partagé réseau est nommé "Stockflow" et doit se trouver à la racine (au même niveau que StockFlow.html). Cliquez sur Parcourir pour sélectionner et autoriser l'accès.
               </span>
             )}
           </div>
@@ -3359,7 +3407,9 @@ function App() {
                     <div
                       className="column-resize-handle"
                       onMouseDown={(e) => handleMouseDown(e, col.id)}
+                      onDoubleClick={(e) => handleDoubleClickResize(e, col.id, finalProducts)}
                       onClick={(e) => e.stopPropagation()}
+                      title="Double-clic pour auto-dimensionner la colonne"
                     />
                   </th>
                 );
@@ -4158,6 +4208,16 @@ function App() {
                     <button
                       type="button"
                       className="btn btn-secondary"
+                      style={{ padding: "0.3rem 0.8rem", fontSize: "11px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                      onClick={() => openBatchEditModal("selected")}
+                      disabled={isBatchRunning}
+                      title="Modifier ou renommer en lot les éléments sélectionnés"
+                    >
+                      ✏️ Modifier en lot
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
                       style={{ padding: "0.3rem 0.6rem", fontSize: "11px" }}
                       onClick={() => setSelectedSkus([])}
                       disabled={isBatchRunning}
@@ -4225,10 +4285,20 @@ function App() {
                   </button>
                 </div>
 
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ marginLeft: "auto", marginRight: "0.5rem", padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", gap: "0.3rem" }}
+                  onClick={() => openBatchEditModal(selectedSkus.length > 0 ? "selected" : "filtered")}
+                  title="Modifier ou renommer en lot (familles, sous-familles, marques, fournisseurs, termes de description...)"
+                >
+                  ✏️ Modifier en lot
+                </button>
+
                 <button 
                   type="button" 
                   className="btn" 
-                  style={{ marginLeft: "auto", marginRight: "0.5rem", padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", gap: "0.3rem" }}
+                  style={{ marginRight: "0.5rem", padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", gap: "0.3rem" }}
                   onClick={() => {
                     setCreateSuccess("");
                     setCreateError("");
@@ -4520,7 +4590,9 @@ function App() {
                 </div>
                 
                 <div className="form-group">
-                  <label htmlFor="settings-net">Chemin du dossier réseau partagé</label>
+                  <label htmlFor="settings-net">
+                    {!isTauri() ? "Dossier réseau partagé (dossier 'Stockflow' à la racine)" : "Chemin du dossier réseau partagé"}
+                  </label>
                   <div className="input-with-button">
                     <input
                       id="settings-net"
@@ -4529,16 +4601,16 @@ function App() {
                       value={networkPathInput}
                       onChange={(e) => setNetworkPathInput(e.target.value)}
                       onBlur={() => triggerAutoSave()}
-                      placeholder={!isTauri() ? "Cliquez sur Parcourir pour sélectionner le dossier" : undefined}
+                      placeholder={!isTauri() ? "Stockflow (dossier à la racine de StockFlow.html)" : undefined}
                       readOnly={!isTauri()}
-                      style={!isTauri() ? { cursor: "pointer", opacity: 0.85 } : undefined}
+                      style={!isTauri() ? { cursor: "pointer", opacity: 0.9 } : undefined}
                       onClick={!isTauri() ? pickNetworkDir : undefined}
                     />
                     <button type="button" className="btn btn-secondary" onClick={pickNetworkDir}>Parcourir</button>
                   </div>
-                  {!isTauri() && networkPathInput && (
+                  {!isTauri() && (
                     <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem", display: "block" }}>
-                      ℹ️ En mode navigateur, seul le nom du dossier est affiché (restriction de sécurité). Le dossier est bien connecté et fonctionnel.
+                      ℹ️ Par défaut, le dossier partagé réseau est nommé "Stockflow" et doit se trouver à la racine (au même niveau que StockFlow.html). Cliquez sur Parcourir pour reconnecter ou choisir un autre dossier.
                     </span>
                   )}
                 </div>
@@ -5392,6 +5464,25 @@ function App() {
           successMessage={editSuccess}
           errorMessage={editError}
           globalScrape={globalScrape}
+        />
+      )}
+
+      {/* Batch Edit & Rename Modal */}
+      {showBatchEditModal && (
+        <BatchEditModal
+          isOpen={showBatchEditModal}
+          onClose={() => setShowBatchEditModal(false)}
+          products={products}
+          filteredProducts={filteredProducts}
+          selectedSkus={selectedSkus}
+          config={config}
+          initialScope={batchEditInitialScope}
+          onComplete={async () => {
+            if (config) {
+              await syncAndFetch(config);
+            }
+            showToast("Modification en lot terminée avec succès !", "success");
+          }}
         />
       )}
 

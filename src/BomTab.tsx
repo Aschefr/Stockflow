@@ -456,6 +456,44 @@ export default function BomTab({
     }
   };
 
+  const handleUnreserve = async () => {
+    if (!editingBom || editingBom.status !== "RESERVED") return;
+    if (!window.confirm("Êtes-vous sûr de vouloir annuler la réservation et repasser cette nomenclature en statut Brouillon (Draft) ? Les quantités actuellement réservées seront libérées dans le stock.")) {
+      return;
+    }
+
+    try {
+      if (Array.isArray(editingBom.items)) {
+        for (const item of editingBom.items) {
+          await invoke("add_movement", {
+            networkPath,
+            trigramme,
+            eventType: "STOCK_UNRESERVE",
+            sku: item.sku,
+            qty: item.qty,
+            note: `Annulation réservation (retour Brouillon): ${editingBom.name}`
+          });
+        }
+      }
+
+      const updatedBom = { ...editingBom, status: "DRAFT", updated_at: new Date().toISOString() };
+      await invoke("save_bom", {
+        networkPath,
+        trigramme,
+        bomId: updatedBom.id,
+        name: updatedBom.name,
+        status: updatedBom.status,
+        equipmentNote: updatedBom.equipment_note || "",
+        items: updatedBom.items
+      });
+
+      setEditingBom(updatedBom);
+      setTimeout(fetchBoms, 1500);
+    } catch (e) {
+      alert("Erreur lors de l'annulation de la réservation: " + e);
+    }
+  };
+
   const handleWithdraw = async () => {
     if (!editingBom) return;
     try {
@@ -1188,6 +1226,16 @@ export default function BomTab({
           {!isLocked && <button className="btn" onClick={() => setIsPickerOpen(true)}>➕ Ajouter des articles</button>}
           <button className="btn" onClick={handleSaveDraft} disabled={isLocked}>💾 Enregistrer</button>
           {editingBom.status === "DRAFT" && <button className="btn btn-secondary" onClick={handleReserve}>🔒 Réserver</button>}
+          {editingBom.status === "RESERVED" && (
+            <button 
+              className="btn btn-secondary" 
+              onClick={handleUnreserve}
+              style={{ borderColor: "var(--warning, #f59e0b)", color: "var(--warning, #f59e0b)" }}
+              title="Libérer les quantités réservées et repasser la nomenclature en statut Brouillon"
+            >
+              🔓 Débloquer / Brouillon
+            </button>
+          )}
           {editingBom.status !== "COMPLETED" && (
             <button 
               className="btn btn-secondary" 

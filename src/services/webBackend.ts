@@ -92,8 +92,10 @@ export class WebBackend {
         }
 
         if (cfg) {
-          if (dirHandle && (!cfg.network_path || cfg.network_path === "")) {
+          if (dirHandle && (!cfg.network_path || cfg.network_path === "" || cfg.network_path === "Stockflow")) {
             cfg.network_path = `📂 ${dirHandle.name} (connecté)`;
+          } else if (!cfg.network_path) {
+            cfg.network_path = "Stockflow";
           }
           if (!cfg.searxng_url) {
             cfg.searxng_url = "https://search.amify-studio.fr";
@@ -109,7 +111,7 @@ export class WebBackend {
 
         const defaultCfg: AppConfig = {
           trigramme: "WEB",
-          network_path: dirHandle ? `📂 ${dirHandle.name} (connecté)` : "",
+          network_path: dirHandle ? `📂 ${dirHandle.name} (connecté)` : "Stockflow",
           theme: "dark",
           searxng_url: "https://search.amify-studio.fr",
           searxng_urls: [],
