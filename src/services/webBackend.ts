@@ -92,10 +92,8 @@ export class WebBackend {
         }
 
         if (cfg) {
-          if (dirHandle && (!cfg.network_path || cfg.network_path === "" || cfg.network_path === "Stockflow")) {
+          if (dirHandle && (!cfg.network_path || cfg.network_path === "")) {
             cfg.network_path = `📂 ${dirHandle.name} (connecté)`;
-          } else if (!cfg.network_path) {
-            cfg.network_path = "Stockflow";
           }
           if (!cfg.searxng_url) {
             cfg.searxng_url = "https://search.amify-studio.fr";
@@ -111,7 +109,7 @@ export class WebBackend {
 
         const defaultCfg: AppConfig = {
           trigramme: "WEB",
-          network_path: dirHandle ? `📂 ${dirHandle.name} (connecté)` : "Stockflow",
+          network_path: dirHandle ? `📂 ${dirHandle.name} (connecté)` : "",
           theme: "dark",
           searxng_url: "https://search.amify-studio.fr",
           searxng_urls: [],
@@ -124,6 +122,7 @@ export class WebBackend {
           vpc_api_keys: {},
           vpc_urls: {},
           enable_scrape_fallback: true,
+          sync_interval_seconds: 60,
         };
         localStorage.setItem("stockflow_config", JSON.stringify(defaultCfg));
         return defaultCfg;
@@ -148,6 +147,7 @@ export class WebBackend {
           enable_scrape_fallback: raw.enable_scrape_fallback !== undefined ? raw.enable_scrape_fallback : (raw.enableScrapeFallback ?? true),
           auto_backup_enabled: raw.auto_backup_enabled,
           backup_interval_hours: raw.backup_interval_hours,
+          sync_interval_seconds: raw.syncIntervalSeconds ?? raw.sync_interval_seconds ?? 60,
         };
         await idbPut("config", { key: "app_config", value: cfg });
         localStorage.setItem("stockflow_config", JSON.stringify(cfg));

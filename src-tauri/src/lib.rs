@@ -38,6 +38,7 @@ fn save_config(
     price_tax_type: Option<String>,
     vpc_api_keys: std::collections::HashMap<String, String>,
     vpc_urls: std::collections::HashMap<String, String>,
+    sync_interval_seconds: Option<u64>,
 ) -> Result<(), String> {
     let clean_trigramme = trigramme.trim().to_uppercase();
     if clean_trigramme.len() != 3 {
@@ -61,6 +62,7 @@ fn save_config(
         price_tax_type,
         vpc_api_keys,
         vpc_urls,
+        sync_interval_seconds: Some(sync_interval_seconds.unwrap_or(60)),
     };
     
     // Initialiser les dossiers réseau

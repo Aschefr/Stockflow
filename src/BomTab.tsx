@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke, convertFileSrc, resolveMediaSrc, preloadImage, preloadMediaBatch } from "./services/api";
+import { invoke, convertFileSrc, resolveMediaSrc, preloadImage, preloadMediaBatch, isTauri, openPath } from "./services/api";
 import { getCachedMediaUrl } from "./services/webFileSystem";
 import { createProductSearchMatcher } from "./utils/searchUtils";
 import type { Product } from "./types";
@@ -80,7 +80,8 @@ const ALL_AVAILABLE_COLUMNS: Record<string, string> = {
   qty: "Qté Nette",
   roundedQty: "Qté à Commander (Arrondie)",
   vpcCode: "Code VPC",
-  vpcName: "Fournisseur VPC"
+  vpcName: "Fournisseur VPC",
+  vpcUrl: "Lien article VPC"
 };
 
 const COLUMN_HEADERS: Record<string, string> = {
@@ -101,7 +102,8 @@ const COLUMN_HEADERS: Record<string, string> = {
   qty: "Qté",
   roundedQty: "Qté Arrondie",
   vpcCode: "Code VPC",
-  vpcName: "Fournisseur VPC"
+  vpcName: "Fournisseur VPC",
+  vpcUrl: "Lien VPC"
 };
 
 interface BomThumbnailCellProps {
@@ -594,12 +596,14 @@ export default function BomTab({
   const getColumnValue = (item: BomItem, p: any, colId: string): any => {
     let vpcCode = "";
     let vpcName = "";
+    let vpcUrl = "";
     try {
       const attrs = typeof p?.attributes === "string" ? JSON.parse(p.attributes) : p?.attributes;
       if (attrs?.vpc) {
         vpcCode = Object.values(attrs.vpc)[0] as string;
         vpcName = Object.keys(attrs.vpc)[0] as string;
       }
+      vpcUrl = attrs?.scrape_price_url || attrs?.source_url || "";
     } catch (e) {}
     const packSize = p?.pack_size || 1;
     const qteArrondie = Math.ceil(item.qty / packSize) * packSize;
@@ -623,6 +627,7 @@ export default function BomTab({
       case "roundedQty": return qteArrondie;
       case "vpcCode": return vpcCode;
       case "vpcName": return vpcName;
+      case "vpcUrl": return vpcUrl;
       default: return "";
     }
   };
@@ -1878,6 +1883,45 @@ export default function BomTab({
                                 cellStyle={cellStyle}
                                 onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "image", p)}
                               />
+                            );
+                          }
+                          case "vpcUrl": {
+                            const val = getColumnValue(item, p, col.id);
+                            const url = (val || "").toString().trim();
+                            return (
+                              <td 
+                                key={col.id} 
+                                style={cellStyle}
+                                title={url}
+                                onMouseMove={(e) => handleItemImageHover(e, p?.image_path, col.id, p)}
+                              >
+                                {url ? (
+                                  <a
+                                    href={url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (isTauri()) {
+                                        e.preventDefault();
+                                        openPath(url);
+                                      }
+                                    }}
+                                    style={{
+                                      color: "var(--accent)",
+                                      textDecoration: "underline",
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: "4px",
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    🔗 Voir l'article
+                                  </a>
+                                ) : (
+                                  <span style={{ color: "var(--text-muted)", opacity: 0.5 }}>-</span>
+                                )}
+                              </td>
                             );
                           }
                           default: {

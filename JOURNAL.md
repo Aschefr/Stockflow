@@ -21,10 +21,22 @@ Ne pas oublier de le remplir pendant le developpement.
   - Correction de l'insertion SQL dans `apply_single_event_in_tx` pour `BOM_SAVE` : prise en compte effective du champ `equipment_note` (Note / Équipement machine) et des notes d'articles (`note`), empêchant leur écrasement ou perte lors de la synchronisation d'événements.
 - **Opacité Totale de l'En-tête de Colonne Triée (`App.css`) :**
   - Élimination de la transparence sur `th.sortable-th.is-sorted` : combinaison d'un fond solide `var(--bg-secondary)`, d'un léger dégradé d'accentuation et d'un `z-index: 12`, empêchant toute superposition gênante avec le tableau défilant.
-- **Dossier Partagé Réseau par Défaut en Mode Web / HTML (`webBackend.ts`, `App.tsx`) :**
-  - Le dossier partagé réseau est désormais nommé par défaut `"Stockflow"` et prévu à la racine, aux côtés de `StockFlow.html`. Textes explicatifs, placeholders et fallback initial alignés.
+- **Dossier Partagé Réseau en Mode Web / HTML (`webBackend.ts`, `App.tsx`) :**
+  - Ajustement du comportement au premier lancement : le système n'impose pas de chemin en dur et recherche en priorité le dossier `Stockflow` à la racine si présent, tout en laissant toujours la main à l'utilisateur pour le localiser via « Parcourir ».
+- **Sous-Menu Déroulant dans le Header pour Alléger la Barre d'Outils (`App.tsx`, `App.css`) :**
+  - Déplacement des filtres par stock (Tous, Stock bas, Rupture totale) et de l'outil de modification en lot dans un nouveau menu déroulant accessible directement depuis l'en-tête de l'application (`📦 Filtres & Outils ▾`).
+  - Suppression de l'encombrement horizontal dans la barre d'outils du tableau d'inventaire : plus de 400px libérés, supprimant tout tassement ou rétrécissement forcé lorsque le volet latéral de détail est ouvert.
 - **Auto-redimensionnement de Colonne sur Double-Clic (`App.tsx`) :**
   - Double-cliquer sur la poignée de redimensionnement (`.column-resize-handle`) d'une colonne de l'inventaire calcule et applique instantanément la largeur optimale selon la longueur maximale du texte de la colonne.
+- **Colonne Lien vers l'Article VPC (`BomTab.tsx`, `App.tsx`) :**
+  - Ajout de la colonne « Lien article VPC » (`vpcUrl`) disponible dans les options d'affichage de la Nomenclature (`⚙️ Affichage`), l'export Excel Achat et l'export PDF.
+  - Résolution dynamique de l'URL fournisseur depuis les attributs du produit (`scrape_price_url` ou `source_url`).
+  - Affichage sous forme de lien interactif direct `🔗 Voir l'article` (avec ouverture native via le navigateur système par `openPath` sous Tauri ou onglet standard sous Web).
+  - Ajout symétrique de la colonne « Lien VPC » (`vpc_url`) configurable dans le tableau principal d'inventaire.
+- **Intervalle de Synchronisation Réseau Configurable (`App.tsx`, `config.rs`, `lib.rs`, `webBackend.ts`) :**
+  - Ajout d'un paramètre « Temps entre deux synchronisations réseau » dans l'onglet Paramètres (`sync_interval_seconds`).
+  - Passage de la valeur par défaut de 15 secondes à 1 minute (60 secondes), réduisant la charge réseau et disque tout en restant réactif.
+  - Sauvegarde et application dynamique sans rechargement de page, avec mise à jour immédiate du timer de scrutation en arrière-plan.
 - **Sélection de Texte Autorisée et Ergonomique (`App.css`) :**
   - Activation ciblée de la sélection de texte (`user-select: text`) sur le volet de détail (fiche technique, historique), le tableau des nomenclatures, les cellules du tableau d'inventaire, les modales et journaux d'audit pour un copier-coller fluide, tout en préservant le verrouillage sur les boutons, en-têtes et poignées interactives.
 

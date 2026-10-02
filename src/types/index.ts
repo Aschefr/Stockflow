@@ -87,6 +87,7 @@ export interface AppConfig {
   enable_scrape_fallback?: boolean;
   auto_backup_enabled?: boolean;
   backup_interval_hours?: number;
+  sync_interval_seconds?: number;
 }
 
 export interface StockflowEvent {

@@ -26,6 +26,7 @@ interface AppConfig {
   vpc_api_keys?: Record<string, string>;
   vpc_urls?: Record<string, string>;
   enable_scrape_fallback?: boolean;
+  sync_interval_seconds?: number;
 }
 
 interface Product {
@@ -72,6 +73,7 @@ const DEFAULT_COLUMNS: ColumnConfig[] = [
   { id: "profondeur", label: "Profondeur (mm)", width: 110, visible: true },
   { id: "poids", label: "Poids (g)", width: 90, visible: true },
   { id: "notes", label: "Notes", width: 180, visible: false },
+  { id: "vpc_url", label: "Lien VPC", width: 110, visible: false },
 ];
 
 function getVpcCode(prod: Product): string {
@@ -451,6 +453,7 @@ function App() {
           : `${prod.price.toFixed(2).replace(".", ",")} €`;
       } else if (colId === "pack_size") valStr = String(prod.pack_size ?? "");
       else if (colId === "total_value") valStr = `${((prod.price || 0) * (prod.current_stock || 0)).toFixed(2).replace(".", ",")} €`;
+      else if (colId === "vpc_url") valStr = "Lien VPC";
 
       if (valStr.length > maxCharLen) {
         maxCharLen = valStr.length;
@@ -468,10 +471,27 @@ function App() {
     setShowBatchEditModal(true);
   };
 
+  const [showInventoryMenu, setShowInventoryMenu] = useState(false);
+  const inventoryMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (inventoryMenuRef.current && !inventoryMenuRef.current.contains(e.target as Node)) {
+        setShowInventoryMenu(false);
+      }
+    };
+    if (showInventoryMenu) {
+      document.addEventListener("mousedown", handleOutsideClick);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+    };
+  }, [showInventoryMenu]);
+
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [trigrammeInput, setTrigrammeInput] = useState("");
-  const [networkPathInput, setNetworkPathInput] = useState(() => isTauri() ? "" : "Stockflow");
+  const [networkPathInput, setNetworkPathInput] = useState("");
   const [searxngUrlInput, setSearxngUrlInput] = useState("https://search.amify-studio.fr");
   const [vpcSitesInput, setVpcSitesInput] = useState<string[]>([]);
   const [vpcKeysInput, setVpcKeysInput] = useState<Record<string, string>>({});
@@ -484,6 +504,7 @@ function App() {
   const [searxngUrlsInput, setSearxngUrlsInput] = useState<string>("");
   const [maxImageCandidatesInput, setMaxImageCandidatesInput] = useState<number>(15);
   const [enableScrapeFallbackInput, setEnableScrapeFallbackInput] = useState<boolean>(true);
+  const [syncIntervalInput, setSyncIntervalInput] = useState<number>(60);
 
   // Backup configuration states
   const [backupEnabled, setBackupEnabled] = useState<boolean>(false);
@@ -1593,6 +1614,7 @@ function App() {
             if (parsed.max_image_candidates !== undefined) setMaxImageCandidatesInput(parsed.max_image_candidates);
             if (parsed.price_tax_type) setPriceTaxTypeInput(parsed.price_tax_type);
             if (parsed.enable_scrape_fallback !== undefined) setEnableScrapeFallbackInput(parsed.enable_scrape_fallback);
+            if (parsed.sync_interval_seconds !== undefined) setSyncIntervalInput(parsed.sync_interval_seconds);
           }
         } catch {}
       }
@@ -1617,6 +1639,9 @@ function App() {
           }
           if (loaded.enable_scrape_fallback !== undefined) {
             setEnableScrapeFallbackInput(loaded.enable_scrape_fallback);
+          }
+          if (loaded.sync_interval_seconds !== undefined) {
+            setSyncIntervalInput(loaded.sync_interval_seconds);
           }
           
           if (loaded.network_path) {
@@ -1661,16 +1686,19 @@ function App() {
     loadConfig();
   }, []);
 
-  // 2. Background Polling for Event Sourcing Updates (every 15 seconds, paused when hidden)
+  // 2. Background Polling for Event Sourcing Updates (configurable interval, default 60s, paused when hidden)
   useEffect(() => {
     if (!config) return;
 
-    // Polling passif toutes les 15 secondes
+    // Polling passif avec intervalle personnalisable (par défaut 60 secondes / 1 minute)
+    const intervalSec = config.sync_interval_seconds || 60;
+    const intervalMs = Math.max(intervalSec, 5) * 1000;
+
     const interval = setInterval(() => {
       // Si la fenêtre ou l'onglet est masqué, aucun besoin de sonder le réseau
       if (typeof document !== "undefined" && document.hidden) return;
       syncAndFetch(config, false);
-    }, 15000);
+    }, intervalMs);
 
     // Synchronisation instantanée dès que l'utilisateur revient sur l'application
     const handleFocusOrVisible = () => {
@@ -1812,6 +1840,7 @@ function App() {
       priceTaxType: taxType || "HT",
       vpcApiKeys: vpcKeysInput,
       vpcUrls: vpcUrlsInput,
+      syncIntervalSeconds: syncIntervalInput,
     });
     
     const newConfig: AppConfig = {
@@ -1827,6 +1856,7 @@ function App() {
       price_tax_type: taxType || "HT",
       vpc_api_keys: vpcKeysInput,
       vpc_urls: vpcUrlsInput,
+      sync_interval_seconds: syncIntervalInput,
     };
     localStorage.setItem("stockflow_config", JSON.stringify(newConfig));
     setConfig(newConfig);
@@ -1846,6 +1876,7 @@ function App() {
       const apiKeys = updatedFields?.hasOwnProperty("vpc_api_keys") ? updatedFields.vpc_api_keys! : vpcKeysInput;
       const urls = updatedFields?.hasOwnProperty("vpc_urls") ? updatedFields.vpc_urls! : vpcUrlsInput;
       const fallback = updatedFields?.hasOwnProperty("enable_scrape_fallback") ? updatedFields.enable_scrape_fallback! : enableScrapeFallbackInput;
+      const syncInterval = updatedFields?.hasOwnProperty("sync_interval_seconds") ? updatedFields.sync_interval_seconds! : syncIntervalInput;
       
       const sxUrls = updatedFields?.hasOwnProperty("searxng_urls") 
         ? updatedFields.searxng_urls! 
@@ -1872,6 +1903,7 @@ function App() {
         vpcApiKeys: apiKeys,
         vpcUrls: urls,
         enableScrapeFallback: fallback,
+        syncIntervalSeconds: syncInterval,
       });
 
       const newConfig: AppConfig = {
@@ -1888,6 +1920,7 @@ function App() {
         vpc_api_keys: apiKeys,
         vpc_urls: urls,
         enable_scrape_fallback: fallback,
+        sync_interval_seconds: syncInterval,
       };
       localStorage.setItem("stockflow_config", JSON.stringify(newConfig));
       setConfig(newConfig);
@@ -3237,7 +3270,7 @@ function App() {
 
           <div className="form-group">
             <label htmlFor="network-path">
-              {!isTauri() ? "Dossier réseau partagé (dossier 'Stockflow' à la racine)" : "Chemin du dossier réseau partagé (ex: Z:\\Stockflow)"}
+              {!isTauri() ? "Dossier réseau partagé (rechercher 'Stockflow' à la racine si présent)" : "Chemin du dossier réseau partagé (ex: Z:\\Stockflow)"}
             </label>
             <div className="input-with-button">
               <input
@@ -3246,7 +3279,7 @@ function App() {
                 required
                 value={networkPathInput}
                 onChange={(e) => setNetworkPathInput(e.target.value)}
-                placeholder={!isTauri() ? "Stockflow (dossier à la racine de StockFlow.html)" : "Entrez ou sélectionnez le chemin"}
+                placeholder={!isTauri() ? "Cliquez sur Parcourir pour localiser le dossier partagé" : "Entrez ou sélectionnez le chemin (ex: Z:\\Stockflow)"}
                 readOnly={!isTauri()}
                 style={!isTauri() ? { cursor: "pointer", opacity: 0.9 } : undefined}
                 onClick={!isTauri() ? pickNetworkDir : undefined}
@@ -3257,7 +3290,7 @@ function App() {
             </div>
             {!isTauri() && (
               <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem", display: "block" }}>
-                ℹ️ Par défaut, le dossier partagé réseau est nommé "Stockflow" et doit se trouver à la racine (au même niveau que StockFlow.html). Cliquez sur Parcourir pour sélectionner et autoriser l'accès.
+                ℹ️ En mode navigateur, si le dossier "Stockflow" est présent à côté de StockFlow.html, sélectionnez-le via Parcourir. Vous pouvez également localiser n'importe quel autre dossier partagé.
               </span>
             )}
           </div>
@@ -3553,6 +3586,33 @@ function App() {
                               } else if (col.id === "total_value") {
                                 displayValue = `${(prod.price * prod.current_stock).toFixed(2).replace(".", ",")} €`;
                                 rawValue = prod.price * prod.current_stock;
+                              } else if (col.id === "vpc_url") {
+                                const vpcUrl = getAttribute(prod, "scrape_price_url") || getAttribute(prod, "source_url");
+                                displayValue = vpcUrl ? (
+                                  <a
+                                    href={vpcUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (isTauri()) {
+                                        e.preventDefault();
+                                        openPath(vpcUrl);
+                                      }
+                                    }}
+                                    style={{
+                                      color: "var(--accent)",
+                                      textDecoration: "underline",
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: "4px",
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    🔗 Lien
+                                  </a>
+                                ) : "-";
+                                rawValue = vpcUrl;
                               }
 
                               const isEditing = editingCell?.sku === prod.sku && editingCell.field === col.id;
@@ -3853,6 +3913,92 @@ function App() {
         )}
 
         <div className="header-actions">
+          {activeTab === "inventory" && (
+            <div style={{ position: "relative" }} ref={inventoryMenuRef}>
+              <button 
+                type="button" 
+                className="btn btn-secondary"
+                style={{
+                  fontSize: "12px",
+                  padding: "0.35rem 0.75rem",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.4rem",
+                  borderColor: stockFilter !== "all" ? "var(--warning)" : "var(--border-color)",
+                  backgroundColor: stockFilter !== "all" ? "var(--warning-light)" : "var(--bg-secondary)",
+                  color: stockFilter !== "all" ? "var(--warning)" : "var(--text-primary)"
+                }}
+                onClick={() => setShowInventoryMenu(prev => !prev)}
+                title="Filtres de stock et actions sur l'inventaire"
+              >
+                <span>
+                  {stockFilter === "low_stock" ? "⚠️ Stock bas" : stockFilter === "out_of_stock" ? "🛑 Rupture" : "📦 Filtres & Outils"}
+                </span>
+                <span style={{ fontSize: "9px", opacity: 0.7 }}>▼</span>
+              </button>
+
+              {showInventoryMenu && (
+                <div className="header-dropdown-menu">
+                  <div className="header-dropdown-section">Filtres de stock</div>
+                  <button
+                    type="button"
+                    className={`header-dropdown-item ${stockFilter === "all" ? "active" : ""}`}
+                    onClick={() => {
+                      setStockFilter("all");
+                      setShowInventoryMenu(false);
+                    }}
+                  >
+                    <span>📦 Tous les articles</span>
+                    <span className="badge" style={{ fontSize: "11px" }}>{products.length}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`header-dropdown-item ${stockFilter === "low_stock" ? "active" : ""}`}
+                    onClick={() => {
+                      setStockFilter("low_stock");
+                      setShowInventoryMenu(false);
+                    }}
+                  >
+                    <span style={{ color: "var(--warning)" }}>⚠️ Stock bas</span>
+                    <span className="badge" style={{ fontSize: "11px", backgroundColor: "var(--warning-light)", color: "var(--warning)" }}>
+                      {stats.low_stock_count}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`header-dropdown-item ${stockFilter === "out_of_stock" ? "active" : ""}`}
+                    onClick={() => {
+                      setStockFilter("out_of_stock");
+                      setShowInventoryMenu(false);
+                    }}
+                  >
+                    <span style={{ color: "var(--danger)" }}>🛑 Rupture totale</span>
+                    <span className="badge" style={{ fontSize: "11px", backgroundColor: "var(--danger-light)", color: "var(--danger)" }}>
+                      {stats.out_of_stock_count}
+                    </span>
+                  </button>
+
+                  <div className="header-dropdown-divider" />
+
+                  <div className="header-dropdown-section">Actions en lot</div>
+                  <button
+                    type="button"
+                    className="header-dropdown-item"
+                    onClick={() => {
+                      setShowInventoryMenu(false);
+                      openBatchEditModal(selectedSkus.length > 0 ? "selected" : "filtered");
+                    }}
+                  >
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
+                      <span>✏️</span>
+                      <span>Modifier / Renommer en lot...</span>
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <button 
             className="theme-toggle-btn" 
             title="Changer de thème"
@@ -4258,47 +4404,10 @@ function App() {
                   </select>
                 </div>
 
-                <div className="stock-filter-pills">
-                  <button
-                    type="button"
-                    className={`filter-pill ${stockFilter === "all" ? "active" : ""}`}
-                    onClick={() => setStockFilter("all")}
-                    title="Afficher toutes les références sans filtre de stock"
-                  >
-                    Tous ({products.length})
-                  </button>
-                  <button
-                    type="button"
-                    className={`filter-pill filter-pill-warning ${stockFilter === "low_stock" ? "active" : ""}`}
-                    onClick={() => setStockFilter(stockFilter === "low_stock" ? "all" : "low_stock")}
-                    title={stockFilter === "low_stock" ? "Cliquer pour réinitialiser le filtre" : "Filtrer uniquement les références en alerte de stock bas"}
-                  >
-                    ⚠️ Stock bas ({stats.low_stock_count})
-                  </button>
-                  <button
-                    type="button"
-                    className={`filter-pill filter-pill-danger ${stockFilter === "out_of_stock" ? "active" : ""}`}
-                    onClick={() => setStockFilter(stockFilter === "out_of_stock" ? "all" : "out_of_stock")}
-                    title={stockFilter === "out_of_stock" ? "Cliquer pour réinitialiser le filtre" : "Filtrer uniquement les références en rupture totale"}
-                  >
-                    🛑 Rupture ({stats.out_of_stock_count})
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  style={{ marginLeft: "auto", marginRight: "0.5rem", padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", gap: "0.3rem" }}
-                  onClick={() => openBatchEditModal(selectedSkus.length > 0 ? "selected" : "filtered")}
-                  title="Modifier ou renommer en lot (familles, sous-familles, marques, fournisseurs, termes de description...)"
-                >
-                  ✏️ Modifier en lot
-                </button>
-
                 <button 
                   type="button" 
                   className="btn" 
-                  style={{ marginRight: "0.5rem", padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", gap: "0.3rem" }}
+                  style={{ marginLeft: "auto", marginRight: "0.5rem", padding: "0.4rem 0.8rem", fontSize: "12px", display: "flex", alignItems: "center", gap: "0.3rem" }}
                   onClick={() => {
                     setCreateSuccess("");
                     setCreateError("");
@@ -4613,6 +4722,32 @@ function App() {
                       ℹ️ Par défaut, le dossier partagé réseau est nommé "Stockflow" et doit se trouver à la racine (au même niveau que StockFlow.html). Cliquez sur Parcourir pour reconnecter ou choisir un autre dossier.
                     </span>
                   )}
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="settings-sync-interval">
+                    Temps entre deux synchronisations réseau (en secondes)
+                  </label>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                    <input
+                      id="settings-sync-interval"
+                      type="number"
+                      min={5}
+                      max={3600}
+                      step={5}
+                      required
+                      value={syncIntervalInput}
+                      onChange={(e) => setSyncIntervalInput(Math.max(5, Number(e.target.value) || 60))}
+                      onBlur={() => triggerAutoSave({ sync_interval_seconds: syncIntervalInput })}
+                      style={{ width: "130px" }}
+                    />
+                    <span style={{ fontSize: "0.85rem", color: "var(--text-secondary)" }}>
+                      secondes {syncIntervalInput >= 60 ? `(${Math.floor(syncIntervalInput / 60)} min${syncIntervalInput % 60 > 0 ? ` ${syncIntervalInput % 60} s` : ""})` : ""}
+                    </span>
+                  </div>
+                  <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem", display: "block" }}>
+                    ℹ️ Fréquence de scrutation en arrière-plan pour détecter les modifications et mouvements de stock de vos collègues (valeur par défaut : 60 s / 1 minute). Minimum conseillé : 10 secondes.
+                  </span>
                 </div>
 
                 <div className="form-group">

@@ -26,6 +26,10 @@ fn default_max_image_candidates() -> usize {
     15
 }
 
+fn default_sync_interval_seconds() -> Option<u64> {
+    Some(60)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub trigramme: String,
@@ -50,6 +54,8 @@ pub struct AppConfig {
     pub vpc_api_keys: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub vpc_urls: std::collections::HashMap<String, String>,
+    #[serde(default = "default_sync_interval_seconds")]
+    pub sync_interval_seconds: Option<u64>,
 }
 
 pub fn get_config_dir() -> Option<PathBuf> {
