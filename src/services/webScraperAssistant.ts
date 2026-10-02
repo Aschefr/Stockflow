@@ -1,4 +1,5 @@
 import { stripTrailingPunctuation } from "./webScraperService";
+import { getProductVpcUrl } from "../utils/vpcUtils";
 
 export interface SupplierScrapeResult {
   label: string;
@@ -332,6 +333,17 @@ export function parseSupplierData(input: string): SupplierScrapeResult {
         result.image_urls.push(imgMatch[0]);
       }
     }
+
+    // Détection d'URL source de la page web
+    if (!result.source_url) {
+      const urlMatch = line.match(/(https?:\/\/[^\s"'<>]+)/i);
+      if (urlMatch) {
+        const u = urlMatch[1];
+        if (!u.endsWith(".pdf") && !u.match(/\.(jpg|jpeg|png|webp|svg)$/i)) {
+          result.source_url = u;
+        }
+      }
+    }
   }
 
   // Si aucun titre n'a été trouvé, essayer de trouver la première ligne significative
@@ -422,7 +434,9 @@ export function buildCandidatesFromSupplierData(parsed: SupplierScrapeResult, sk
     progress: 1.0,
     sources_visited: [
       {
-        url: parsed.source_url || "Fiche fournisseur importée",
+        url: (parsed.source_url && (parsed.source_url.startsWith("http://") || parsed.source_url.startsWith("https://")))
+          ? parsed.source_url
+          : (getProductVpcUrl({ attributes: { vpc: { [provider]: parsed.vpcCode || parsed.mpn } } }) || ""),
         provider,
         visited_at: new Date().toISOString(),
         success: true,

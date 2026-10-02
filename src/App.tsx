@@ -1131,7 +1131,7 @@ function App() {
           const prod = products.find(p => p.sku === pendingScrapeSku);
           if (prod && config) {
             const currentAttrs = typeof prod.attributes === "string" ? JSON.parse(prod.attributes || "{}") : prod.attributes;
-            if (pendingScrapeDetails.source_url) {
+            if (pendingScrapeDetails.source_url && (pendingScrapeDetails.source_url.startsWith("http://") || pendingScrapeDetails.source_url.startsWith("https://"))) {
               currentAttrs.scrape_price_url = pendingScrapeDetails.source_url;
             }
             await invoke("create_product", {
@@ -1332,14 +1332,16 @@ function App() {
         if (selections.image_urls && selections.image_urls.length > 0) {
           curAttrs.scrape_image_urls = selections.image_urls;
         }
-        if (selections.source_url) {
+        if (selections.source_url && (selections.source_url.startsWith("http://") || selections.source_url.startsWith("https://"))) {
           curAttrs.scrape_price_url = selections.source_url;
         }
         nextProduct.attributes = JSON.stringify(curAttrs);
       } catch (e) {}
 
       setEditProduct(nextProduct);
-      if (selections.source_url) setAutoFillSource(selections.source_url);
+      if (selections.source_url && (selections.source_url.startsWith("http://") || selections.source_url.startsWith("https://"))) {
+        setAutoFillSource(selections.source_url);
+      }
       setEditSuccess("Champs pré-remplis via auto-remplissage !");
     } else {
       setNewProduct(prev => {
@@ -1393,14 +1395,16 @@ function App() {
           if (selections.image_urls && selections.image_urls.length > 0) {
             curAttrs.scrape_image_urls = selections.image_urls;
           }
-          if (selections.source_url) {
+          if (selections.source_url && (selections.source_url.startsWith("http://") || selections.source_url.startsWith("https://"))) {
             curAttrs.scrape_price_url = selections.source_url;
           }
           next.attributes = JSON.stringify(curAttrs);
         } catch (e) {}
         return next;
       });
-      if (selections.source_url) setAutoFillSource(selections.source_url);
+      if (selections.source_url && (selections.source_url.startsWith("http://") || selections.source_url.startsWith("https://"))) {
+        setAutoFillSource(selections.source_url);
+      }
       setCreateSuccess("Champs pré-remplis via auto-remplissage !");
     }
 
@@ -2286,7 +2290,9 @@ function App() {
     if (newProduct.profondeur) attributesObj.profondeur = newProduct.profondeur;
     if (newProduct.poids) attributesObj.poids = newProduct.poids;
     if (newProduct.notes) attributesObj.notes = newProduct.notes;
-    if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
+    if (autoFillSource && (autoFillSource.startsWith("http://") || autoFillSource.startsWith("https://"))) {
+      attributesObj.scrape_price_url = autoFillSource;
+    }
     const finalImageUrls: string[] = (attributesObj.scrape_image_urls && attributesObj.scrape_image_urls.length > 0)
       ? attributesObj.scrape_image_urls
       : (autoFillChanges?.image_urls || []);
@@ -2491,7 +2497,9 @@ function App() {
     if (editProduct.profondeur) attributesObj.profondeur = editProduct.profondeur; else delete attributesObj.profondeur;
     if (editProduct.poids) attributesObj.poids = editProduct.poids; else delete attributesObj.poids;
     if (editProduct.notes) attributesObj.notes = editProduct.notes; else delete attributesObj.notes;
-    if (autoFillSource) attributesObj.scrape_price_url = autoFillSource;
+    if (autoFillSource && (autoFillSource.startsWith("http://") || autoFillSource.startsWith("https://"))) {
+      attributesObj.scrape_price_url = autoFillSource;
+    }
     const finalImageUrls: string[] = (attributesObj.scrape_image_urls && attributesObj.scrape_image_urls.length > 0)
       ? attributesObj.scrape_image_urls
       : (autoFillChanges?.image_urls || []);

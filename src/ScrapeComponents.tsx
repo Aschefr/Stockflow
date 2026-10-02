@@ -443,7 +443,7 @@ export function AutoFillModal({ isOpen, onClose, sku, onApply, networkPath: _net
       });
     }
 
-    const bestSource = candidates.sources_visited.find(s => s.success);
+    const bestSource = candidates.sources_visited.find(s => s.success && s.url && (s.url.startsWith("http://") || s.url.startsWith("https://")));
     if (bestSource) {
       selections.source_url = bestSource.url;
       selections.screenshot_path = bestSource.screenshot_path || undefined;

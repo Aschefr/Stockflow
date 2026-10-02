@@ -5,6 +5,17 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.5.7] - 2026-10-02
+
+### Correction de Résolution des URLs Sources & Blocage des Faux Liens Fichiers
+- **Sécurisation et Validation Stricte des URLs de Scraping (`vpcUtils.ts`, `api.ts`, `ProductDetailPanel.tsx`, `App.tsx`, `webBackend.ts`) :**
+  - **Correction du faux lien local :** Lors de l'import ou du copier-coller d'une fiche fournisseur sans URL source explicite, la chaîne descriptive `"Fiche fournisseur importée"` pouvait être enregistrée dans `scrape_price_url`. Cela entraînait une tentative d'ouverture d'un chemin relatif local dans le dossier partagé (`file:///T:/Stock.../Fiche fournisseur importée`) déclenchant une alerte d'erreur.
+  - **Résolution automatique vers le site fournisseur :** `getProductVpcUrl()` rejette dorénavant toute valeur non-HTTP (`http://` ou `https://`) et résout automatiquement le lien de recherche officiel (RS Components, Farnell, Mouser, Conrad) à partir de la référence article ou du code VPC détecté.
+  - **Filtrage dans l'interface et l'historique :** Nettoyage des boutons de consultation de source dans la fiche détaillée (`ProductDetailPanel.tsx`) et dans le journal d'audit (`audit.log`) : seules les véritables URLs web sont rendues cliquables.
+  - **Renforcement de la fonction `openPath()` (`api.ts`) :** Blocage préventif à la racine de toute chaîne descriptive ne correspondant ni à une URL web/blob, ni à un chemin de fichier avec extension/séparateur, évitant les erreurs de navigation aussi bien en mode Bureau (Tauri) qu'en mode Web autonome.
+
+---
+
 ## [1.5.6] - 2026-10-02
 
 ### Résolution Universelle des Liens d'Articles VPC & Tri

@@ -16,17 +16,23 @@ export function getProductVpcUrl(prod: any): string {
       ? JSON.parse(prod.attributes || "{}") 
       : (prod.attributes || {});
 
-    // 1. URL de scraping ou source explicite
-    if (attrs?.scrape_price_url && typeof attrs.scrape_price_url === "string" && attrs.scrape_price_url.trim()) {
+    // 1. URL de scraping ou source explicite (doit impérativement être une URL web http/https)
+    const isValidHttpUrl = (u: any): boolean => {
+      if (typeof u !== "string") return false;
+      const t = u.trim().toLowerCase();
+      return t.startsWith("http://") || t.startsWith("https://");
+    };
+
+    if (isValidHttpUrl(attrs?.scrape_price_url)) {
       return attrs.scrape_price_url.trim();
     }
-    if (attrs?.source_url && typeof attrs.source_url === "string" && attrs.source_url.trim()) {
+    if (isValidHttpUrl(attrs?.source_url)) {
       return attrs.source_url.trim();
     }
-    if (attrs?.vpc_url && typeof attrs.vpc_url === "string" && attrs.vpc_url.trim()) {
+    if (isValidHttpUrl(attrs?.vpc_url)) {
       return attrs.vpc_url.trim();
     }
-    if (attrs?.url && typeof attrs.url === "string" && attrs.url.trim().startsWith("http")) {
+    if (isValidHttpUrl(attrs?.url)) {
       return attrs.url.trim();
     }
 

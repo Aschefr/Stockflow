@@ -196,7 +196,8 @@ export class WebBackend {
           const newAttrs = typeof payload.attributes === "string"
             ? (JSON.parse(payload.attributes || "{}"))
             : (payload.attributes || {});
-          const scrapePriceUrl = newAttrs.scrape_price_url || null;
+          const rawScrapeUrl = newAttrs.scrape_price_url;
+          const scrapePriceUrl = (rawScrapeUrl && (rawScrapeUrl.startsWith("http://") || rawScrapeUrl.startsWith("https://"))) ? rawScrapeUrl : null;
 
           if (!existing) {
             await writeAuditToDirectory(dirHandle, sku, trigramme, "CREATE", null, null, null, scrapePriceUrl);

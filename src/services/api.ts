@@ -141,15 +141,27 @@ export async function preloadMediaBatch(
  * En mode Web, ouvre l'URL directe ou résout le fichier local via Blob URL pour l'afficher dans un nouvel onglet.
  */
 export async function openPath(path: string): Promise<void> {
-  if (isTauri()) {
-    return await tauriOpenPath(path);
-  }
-  if (!path) return;
+  if (!path || !path.trim()) return;
+
+  const trimmed = path.trim();
 
   // 1. URLs directes (web, blob, data)
-  if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("blob:") || path.startsWith("data:")) {
-    window.open(path, "_blank", "noopener,noreferrer");
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("blob:") || trimmed.startsWith("data:")) {
+    if (isTauri()) {
+      return await tauriOpenPath(trimmed);
+    }
+    window.open(trimmed, "_blank", "noopener,noreferrer");
     return;
+  }
+
+  // Ignorer les chaînes de libellé ou textes descriptifs (ex: "Fiche fournisseur importée")
+  if (!trimmed.includes(".") && !trimmed.includes("/") && !trimmed.includes("\\")) {
+    console.warn("[StockFlow] Libellé non-fichier ignoré par openPath :", trimmed);
+    return;
+  }
+
+  if (isTauri()) {
+    return await tauriOpenPath(trimmed);
   }
 
   // 2. Fichiers locaux dans le dossier partagé (notices PDF, images, etc.)

@@ -284,6 +284,9 @@ export function ProductDetailPanel({
 
   const vpcCodeFull = getVpcCode(selectedProduct);
   let vpcUrl = getProductVpcUrl(selectedProduct);
+  if (vpcUrl && !vpcUrl.startsWith("http://") && !vpcUrl.startsWith("https://")) {
+    vpcUrl = "";
+  }
   let vpcSiteName = "VPC";
   let vpcCodeVal = "";
 
@@ -311,9 +314,15 @@ export function ProductDetailPanel({
   const tension = getAttribute(selectedProduct, "tension");
   const notes = getAttribute(selectedProduct, "notes");
 
-  const priceUrl = getAttribute(selectedProduct, "scrape_price_url");
-  const imageUrl = getAttribute(selectedProduct, "scrape_image_url");
-  const docUrl = getAttribute(selectedProduct, "scrape_doc_url");
+  const sanitizeHttpUrl = (u: any): string => {
+    if (typeof u !== "string") return "";
+    const t = u.trim();
+    return (t.startsWith("http://") || t.startsWith("https://")) ? t : "";
+  };
+
+  const priceUrl = sanitizeHttpUrl(getAttribute(selectedProduct, "scrape_price_url")) || (vpcUrl ? vpcUrl : "");
+  const imageUrl = sanitizeHttpUrl(getAttribute(selectedProduct, "scrape_image_url"));
+  const docUrl = sanitizeHttpUrl(getAttribute(selectedProduct, "scrape_doc_url"));
 
   return (
     <aside
@@ -1280,7 +1289,7 @@ export function ProductDetailPanel({
                   content = (
                     <span>
                       Notice téléchargée ({docLabel}) : <strong>{fileName || item.new_value || "PDF"}</strong>
-                      {item.source_url && (
+                      {item.source_url && (item.source_url.startsWith("http://") || item.source_url.startsWith("https://")) && (
                         <button
                           type="button"
                           className="btn-link"
@@ -1299,7 +1308,7 @@ export function ProductDetailPanel({
                   content = (
                     <span>
                       Image téléchargée : <strong>{fileName || "Image"}</strong>
-                      {item.source_url && (
+                      {item.source_url && (item.source_url.startsWith("http://") || item.source_url.startsWith("https://")) && (
                         <button
                           type="button"
                           className="btn-link"
@@ -1321,7 +1330,7 @@ export function ProductDetailPanel({
                         {item.old_value ? parseFloat(item.old_value).toFixed(2) : "—"} € →{" "}
                         {item.new_value ? parseFloat(item.new_value).toFixed(2) : "—"} €
                       </strong>
-                      {item.source_url && (
+                      {item.source_url && (item.source_url.startsWith("http://") || item.source_url.startsWith("https://")) && (
                         <button
                           type="button"
                           className="btn-link"
@@ -1340,7 +1349,7 @@ export function ProductDetailPanel({
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
                       <span>
                         <strong>{item.field}</strong> : <span className="audit-old-value">{item.old_value || "—"}</span> → <span className="audit-new-value">{item.new_value || "—"}</span>
-                        {item.source_url && (
+                        {item.source_url && (item.source_url.startsWith("http://") || item.source_url.startsWith("https://")) && (
                           <button
                             type="button"
                             className="btn-link"
