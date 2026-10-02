@@ -63,6 +63,12 @@ interface ProductFormProps {
   onSubmit: (e: React.FormEvent) => void;
   onClose: () => void;
 
+  // Classification & Autocompletion options
+  categoryOptions: string[];
+  subCategoryOptions: string[];
+  brandOptions?: string[];
+  locationOptions?: string[];
+
   // Scraping props
   autofillType: string;
   setAutofillType: (v: string) => void;
@@ -75,6 +81,10 @@ interface ProductFormProps {
   autoFillFallbackInfo: string | null;
   autoFillChanges: AutoFillSelections | null;
 
+  // Fallback Web state (lifted to parent)
+  scrapeAllowFallback: boolean;
+  onScrapeAllowFallbackChange: (v: boolean) => void;
+
   // Feedback states
   successMessage: string;
   errorMessage: string;
@@ -82,6 +92,165 @@ interface ProductFormProps {
   globalScrape?: { sku: string; progress: number; message: string; status: string } | null;
   onChangeSku?: (sku: string) => void;
 }
+
+/** Custom searchable combo-box with keyboard navigation & auto-scroll */
+function ComboBox({
+  id,
+  value,
+  options,
+  onChange,
+  placeholder,
+}: {
+  id: string;
+  value: string;
+  options: string[];
+  onChange: (val: string) => void;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState<string | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const [highlightIdx, setHighlightIdx] = useState(-1);
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setSearch(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const isSearching = search !== null;
+  const displayVal = isSearching ? search : (value || "");
+  const filterText = (isSearching ? search : "").trim().toLowerCase();
+  const filtered = filterText
+    ? options.filter((opt) => opt.toLowerCase().includes(filterText))
+    : options;
+
+  const openDropdown = () => {
+    setOpen(true);
+    setSearch(null);
+    const curIdx = options.findIndex((opt) => opt.toLowerCase() === (value || "").trim().toLowerCase());
+    setHighlightIdx(curIdx >= 0 ? curIdx : (options.length > 0 ? 0 : -1));
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = e.target.value;
+    setSearch(v);
+    onChange(v);
+    setOpen(true);
+    setHighlightIdx(0);
+  };
+
+  const handleSelect = (opt: string) => {
+    onChange(opt);
+    setSearch(null);
+    setOpen(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Tab") {
+      setOpen(false);
+      setSearch(null);
+      return;
+    }
+    if (!open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      openDropdown();
+      e.preventDefault();
+      return;
+    }
+    if (!open) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightIdx((prev) => Math.min(prev + 1, filtered.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightIdx((prev) => Math.max(prev - 1, 0));
+    } else if (e.key === "Enter" && highlightIdx >= 0 && highlightIdx < filtered.length) {
+      e.preventDefault();
+      handleSelect(filtered[highlightIdx]);
+    } else if (e.key === "Escape") {
+      setOpen(false);
+      setSearch(null);
+    }
+  };
+
+  // Scroll the highlighted item into view
+  useEffect(() => {
+    if (open && highlightIdx >= 0 && listRef.current) {
+      const el = listRef.current.children[highlightIdx] as HTMLElement;
+      el?.scrollIntoView({ block: "nearest" });
+    }
+  }, [highlightIdx, open]);
+
+  return (
+    <div ref={wrapperRef} className="combobox-wrapper">
+      <input
+        ref={inputRef}
+        id={id}
+        type="text"
+        autoComplete="off"
+        value={displayVal}
+        onChange={handleInputChange}
+        onFocus={openDropdown}
+        onClick={() => { if (!open) openDropdown(); }}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        className="combobox-input"
+      />
+      <span
+        className="combobox-chevron"
+        title="Afficher les choix"
+        onMouseDown={(e) => {
+          e.preventDefault();
+          if (open) {
+            setOpen(false);
+            setSearch(null);
+          } else {
+            openDropdown();
+            inputRef.current?.focus();
+          }
+        }}
+      >
+        ▾
+      </span>
+      {open && (
+        <ul ref={listRef} className="combobox-dropdown">
+          {filtered.map((opt, i) => {
+            const isSelected = opt.toLowerCase() === (value || "").trim().toLowerCase();
+            return (
+              <li
+                key={opt}
+                className={`combobox-option${i === highlightIdx ? " combobox-option--highlighted" : ""}${isSelected ? " combobox-option--selected" : ""}`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  handleSelect(opt);
+                }}
+                onMouseEnter={() => setHighlightIdx(i)}
+              >
+                <span>{opt}</span>
+                {isSelected && <span className="combobox-check">✓</span>}
+              </li>
+            );
+          })}
+          {filtered.length === 0 && search && (
+            <li className="combobox-empty">
+              Nouvelle entrée : « <strong>{search}</strong> »
+            </li>
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 
 export function ProductForm({
   mode,
@@ -95,6 +264,10 @@ export function ProductForm({
   config,
   onSubmit,
   onClose,
+  categoryOptions,
+  subCategoryOptions,
+  brandOptions = [],
+  locationOptions = [],
   autofillType,
   setAutofillType,
   autofillCodeInput,
@@ -105,6 +278,8 @@ export function ProductForm({
   autoFillSource,
   autoFillFallbackInfo,
   autoFillChanges,
+  scrapeAllowFallback,
+  onScrapeAllowFallbackChange,
   successMessage,
   errorMessage,
   duplicateWarning,
@@ -149,9 +324,6 @@ export function ProductForm({
   const [pasteFeedback, setPasteFeedback] = useState<string | null>(null);
   const [scrapeIncludeImages, setScrapeIncludeImages] = useState(false);
   const [scrapeIncludeDocs, setScrapeIncludeDocs] = useState(false);
-  const [scrapeAllowFallback, setScrapeAllowFallback] = useState<boolean>(() => {
-    return config?.enable_scrape_fallback !== false;
-  });
 
   // Médias sélectionnés pour importation différée (sauvegardés lors de la validation finale du SKU)
   const [selectedImageUrls, setSelectedImageUrls] = useState<string[]>(() => {
@@ -1793,7 +1965,7 @@ export function ProductForm({
                     <button
                       type="button"
                       id="scrape-opt-badge-fallback"
-                      onClick={() => setScrapeAllowFallback(!scrapeAllowFallback)}
+                      onClick={() => onScrapeAllowFallbackChange(!scrapeAllowFallback)}
                       title={
                         scrapeAllowFallback
                           ? "Fallback Web actif : si le site ciblé ne renvoie rien, la recherche s'élargit à tout le Web (cliquer pour restreindre au domaine strict)"
@@ -2168,12 +2340,11 @@ export function ProductForm({
                   <div className="field-with-autofill">
                     <div style={{ flex: 1 }}>
                       <label htmlFor="modal-p-brand">Marque</label>
-                      <input
+                      <ComboBox
                         id="modal-p-brand"
-                        type="text"
-                        list="brands-datalist"
                         value={productData.brand}
-                        onChange={(e) => setProductData((prev: any) => ({ ...prev, brand: e.target.value }))}
+                        options={brandOptions}
+                        onChange={(val) => setProductData((prev: any) => ({ ...prev, brand: val }))}
                         placeholder="ex: Siemens"
                       />
                       {renderFieldCandidates("brand", candidates?.brand_candidates, (c) => setProductData((prev: any) => ({ ...prev, brand: c.value })))}
@@ -2221,24 +2392,22 @@ export function ProductForm({
               <div className="modal-field-group-title">3. Classification</div>
               <div className="modal-field-row">
                 <div className="form-group" style={{ flex: 1 }}>
-                  <label htmlFor="modal-p-cat">Famille (Sans auto-remplissage)</label>
-                  <input
+                  <label htmlFor="modal-p-cat">Famille</label>
+                  <ComboBox
                     id="modal-p-cat"
-                    type="text"
-                    list="categories-datalist"
                     value={productData.category}
-                    onChange={(e) => setProductData((prev: any) => ({ ...prev, category: e.target.value }))}
+                    options={categoryOptions}
+                    onChange={(val) => setProductData((prev: any) => ({ ...prev, category: val }))}
                     placeholder="ex: Automatisme"
                   />
                 </div>
                 <div className="form-group" style={{ flex: 1 }}>
-                  <label htmlFor="modal-p-subcat">Sous-Famille (Sans auto-remplissage)</label>
-                  <input
+                  <label htmlFor="modal-p-subcat">Sous-Famille</label>
+                  <ComboBox
                     id="modal-p-subcat"
-                    type="text"
-                    list={isEdit ? "edit-subcategories-datalist" : "add-subcategories-datalist"}
                     value={productData.sub_category}
-                    onChange={(e) => setProductData((prev: any) => ({ ...prev, sub_category: e.target.value }))}
+                    options={subCategoryOptions}
+                    onChange={(val) => setProductData((prev: any) => ({ ...prev, sub_category: val }))}
                     placeholder="ex: Alimentation"
                   />
                 </div>
@@ -2251,12 +2420,11 @@ export function ProductForm({
               <div className="modal-field-row">
                 <div className="form-group" style={{ flex: 2 }}>
                   <label htmlFor="modal-p-loc">Emplacement Physique</label>
-                  <input
+                  <ComboBox
                     id="modal-p-loc"
-                    type="text"
-                    list="locations-datalist"
                     value={productData.location}
-                    onChange={(e) => setProductData((prev: any) => ({ ...prev, location: e.target.value }))}
+                    options={locationOptions}
+                    onChange={(val) => setProductData((prev: any) => ({ ...prev, location: val }))}
                     placeholder="ex: MAG-A1-E2-B3"
                   />
                 </div>

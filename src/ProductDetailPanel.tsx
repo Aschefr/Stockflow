@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { ScrapeProgressBadge } from "./ScrapeComponents";
-import { invoke, isTauri } from "./services/api";
+import { invoke, isTauri, resolveMediaSrc, preloadImage } from "./services/api";
 
 interface Product {
   sku: string;
@@ -236,23 +236,12 @@ export function ProductDetailPanel({
       setResolvedSrc("");
       return;
     }
-    if (currentImg.startsWith("http://") || currentImg.startsWith("https://") || currentImg.startsWith("blob:") || currentImg.startsWith("data:")) {
-      setResolvedSrc(currentImg);
-      return;
-    }
-    if (isTauri()) {
-      const full = config?.network_path ? `${config.network_path}/${currentImg}`.replace(/\\/g, "/") : currentImg;
-      setResolvedSrc(convertFileSrc(full));
-      return;
-    }
-    const sync = convertFileSrc(currentImg) || (config?.network_path ? convertFileSrc(`${config.network_path}/${currentImg}`.replace(/\\/g, "/")) : "");
-    if (sync) {
-      setResolvedSrc(sync);
-      return;
-    }
-    invoke<string>("resolve_media", { path: currentImg })
+    resolveMediaSrc(currentImg, config?.network_path)
       .then((url) => {
-        if (isMounted && url) setResolvedSrc(url);
+        if (isMounted) {
+          setResolvedSrc(url);
+          if (url) preloadImage(url);
+        }
       })
       .catch(() => {});
 
@@ -1221,12 +1210,18 @@ export function ProductDetailPanel({
         <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "1rem" }}>
           <h4 style={{ fontFamily: "var(--font-title)", marginBottom: "0.8rem" }}>📋 Journal des Modifications</h4>
           <div className="history-list">
-            {productAuditLog.length === 0 ? (
-              <div style={{ padding: "0.8rem", color: "var(--text-muted)", fontSize: "11px" }}>
-                Aucune modification enregistrée.
-              </div>
-            ) : (
-              productAuditLog.map((item) => {
+            {(() => {
+              const displayAudits = productAuditLog.filter(
+                item => !(item.action === "UPDATE" && ["Images", "Documents", "URL document", "URL image", "URL source prix", "Notice principale", "Image principale"].includes(item.field || ""))
+              );
+              if (displayAudits.length === 0) {
+                return (
+                  <div style={{ padding: "0.8rem", color: "var(--text-muted)", fontSize: "11px" }}>
+                    Aucune modification enregistrée.
+                  </div>
+                );
+              }
+              return displayAudits.map((item) => {
                 const date = new Date(item.timestamp);
                 const dateStr = date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "2-digit" });
                 const timeStr = date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
@@ -1457,8 +1452,8 @@ export function ProductDetailPanel({
                     </div>
                   </div>
                 );
-              })
-            )}
+              });
+            })()}
           </div>
         </div>
       </div>

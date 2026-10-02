@@ -44,6 +44,98 @@ export function convertFileSrc(filePath: string, protocol = "asset"): string {
 }
 
 /**
+ * Précharge une image dans le cache mémoire de décodage du navigateur (RAM/Bitmap).
+ * Permet un affichage au survol à 0ms de latence sans scintillement.
+ */
+export async function preloadImage(src: string): Promise<void> {
+  if (!src) return;
+  try {
+    const img = new Image();
+    img.src = src;
+    if ("decode" in img) {
+      await img.decode().catch(() => {});
+    }
+  } catch {}
+}
+
+/**
+ * Résout de façon universelle un chemin d'image/média en URL directement exploitable (blob ou asset).
+ * Fonctionne de façon synchrone si déjà en cache, ou asynchrone si à charger depuis le disque/répertoire.
+ */
+export async function resolveMediaSrc(filePath: string | null | undefined, networkPath?: string): Promise<string> {
+  if (!filePath || !filePath.trim()) return "";
+
+  // 1. Déjà une URL directe (web, blob, data)
+  if (filePath.startsWith("http://") || filePath.startsWith("https://") || filePath.startsWith("blob:") || filePath.startsWith("data:")) {
+    return filePath;
+  }
+
+  // 2. Mode Desktop (Tauri)
+  if (isTauri()) {
+    const full = networkPath ? `${networkPath}/${filePath}`.replace(/\\/g, "/") : filePath;
+    return convertFileSrc(full);
+  }
+
+  // 3. Mode Web pur : vérifier d'abord le cache synchrone
+  const cached = getCachedMediaUrl(filePath) || (networkPath ? getCachedMediaUrl(`${networkPath}/${filePath}`) : null);
+  if (cached) return cached;
+
+  // 4. Si non présent en cache mémoire synchrone, résoudre via le backend (qui tente IndexedDB puis FileSystemAccess)
+  try {
+    const cleanPath = filePath.replace(/\\/g, "/");
+    const resolved = await invoke<string>("resolve_media", { path: cleanPath });
+    if (resolved && (resolved.startsWith("blob:") || resolved.startsWith("http"))) {
+      return resolved;
+    }
+  } catch {}
+
+  return "";
+}
+
+/**
+ * Précharge par lots une liste de chemins de médias (ex: articles d'une nomenclature ou produits visibles)
+ * pour qu'ils soient décodés en arrière-plan et instantanés à l'affichage et au survol.
+ */
+export async function preloadMediaBatch(
+  items: Array<{ imagePath?: string | null; sku?: string }>,
+  networkPath?: string,
+  concurrency = 6
+): Promise<void> {
+  if (!items || items.length === 0) return;
+
+  const validItems = items.filter(it => it && (it.imagePath || it.sku));
+  if (validItems.length === 0) return;
+
+  let index = 0;
+
+  async function worker() {
+    while (index < validItems.length) {
+      const current = validItems[index++];
+      if (!current) continue;
+      try {
+        let src = "";
+        if (current.imagePath) {
+          src = await resolveMediaSrc(current.imagePath, networkPath);
+        } else if (current.sku) {
+          try {
+            const skuImgs: string[] = await invoke("list_sku_images", { networkPath, sku: current.sku });
+            if (skuImgs && skuImgs.length > 0) {
+              src = await resolveMediaSrc(skuImgs[0], networkPath);
+            }
+          } catch {}
+        }
+        if (src) {
+          await preloadImage(src);
+        }
+      } catch {}
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, validItems.length) }, () => worker());
+  await Promise.all(workers);
+}
+
+/**
  * Ouvre un fichier ou un lien URL.
  * En mode Desktop, utilise le plugin d'ouverture système.
  * En mode Web, ouvre l'URL directe ou résout le fichier local via Blob URL pour l'afficher dans un nouvel onglet.

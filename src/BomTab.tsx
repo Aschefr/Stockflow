@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { invoke, convertFileSrc, isTauri } from "./services/api";
+import { invoke, convertFileSrc, resolveMediaSrc, preloadImage, preloadMediaBatch } from "./services/api";
+import { getCachedMediaUrl } from "./services/webFileSystem";
 import { createProductSearchMatcher } from "./utils/searchUtils";
 import type { Product } from "./types";
 import * as XLSX from "xlsx-js-style";
@@ -103,6 +104,97 @@ const COLUMN_HEADERS: Record<string, string> = {
   vpcName: "Fournisseur VPC"
 };
 
+interface BomThumbnailCellProps {
+  product?: Product;
+  networkPath?: string;
+  cellStyle: React.CSSProperties;
+  onMouseMove: (e: React.MouseEvent) => void;
+}
+
+const BomThumbnailCell: React.FC<BomThumbnailCellProps> = ({
+  product,
+  networkPath,
+  cellStyle,
+  onMouseMove,
+}) => {
+  const [imgUrl, setImgUrl] = useState<string>(() => {
+    if (!product?.image_path) return "";
+    const raw = networkPath ? `${networkPath}/${product.image_path}`.replace(/\\/g, "/") : product.image_path;
+    return convertFileSrc(raw);
+  });
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    const raw = product?.image_path ? (networkPath ? `${networkPath}/${product.image_path}`.replace(/\\/g, "/") : product.image_path) : "";
+    const current = raw ? convertFileSrc(raw) : "";
+    if (current) {
+      setImgUrl(current);
+      return;
+    }
+
+    if (!product) {
+      setImgUrl("");
+      return;
+    }
+
+    // Résolution automatique en arrière-plan sans nécessiter de survol préalable de la ligne
+    let cancelled = false;
+    setLoading(true);
+
+    (async () => {
+      let resolved = "";
+      if (product.image_path) {
+        resolved = await resolveMediaSrc(product.image_path, networkPath);
+      }
+      // Si pas de chemin image explicite mais un SKU, essayer de lister les images associées
+      if (!resolved && product.sku) {
+        try {
+          const skuImgs: string[] = await invoke("list_sku_images", { networkPath, sku: product.sku });
+          if (skuImgs && skuImgs.length > 0) {
+            resolved = await resolveMediaSrc(skuImgs[0], networkPath);
+          }
+        } catch {}
+      }
+
+      if (isMounted && !cancelled) {
+        if (resolved) {
+          setImgUrl(resolved);
+          preloadImage(resolved);
+        }
+        setLoading(false);
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+      cancelled = true;
+    };
+  }, [product?.sku, product?.image_path, networkPath]);
+
+  return (
+    <td 
+      key="image" 
+      style={{ ...cellStyle, textAlign: "center", padding: "2px" }}
+      onMouseMove={onMouseMove}
+    >
+      {imgUrl ? (
+        <img
+          src={imgUrl}
+          alt="Img"
+          loading="lazy"
+          style={{ maxHeight: "24px", maxWidth: "36px", objectFit: "contain", verticalAlign: "middle", borderRadius: "2px", display: "inline-block" }}
+          onError={() => setImgUrl("")}
+        />
+      ) : loading ? (
+        <span style={{ color: "var(--text-muted)", fontSize: "10px", opacity: 0.6 }}>⏳</span>
+      ) : (
+        <span style={{ color: "var(--text-muted)", fontSize: "10px" }}>—</span>
+      )}
+    </td>
+  );
+};
+
 export default function BomTab({ 
   networkPath, 
   trigramme, 
@@ -118,6 +210,16 @@ export default function BomTab({
   const [boms, setBoms] = useState<Bom[]>([]);
   const [editingBom, setEditingBom] = useState<Bom | null>(null);
   useEffect(() => { onEditingChange?.(editingBom !== null); }, [editingBom]);
+
+  // Préchargement proactif en arrière-plan des images de la nomenclature (mise en cache navigateur + décodage instantané)
+  useEffect(() => {
+    if (!editingBom || !Array.isArray(editingBom.items) || editingBom.items.length === 0) return;
+    const itemsToPreload = editingBom.items.map(it => {
+      const p = (products || []).find((prod: any) => prod.sku === it.sku);
+      return { imagePath: p?.image_path, sku: it.sku };
+    });
+    preloadMediaBatch(itemsToPreload, networkPath, 6).catch(() => {});
+  }, [editingBom?.id, editingBom?.items?.length, networkPath, products]);
 
   // Hover Thumbnail handler & state (fallback for standalone usage)
   const [localHoveredImage, setLocalHoveredImage] = useState<string | null>(null);
@@ -555,32 +657,13 @@ export default function BomTab({
           const p = products.find((prod: any) => prod.sku === item.sku);
           if (p && !loadedImages.has(item.sku)) {
             let relPath = p.image_path || "";
-            let resolvedSrc = "";
-
-            if (!isTauri() && relPath) {
-              try {
-                const blobUrl = await invoke<string>("resolve_media", { path: relPath });
-                if (blobUrl) resolvedSrc = blobUrl;
-              } catch (e) {}
-            }
-
-            if (!resolvedSrc && (relPath || networkPath)) {
-              const fullPath = networkPath && relPath ? `${networkPath}/${relPath}`.replace(/\\/g, "/") : relPath;
-              resolvedSrc = convertFileSrc(fullPath);
-            }
+            let resolvedSrc = await resolveMediaSrc(relPath, networkPath);
 
             if (!resolvedSrc && p.sku) {
               try {
                 const imgs: string[] = await invoke("list_sku_images", { networkPath, sku: p.sku });
                 if (imgs && imgs.length > 0) {
-                  if (!isTauri()) {
-                    const blobUrl = await invoke<string>("resolve_media", { path: imgs[0] });
-                    if (blobUrl) resolvedSrc = blobUrl;
-                  }
-                  if (!resolvedSrc) {
-                    const full = networkPath ? `${networkPath}/${imgs[0]}`.replace(/\\/g, "/") : imgs[0];
-                    resolvedSrc = convertFileSrc(full);
-                  }
+                  resolvedSrc = await resolveMediaSrc(imgs[0], networkPath);
                 }
               } catch (e) {}
             }
@@ -1015,7 +1098,7 @@ export default function BomTab({
           const raw = getColumnValue(item, p, col.id);
           if (!raw) return "";
           const full = networkPath && !raw.startsWith("http") && !raw.startsWith("blob:") ? `${networkPath}/${raw}`.replace(/\\/g, "/") : raw;
-          return convertFileSrc(full);
+          return convertFileSrc(full) || getCachedMediaUrl(raw) || "";
         }
         const val = getColumnValue(item, p, col.id);
         return val === null || val === undefined ? "" : val.toString();
@@ -1739,24 +1822,14 @@ export default function BomTab({
                               </td>
                             );
                           case "image": {
-                            const raw = p?.image_path ? (networkPath ? `${networkPath}/${p.image_path}`.replace(/\\/g, "/") : p.image_path) : "";
-                            const url = raw ? convertFileSrc(raw) : "";
                             return (
-                              <td 
-                                key="image" 
-                                style={{ ...cellStyle, textAlign: "center", padding: "2px" }}
+                              <BomThumbnailCell
+                                key="image"
+                                product={p}
+                                networkPath={networkPath}
+                                cellStyle={cellStyle}
                                 onMouseMove={(e) => handleItemImageHover(e, p?.image_path, "image", p)}
-                              >
-                                {url ? (
-                                  <img
-                                    src={url}
-                                    alt="Img"
-                                    style={{ maxHeight: "24px", maxWidth: "36px", objectFit: "contain", verticalAlign: "middle", borderRadius: "2px" }}
-                                  />
-                                ) : (
-                                  <span style={{ color: "var(--text-muted)", fontSize: "10px" }}>—</span>
-                                )}
-                              </td>
+                              />
                             );
                           }
                           default: {

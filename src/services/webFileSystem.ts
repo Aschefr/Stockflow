@@ -1,5 +1,5 @@
 import { StockflowEvent, AuditLogItem, Product } from "../types";
-import { idbGet, idbPut } from "./webDatabase";
+import { idbGet, idbPut, idbGetAll, idbDelete } from "./webDatabase";
 import { applySingleEventWeb, applySingleAuditWeb } from "./webEventProcessor";
 
 export function sanitizeFolderName(name?: string, fallback = "INCONNU"): string {
@@ -12,8 +12,54 @@ export function sanitizeFolderName(name?: string, fallback = "INCONNU"): string 
 
 let activeDirectoryHandle: FileSystemDirectoryHandle | null = null;
 const mediaUrlCache = new Map<string, string>();
+let mediaCacheInitialized = false;
+
+/**
+ * Restaure le cache persistant des images et notices depuis IndexedDB (media_cache)
+ * dans le cache mémoire de l'application dès le démarrage pour un chargement instantané.
+ */
+export async function initMediaCacheFromIndexedDb(): Promise<void> {
+  if (mediaCacheInitialized) return;
+  mediaCacheInitialized = true;
+  try {
+    const entries = await idbGetAll<{ path: string; name?: string; blob: Blob; size?: number; updatedAt?: number }>("media_cache");
+    if (entries && entries.length > 0) {
+      // LRU Clean-up : Si plus de 500 médias en cache, conserver les 500 plus récents
+      if (entries.length > 500) {
+        entries.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        const toRemove = entries.slice(500);
+        for (const item of toRemove) {
+          idbDelete("media_cache", item.path).catch(() => {});
+        }
+        entries.length = 500;
+      }
+
+      for (const entry of entries) {
+        if (entry.blob && entry.path) {
+          try {
+            const objUrl = URL.createObjectURL(entry.blob);
+            const normalized = entry.path.replace(/\\/g, "/");
+            const fileName = entry.name || normalized.split("/").pop() || "";
+
+            mediaUrlCache.set(normalized, objUrl);
+            mediaUrlCache.set(entry.path, objUrl);
+            if (fileName) {
+              mediaUrlCache.set(fileName, objUrl);
+              mediaUrlCache.set(`images/${fileName}`, objUrl);
+              mediaUrlCache.set(fileName.toLowerCase(), objUrl);
+            }
+          } catch (e) {}
+        }
+      }
+      console.log(`[WebFS] Cache persistant restauré : ${entries.length} médias chargés en mémoire navigateur.`);
+    }
+  } catch (err) {
+    console.warn("[WebFS] Erreur chargement media_cache IDB:", err);
+  }
+}
 
 export async function getDirectoryHandle(): Promise<FileSystemDirectoryHandle | null> {
+  initMediaCacheFromIndexedDb().catch(() => {});
   if (activeDirectoryHandle) return activeDirectoryHandle;
 
   try {
@@ -305,6 +351,17 @@ export async function listSkuImagesFromDirectory(
             mediaUrlCache.set(name, objUrl);
             mediaUrlCache.set(`images/${name}`, objUrl);
             mediaUrlCache.set(name.toLowerCase(), objUrl);
+
+            // Persistance dans IndexedDB 'media_cache' pour rechargements ultérieurs instantanés
+            if (file.size < 15 * 1024 * 1024) {
+              idbPut("media_cache", {
+                path: relativePath,
+                name: name,
+                blob: file,
+                size: file.size,
+                updatedAt: Date.now()
+              }).catch(() => {});
+            }
           } catch (e) {
             console.warn(`[WebFS] Impossible de créer l'URL pour ${name}:`, e);
           }
@@ -512,20 +569,40 @@ export async function resolveMediaUrl(
   const cached = getCachedMediaUrl(relativePath);
   if (cached) return cached;
 
+  let cleanRel = relativePath.replace(/\\/g, "/");
+  // Si le chemin commence par un préfixe de dossier réseau, extraire à partir de images/ ou documents/
+  const markers = ["images/", "documents/", "logos/"];
+  for (const marker of markers) {
+    const idx = cleanRel.indexOf(marker);
+    if (idx !== -1) {
+      cleanRel = cleanRel.substring(idx);
+      break;
+    }
+  }
+
+  const cachedClean = getCachedMediaUrl(cleanRel);
+  if (cachedClean) return cachedClean;
+
+  // Tenter de restaurer depuis le cache persistant IndexedDB (fonctionne même sans reconnecter le dossier)
+  try {
+    const entry = await idbGet<{ path: string; name?: string; blob: Blob }>("media_cache", cleanRel);
+    if (entry && entry.blob) {
+      const objUrl = URL.createObjectURL(entry.blob);
+      mediaUrlCache.set(cleanRel, objUrl);
+      mediaUrlCache.set(relativePath, objUrl);
+      const fn = entry.name || cleanRel.split("/").pop();
+      if (fn) {
+        mediaUrlCache.set(fn, objUrl);
+        mediaUrlCache.set(`images/${fn}`, objUrl);
+        mediaUrlCache.set(fn.toLowerCase(), objUrl);
+      }
+      return objUrl;
+    }
+  } catch {}
+
   if (!dirHandle) return "";
 
   try {
-    let cleanRel = relativePath.replace(/\\/g, "/");
-    // Si le chemin commence par un préfixe de dossier réseau, extraire à partir de images/ ou documents/
-    const markers = ["images/", "documents/", "logos/"];
-    for (const marker of markers) {
-      const idx = cleanRel.indexOf(marker);
-      if (idx !== -1) {
-        cleanRel = cleanRel.substring(idx);
-        break;
-      }
-    }
-
     const parts = cleanRel.split("/").filter(Boolean);
     let currentDir = dirHandle;
     const isImageExt = Boolean(cleanRel.match(/\.(jpg|jpeg|png|webp|svg|gif|bmp)$/i));
@@ -621,6 +698,18 @@ export async function resolveMediaUrl(
     mediaUrlCache.set(fileName, url);
     mediaUrlCache.set(fileHandle.name, url);
     mediaUrlCache.set(`images/${fileName}`, url);
+
+    // Persistance dans IndexedDB 'media_cache' pour rechargements instantanés
+    if (blob.size < 15 * 1024 * 1024) {
+      idbPut("media_cache", {
+        path: cleanRel,
+        name: fileHandle.name,
+        blob: blob,
+        size: blob.size,
+        updatedAt: Date.now()
+      }).catch((err) => console.warn("[WebFS] Erreur mise en cache IDB:", err));
+    }
+
     return url;
   } catch (e) {
     return "";

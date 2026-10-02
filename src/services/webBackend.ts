@@ -16,7 +16,11 @@ import {
   getSubdirectoryHandle,
   setCachedMediaUrl,
   sanitizeFolderName,
+  initMediaCacheFromIndexedDb,
 } from "./webFileSystem";
+
+// Démarrage immédiat de l'hydratation du cache médias en arrière-plan
+initMediaCacheFromIndexedDb().catch(() => {});
 
 async function getNestedDirectory(
   root: FileSystemDirectoryHandle,
@@ -205,8 +209,6 @@ export class WebBackend {
             const newMinStock = Number(payload.minStock ?? payload.min_stock ?? 0);
             const newPrice = Number(payload.price || 0);
             const newPackSize = Number(payload.packSize ?? payload.pack_size ?? 1);
-            const newImgPath = (payload.imagePath || payload.image_path || "").trim();
-            const newPdfPath = (payload.pdfPath || payload.pdf_path || "").trim();
 
             const diffs: [string, string, string][] = [
               ["Désignation", existing.label || "", newLabel],
@@ -219,8 +221,6 @@ export class WebBackend {
               ["Seuil d'alerte", String(existing.min_stock ?? 0), String(newMinStock)],
               ["Prix", Number(existing.price || 0).toFixed(2), newPrice.toFixed(2)],
               ["Taille lot", String(existing.pack_size ?? 1), String(newPackSize)],
-              ["Image principale", existing.image_path || "", newImgPath],
-              ["Notice principale", existing.pdf_path || "", newPdfPath],
             ];
 
             for (const [fieldName, oldVal, newVal] of diffs) {
@@ -246,11 +246,6 @@ export class WebBackend {
               ["profondeur", "Profondeur"],
               ["poids", "Poids"],
               ["notes", "Notes"],
-              ["scrape_image_urls", "Images"],
-              ["scrape_image_url", "URL image"],
-              ["scrape_doc_url", "URL document"],
-              ["scrape_price_url", "URL source prix"],
-              ["scrape_pdf_urls", "Documents"],
             ];
 
             for (const [key, displayName] of attrFields) {
@@ -301,8 +296,11 @@ export class WebBackend {
       case "get_product_audit_log": {
         const sku = (args.sku || "").toUpperCase();
         const items = await idbGetByIndex<AuditLogItem>("audit_log", "sku", sku);
-        items.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-        return items;
+        const filtered = items.filter(
+          item => !(item.action === "UPDATE" && ["Images", "Documents", "URL document", "URL image", "URL source prix", "Notice principale", "Image principale"].includes(item.field || ""))
+        );
+        filtered.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+        return filtered;
       }
 
       // ==================== TABLEAU DE BORD & STATS ====================
@@ -328,8 +326,11 @@ export class WebBackend {
           }
         }
 
+        const filteredAudits = allAudits.filter(
+          item => !(item.action === "UPDATE" && ["Images", "Documents", "URL document", "URL image", "URL source prix", "Notice principale", "Image principale"].includes(item.field || ""))
+        );
         allHistory.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-        allAudits.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+        filteredAudits.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
         const stats: DashboardStats = {
           total_references: products.length,
@@ -337,7 +338,7 @@ export class WebBackend {
           low_stock_count: lowStockCount,
           out_of_stock_count: outOfStockCount,
           recent_movements: allHistory.slice(0, 20),
-          recent_audits: allAudits.slice(0, 20),
+          recent_audits: filteredAudits.slice(0, 20),
         };
         return stats;
       }

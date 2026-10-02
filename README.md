@@ -1,4 +1,4 @@
-# 📈 StockFlow (v1.4.4)
+# 📈 StockFlow (v1.5.4)
 
 **StockFlow** est un outil intelligent de gestion d'inventaire industriel conçu pour fonctionner simplement dans les environnements d'entreprise sous Windows.
 
@@ -9,11 +9,12 @@ L'application est **100% portable** (elle ne nécessite aucune installation ni a
 ## 🚀 Prise en Main Rapide
 
 ### 1. Téléchargement et Lancement
-1. Rendez-vous dans la section **Releases** de ce dépôt et téléchargez la version la plus récente de `StockFlow.exe`.
-2. Lancez le fichier `StockFlow.exe` par double-clic.
+Deux formats de livrables sont disponibles dans la section **Releases** :
+- **Exécutable Bureau Windows (`StockFlow.exe`)** : Lancez simplement par double-clic (aucun prérequis).
+- **Application Web Autonome (`StockFlow.html`)** : Fichier HTML unique prêt à l'emploi directement ouvrable dans Microsoft Edge ou Google Chrome, sans installation, exploitant l'API standard *File System Access* et *IndexedDB*.
 
 > [!TIP]
-> **Éviter le blocage Windows SmartScreen :** 
+> **Éviter le blocage Windows SmartScreen (pour le `.exe`) :** 
 > Comme l'exécutable n'est pas signé numériquement, Windows peut afficher une alerte de sécurité. Pour l'éviter, déposez le fichier `StockFlow.exe` **directement sur votre lecteur réseau partagé** et lancez-le depuis ce lecteur. Sinon, faites un clic droit sur le fichier local -> **Propriétés** -> cochez la case **"Débloquer"** en bas de la fenêtre -> **Appliquer**.
 
 ### 2. Configuration Initiale (Premier Lancement)

@@ -5,6 +5,32 @@ Ne pas oublier de le remplir pendant le developpement.
 
 ---
 
+## [1.5.4] - 2026-10-02
+
+### Cache Persistant des Médias, Survol 0 ms, Vignettes BOM & Ergonomie
+- **Cache Persistant des Images Navigateur (IndexedDB `media_cache`) :**
+  - Sauvegarde automatique sous forme de `Blob` de toutes les images et documentations lues depuis le partage réseau dans le store IndexedDB `media_cache` (`webFileSystem.ts`).
+  - Fonction `initMediaCacheFromIndexedDb()` : réhydratation instantanée de l'ensemble des ObjectURLs en mémoire dès le démarrage ou le rafraîchissement (F5), éliminant toute latence de réinterrogation du disque.
+  - Résilience aux déconnexions : consultation immédiate des visuels même si la permission du dossier réseau est en attente ou momentanément hors-ligne.
+  - Gestion LRU automatique : maintien d'une limite raisonnable (500 médias récents) pour prévenir la saturation du stockage navigateur.
+- **Affichage Automatique des Vignettes dans les Nomenclatures (`BomTab.tsx`) :**
+  - Création du composant dédié `<BomThumbnailCell>` : résolution asynchrone autonome dès le montage de la table de nomenclature. Les images apparaissent désormais instantanément et automatiquement sans obliger l'utilisateur à survoler chaque ligne une par une.
+  - Recherche intelligente de repli sur l'image associée au SKU (`images/{sku}_1.jpg`) si aucun `image_path` explicite n'est renseigné.
+  - Préchargement proactif par lots (`preloadMediaBatch`) déclenché à l'ouverture d'une nomenclature et lors de l'affichage de l'aperçu PDF atelier.
+- **Survol d'Image Ultra-Fluide à 0 ms de Latence (Décodage Bitmap GPU/RAM) :**
+  - Utilisation de `img.decode()` (`preloadImage` dans `api.ts`) pour décoder le bitmap en mémoire vive avant l'interaction utilisateur.
+  - Préchargement silencieux en arrière-plan des 60 premiers articles affichés dans la table d'inventaire (`App.tsx`).
+  - Cache mémoire SKU (`skuImageMemoryCache`) pour supprimer les rescans répétitifs de dossier réseau lors des déplacements de la souris sur le tableau.
+- **Ergonomie des Sélecteurs de Familles et Sous-familles :**
+  - Intégration de listes de suggestions interactives `<datalist>` avec auto-complétion fluide, hauteur de ligne optimisée, police harmonisée et défilement aisé.
+  - Résolution du problème de persistance du paramètre « Fallback WEB » (qui ne se re-coche plus intempestivement lors des sauvegardes).
+- **Visibilité et Contraste des Ascenseurs de Défilement (Scrollbars) :**
+  - Refonte stylistique des ascenseurs dans `App.css` avec contraste accentué, bordures subtiles et état de survol dynamique pour les thèmes clair et sombre (adieu l'effet noir sur noir ou blanc sur blanc).
+- **Rationalisation du Journal des Modifications (Audit Log) :**
+  - Élimination des écritures redondantes lors de l'ajout ou de l'import de notices et d'illustrations sur les équipements : seuls les diffs pertinents sont consignés.
+
+---
+
 ## [1.5.2] - 2026-10-02
 
 ### Exhaustivité & Parité Totale de l'Historique des Modifications (Audit Log)

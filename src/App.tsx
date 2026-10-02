@@ -1,12 +1,12 @@
 import BomTab from "./BomTab";
 import { useState, useEffect, useRef, useMemo } from "react";
-import { invoke, convertFileSrc, openPath, listen, isTauri } from "./services/api";
+import { invoke, convertFileSrc, openPath, listen, isTauri, resolveMediaSrc, preloadImage, preloadMediaBatch } from "./services/api";
 import logoImg from "./assets/logo.png";
 import { AutoFillModal, type AutoFillSelections } from "./ScrapeComponents";
 import { ProductForm } from "./ProductForm";
 import { ProductDetailPanel } from "./ProductDetailPanel";
 import { getBookmarkletHref, listenForSupplierHandoff } from "./services/webScraperAssistant";
-import { getCachedMediaUrl } from "./services/webFileSystem";
+import { getCachedMediaUrl, initMediaCacheFromIndexedDb } from "./services/webFileSystem";
 import { APP_VERSION } from "./version";
 import { stripTrailingPunctuation } from "./services/webScraperService";
 import { createProductSearchMatcher } from "./utils/searchUtils";
@@ -726,6 +726,10 @@ function App() {
 
   // States for transient scraping launch (zone unifiée)
   const [scrapeZoneLoading, setScrapeZoneLoading] = useState(false);
+  const [scrapeAllowFallback, setScrapeAllowFallback] = useState<boolean>(() => {
+    return config?.enable_scrape_fallback !== false;
+  });
+
 
 
   // ─── Unified scraping launcher ────────────────────────────────────────────────
@@ -1586,6 +1590,7 @@ function App() {
           // En mode Web : charger immédiatement les produits depuis IndexedDB (cache local)
           // pour un affichage instantané, AVANT la synchronisation réseau
           if (!isTauri()) {
+            initMediaCacheFromIndexedDb().catch(() => {});
             try {
               const cachedProducts: Product[] = await invoke("get_products");
               if (cachedProducts && cachedProducts.length > 0) {
@@ -2951,6 +2956,9 @@ function App() {
     }
   };
 
+  // Cache mémoire des images associées par SKU pour éviter de relister le répertoire à chaque survol
+  const skuImageMemoryCache = useRef<Map<string, string>>(new Map());
+
   // Hover Thumbnail handler
   async function handleImageHover(
     e: React.MouseEvent,
@@ -3012,12 +3020,19 @@ function App() {
 
     // Si toujours rien et qu'on a le SKU, vérifier dans les images associées au SKU (images/{sku}_1.jpg)
     if (!imgPath && prodObj?.sku) {
-      try {
-        const skuImgs: string[] = await invoke("list_sku_images", { networkPath: config?.network_path, sku: prodObj.sku });
-        if (skuImgs && skuImgs.length > 0) {
-          imgPath = skuImgs[0];
-        }
-      } catch {}
+      if (skuImageMemoryCache.current.has(prodObj.sku)) {
+        imgPath = skuImageMemoryCache.current.get(prodObj.sku) || null;
+      } else {
+        try {
+          const skuImgs: string[] = await invoke("list_sku_images", { networkPath: config?.network_path, sku: prodObj.sku });
+          if (skuImgs && skuImgs.length > 0) {
+            imgPath = skuImgs[0];
+            skuImageMemoryCache.current.set(prodObj.sku, imgPath);
+          } else {
+            skuImageMemoryCache.current.set(prodObj.sku, "");
+          }
+        } catch {}
+      }
     }
 
     if (!imgPath || !imgPath.trim()) {
@@ -3027,6 +3042,7 @@ function App() {
 
     // 1. Si c'est déjà une URL web / blob / data directe
     if (imgPath.startsWith("http://") || imgPath.startsWith("https://") || imgPath.startsWith("blob:") || imgPath.startsWith("data:")) {
+      preloadImage(imgPath);
       setHoveredImage(imgPath);
       return;
     }
@@ -3034,23 +3050,27 @@ function App() {
     // 2. En mode Desktop (Tauri)
     if (isTauri()) {
       const fullPath = config?.network_path ? `${config.network_path}/${imgPath}` : imgPath;
-      setHoveredImage(convertFileSrc(fullPath));
+      const src = convertFileSrc(fullPath);
+      preloadImage(src);
+      setHoveredImage(src);
       return;
     }
 
-    // 3. En mode Web pur : vérifier le cache ObjectURL
+    // 3. En mode Web pur : vérifier le cache ObjectURL synchrone
     const cached = getCachedMediaUrl(imgPath);
     if (cached) {
+      preloadImage(cached);
       setHoveredImage(cached);
       return;
     }
 
-    // 4. En mode Web pur non mis en cache : résoudre via le dossier réseau (FileSystemDirectoryHandle)
+    // 4. En mode Web pur non mis en cache : résoudre de façon asynchrone (IDB puis FS)
     const seq = ++hoverSeqRef.current;
     try {
-      const resolved = await invoke<string>("resolve_media", { path: imgPath });
+      const resolved = await resolveMediaSrc(imgPath, config?.network_path);
       if (seq === hoverSeqRef.current) {
         if (resolved && (resolved.startsWith("blob:") || resolved.startsWith("http"))) {
+          preloadImage(resolved);
           setHoveredImage(resolved);
         } else {
           setHoveredImage(null);
@@ -3095,6 +3115,22 @@ function App() {
     // 2. Recherche tolérante multi-champs avec classement par pertinence
     return productSearchMatcher.filterAndSort(categoryFiltered);
   }, [products, categoryFilter, subCategoryFilter, stockFilter, productSearchMatcher]);
+
+  // Préchargement proactif en arrière-plan des images des produits visibles (table inventaire)
+  // pour un affichage au survol à 0ms de latence et sans scintillement
+  useEffect(() => {
+    if (!filteredProducts || filteredProducts.length === 0) return;
+    const slice = filteredProducts.slice(0, 60);
+    const timer = setTimeout(() => {
+      preloadMediaBatch(
+        slice.map(p => ({ imagePath: p.image_path, sku: p.sku })),
+        config?.network_path,
+        4
+      ).catch(() => {});
+    }, 350);
+
+    return () => clearTimeout(timer);
+  }, [filteredProducts, config?.network_path]);
 
   // Unique Categories for filters
   const categories = ["all", ...Array.from(new Set(products.map(p => p.category).filter(Boolean)))];
@@ -3940,10 +3976,14 @@ function App() {
                 <div style={{ flex: "1 1 400px", minWidth: 0 }}>
                   <h3 style={{ fontFamily: "var(--font-title)", marginBottom: "1rem" }}>Dernières Modifications de Références</h3>
                   <div className="history-list" style={{ maxHeight: "400px" }}>
-                    {stats.recent_audits.length === 0 ? (
-                      <div style={{ padding: "1.5rem", color: "var(--text-muted)" }}>Aucune modification enregistrée.</div>
-                    ) : (
-                      stats.recent_audits.map((item, i) => {
+                    {(() => {
+                      const displayAudits = stats.recent_audits.filter(
+                        item => !(item.action === "UPDATE" && ["Images", "Documents", "URL document", "URL image", "URL source prix", "Notice principale", "Image principale"].includes(item.field || ""))
+                      );
+                      if (displayAudits.length === 0) {
+                        return <div style={{ padding: "1.5rem", color: "var(--text-muted)" }}>Aucune modification enregistrée.</div>;
+                      }
+                      return displayAudits.map((item, i) => {
                         const date = new Date(item.timestamp);
                         const dateStr = date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "2-digit" });
                         const timeStr = date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
@@ -4066,8 +4106,8 @@ function App() {
                             </div>
                           </div>
                         );
-                      })
-                    )}
+                      });
+                    })()}
                   </div>
                 </div>
               </div>
@@ -5292,6 +5332,10 @@ function App() {
             setAutoFillFallbackInfo(null);
             setAutoFillChanges(null);
           }}
+          categoryOptions={uniqueCategories}
+          subCategoryOptions={addModalSubCategories}
+          brandOptions={uniqueBrands}
+          locationOptions={uniqueLocations}
           autofillType={autofillType}
           setAutofillType={setAutofillType}
           autofillCodeInput={autofillCodeInput}
@@ -5302,6 +5346,8 @@ function App() {
           autoFillSource={autoFillSource}
           autoFillFallbackInfo={autoFillFallbackInfo}
           autoFillChanges={autoFillChanges}
+          scrapeAllowFallback={scrapeAllowFallback}
+          onScrapeAllowFallbackChange={setScrapeAllowFallback}
           successMessage={createSuccess}
           errorMessage={createError}
           duplicateWarning={duplicateWarning}
@@ -5327,6 +5373,10 @@ function App() {
             setAutoFillSource(null);
             setAutoFillChanges(null);
           }}
+          categoryOptions={uniqueCategories}
+          subCategoryOptions={editModalSubCategories}
+          brandOptions={uniqueBrands}
+          locationOptions={uniqueLocations}
           autofillType={autofillType}
           setAutofillType={setAutofillType}
           autofillCodeInput={autofillCodeInput}
@@ -5337,6 +5387,8 @@ function App() {
           autoFillSource={autoFillSource}
           autoFillFallbackInfo={autoFillFallbackInfo}
           autoFillChanges={autoFillChanges}
+          scrapeAllowFallback={scrapeAllowFallback}
+          onScrapeAllowFallbackChange={setScrapeAllowFallback}
           successMessage={editSuccess}
           errorMessage={editError}
           globalScrape={globalScrape}

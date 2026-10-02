@@ -265,8 +265,6 @@ fn create_product(
                     ("Seuil d'alerte", format!("{}", old.min_stock), format!("{}", min_stock)),
                     ("Prix", format!("{:.2}", old.price), format!("{:.2}", price)),
                     ("Taille lot", format!("{}", old.pack_size), format!("{}", pack_size)),
-                    ("Image principale", old.image_path.clone().unwrap_or_default(), image_path.clone().unwrap_or_default()),
-                    ("Notice principale", old.pdf_path.clone().unwrap_or_default(), pdf_path.clone().unwrap_or_default()),
                 ];
 
                 for (field_name, old_val, new_val) in diffs {
@@ -291,7 +289,7 @@ fn create_product(
                     );
                 }
 
-                // Comparer les dimensions, poids, notes et URLs dans les attributs
+                // Comparer les dimensions, poids et notes dans les attributs
                 if let Ok(old_attrs) = serde_json::from_str::<serde_json::Value>(&old.attributes) {
                     let fields_to_check: Vec<(&str, &str)> = vec![
                         ("largeur", "Largeur"),
@@ -299,11 +297,6 @@ fn create_product(
                         ("profondeur", "Profondeur"),
                         ("poids", "Poids"),
                         ("notes", "Notes"),
-                        ("scrape_image_urls", "Images"),
-                        ("scrape_image_url", "URL image"),
-                        ("scrape_doc_url", "URL document"),
-                        ("scrape_price_url", "URL source prix"),
-                        ("scrape_pdf_urls", "Documents"),
                     ];
                     for (key, display_name) in fields_to_check {
                         let old_val = old_attrs.get(key).map(|v| match v {
@@ -809,6 +802,7 @@ fn get_dashboard_stats() -> Result<serde_json::Value, String> {
     let mut audit_stmt = conn.prepare(
         "SELECT sku, timestamp, trigramme, action, field, old_value, new_value, source_url 
          FROM product_audit_log 
+         WHERE NOT (action = 'UPDATE' AND field IN ('Images', 'Documents', 'URL document', 'URL image', 'URL source prix', 'Notice principale', 'Image principale'))
          ORDER BY timestamp DESC LIMIT 100"
     ).map_err(|e| e.to_string())?;
 

@@ -336,6 +336,7 @@ pub fn get_audit_log(conn: &Connection, sku: &str) -> Result<Vec<AuditLogItem>> 
         "SELECT audit_id, timestamp, trigramme, action, field, old_value, new_value, source_url
          FROM product_audit_log
          WHERE sku = ?
+           AND NOT (action = 'UPDATE' AND field IN ('Images', 'Documents', 'URL document', 'URL image', 'URL source prix', 'Notice principale', 'Image principale'))
          ORDER BY timestamp DESC",
     )?;
 
